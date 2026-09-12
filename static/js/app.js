@@ -621,7 +621,10 @@ async function fetchStats() {
             return;
         }
         
-        if (!response.ok) throw new Error("Network response was not ok");
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errText}`);
+        }
         
         const data = await response.json();
         
@@ -699,11 +702,19 @@ async function fetchStats() {
             <div class="col-12">
                 <div class="alert alert-danger text-center glass-card py-4" role="alert">
                     <i class="bi bi-wifi-off fs-1 d-block mb-2"></i>
-                    <h4 class="alert-heading fw-bold">Lost Connection to Rig Server</h4>
-                    <p class="mb-0 small">The Local Dashboard cannot reach the backend web API. Ensure the Python server is running on port 1337.</p>
+                    <h4 class="alert-heading fw-bold">Failed to Load GPU Stats</h4>
+                    <p class="mb-0 small">${error.message}</p>
                 </div>
             </div>
         `;
+        
+        // Also update stat boxes to show error
+        document.querySelectorAll('.stat-value').forEach(el => {
+            if (el.textContent === 'Loading...') {
+                el.textContent = 'Error';
+                el.className = 'stat-value text-danger';
+            }
+        });
     }
 }
 
