@@ -1258,7 +1258,7 @@ def service_control():
 @app.route('/api/update/check', methods=['GET'])
 def check_update():
     try:
-        url = "https://raw.githubusercontent.com/y3tiCrypto/hiveos-local/main/version.txt"
+        url = "https://raw.githubusercontent.com/h1w0rld/hiveos-local/main/version.txt"
         req = urllib.request.Request(url, headers={'User-Agent': 'HiveOS-Local-Dashboard'})
         with urllib.request.urlopen(req, timeout=5) as response:
             remote_ver = response.read().decode('utf-8').strip()
