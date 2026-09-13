@@ -26,7 +26,7 @@ AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 
 # Local Dashboard Release Version
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
@@ -363,6 +363,19 @@ def run_command(cmd):
     except Exception as e:
         return "", str(e), -1
 
+# Safe numeric parsers for nvidia-smi output ([N/A] or empty values are treated as 0)
+def safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
+
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
 # GPU metrics parser
 def get_gpu_stats():
     gpus = []
@@ -374,19 +387,19 @@ def get_gpu_stats():
             for line in lines:
                 parts = [p.strip() for p in line.split(',')]
                 if len(parts) >= 9:
-                    idx = int(parts[0])
+                    idx = safe_int(parts[0], 0)
                     gpus.append({
                         "id": f"NV_{idx}",
                         "index": idx,
                         "brand": "NVIDIA",
                         "model": parts[1],
-                        "temp": int(parts[2]),
-                        "fan": int(parts[3]) if parts[3] != '[N/A]' else 0,
-                        "power": float(parts[4]),
-                        "power_limit": float(parts[8]),
-                        "utilization": int(parts[5]),
-                        "core_clock": int(parts[6]),
-                        "mem_clock": int(parts[7]),
+                        "temp": safe_int(parts[2]),
+                        "fan": safe_int(parts[3]),
+                        "power": safe_float(parts[4]),
+                        "power_limit": safe_float(parts[8]),
+                        "utilization": safe_int(parts[5]),
+                        "core_clock": safe_int(parts[6]),
+                        "mem_clock": safe_int(parts[7]),
                         "hashrate": 0.0
                     })
 
