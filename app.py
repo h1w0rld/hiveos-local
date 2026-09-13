@@ -351,7 +351,26 @@ def get_system_stats():
     stats["active_miner"] = rig_conf.get("MINER", "None")
 
     wallet_conf = parse_shell_config(WALLET_CONF_PATH)
-    stats["coin"] = wallet_conf.get("COIN", "None")
+    coin = wallet_conf.get("COIN", "")
+    if not coin:
+        # Cloud-managed flight sheets store the coin inside the META JSON
+        # (e.g. META='{"fs_id":22415703,"rigel":{"coin":"QUAI"}}')
+        try:
+            meta = json.loads(wallet_conf.get("META", ""))
+            if isinstance(meta, dict):
+                miner_name = str(stats.get("active_miner") or "").strip().lower()
+                blocks = []
+                if miner_name and isinstance(meta.get(miner_name), dict):
+                    blocks.append(meta[miner_name])
+                blocks.extend(v for v in meta.values() if isinstance(v, dict) and v not in blocks)
+                for block in blocks:
+                    candidate = str(block.get("coin") or "").strip()
+                    if candidate and candidate.lower() != "none":
+                        coin = candidate
+                        break
+        except Exception:
+            pass
+    stats["coin"] = coin or "None"
 
     if IS_LINUX:
         try:
@@ -650,6 +669,11 @@ def _extract_api_hashrate(data):
             per_gpu[idx] = _parse_hashrate_str(val)
     return total, per_gpu
 
+def is_miner_screen_running():
+    """True when a HiveOS miner screen session (N.miner) is alive."""
+    _, _, code = run_command("screen -ls 2>/dev/null | grep -qE '[0-9]+\\.miner'")
+    return code == 0
+
 def get_miner_hashrate():
     """Returns (total_mh, per_gpu dict) from local miner stats API, log fallback."""
     total_mh = 0.0
@@ -667,7 +691,11 @@ def get_miner_hashrate():
         except Exception:
             continue
 
-    # 2. Fallback: parse rigel-style miner log
+    # 2. Fallback: parse rigel-style miner log. Only valid while the miner screen is alive,
+    #    otherwise stale log entries keep reporting hashrate after the miner stops.
+    if not is_miner_screen_running():
+        return 0.0, {}
+
     miner_name = parse_shell_config(RIG_CONF_PATH).get("MINER", "").strip().lower()
     if miner_name and miner_name != "none":
         allowed_base = os.path.abspath("/var/log/miner")
@@ -948,15 +976,32 @@ def miner_control():
     elif action == "stop":
         stdout, stderr, code = run_command("sudo /hive/bin/miner stop")
     elif action == "restart":
-        stdout, stderr, code = run_command("sudo /hive/bin/miner stop && sudo /hive/bin/miner start")
-        
+        # Use the built-in hive restart (handles stop + start safely, even when miner is stopped)
+        stdout, stderr, code = run_command("sudo /hive/bin/miner restart")
+
+    output = f"{stdout}\n{stderr}".strip()
+
+    # The hive miner script reports state via text, not exit codes:
+    # - "miner start" exits 0 even when the screen is already running
+    # - "miner stop" exits 1 when no screens exist (which simply means miner is stopped)
+    if action == "start" and "already running" in output:
+        logging.info("Miner start skipped: screen session is already running")
+        return jsonify({"success": True, "message": "Miner is already running (screen session active)."})
+    if action == "stop" and "No miner screens found" in output:
+        logging.info("Miner stop skipped: no miner screens are running")
+        return jsonify({"success": True, "message": "Miner is already stopped (no running screens)."})
+    if "Maintenance mode enabled" in output:
+        logging.warning("Miner control blocked: maintenance mode is enabled")
+        return jsonify({"success": False, "message": "Maintenance mode is enabled. Disable it in HiveOS to control the miner."}), 409
+
     if code == 0:
         msg = f"Miner successfully {action}ed!"
         logging.info(msg)
         return jsonify({"success": True, "message": msg})
     else:
-        logging.error(f"Miner control command failed: {stderr}")
-        return jsonify({"success": False, "message": "Miner command failed to execute."}), 500
+        logging.error(f"Miner control command failed: {output}")
+        detail = output.splitlines()[-1] if output else "Unknown error"
+        return jsonify({"success": False, "message": f"Miner command failed: {detail}"}), 500
 
 # 1. System Power Routes (Reboot / Shutdown)
 @app.route('/api/system/reboot', methods=['POST'])

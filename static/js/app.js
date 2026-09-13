@@ -67,7 +67,7 @@ function updateHardwareStatBoxes(data) {
         speedEl.textContent = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' KH/s' : cpuHash.toFixed(0) + ' H/s';
     } else {
         const totalHashrate = data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
-        gpuCountEl.textContent = data.gpus.length + ' Cards';
+        gpuCountEl.textContent = data.gpus.length + ' GPU';
         speedEl.textContent = totalHashrate.toFixed(2) + ' MH/s';
     }
 }
