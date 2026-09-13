@@ -379,7 +379,6 @@ def run_ssh_command(access, remote_cmd, timeout=35, stdin_data=None):
             return False, "", err
         run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": timeout}
         if stdin_data is not None:
-            run_kwargs["stdin"] = subprocess.PIPE
             run_kwargs["input"] = stdin_data
         else:
             run_kwargs["stdin"] = subprocess.DEVNULL
