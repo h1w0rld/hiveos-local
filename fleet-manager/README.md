@@ -1,6 +1,9 @@
-# HiveOS Fleet Manager (Experimental)
+# HiveOS Fleet Manager (Deprecated)
 
 > [!WARNING]
+> **DEPRECATED**: Since hiveos-local v1.2.0, the built-in Cluster Mode replaces the Fleet Manager. Every rig now ships with its own cluster sync, SSH accesses and full remote management — no separate Docker deployment is required. This code is kept for reference only and receives no further updates. Use **Cluster / SSH Accesses** in the rig dashboard instead.
+
+> [!CAUTION]
 > **EXPERIMENTAL RELEASE**: The Fleet Manager utility is currently in an experimental phase. It is built strictly for private local segments (LAN) or secure, encrypted VPN networks (e.g., WireGuard). Do not expose port `8080` to the public internet without proper proxy authentication and firewall boundaries.
 
 Fleet Manager is a centralized monitoring and control dashboard built to aggregate metrics and controls across your entire mining fleet running standard `hiveos-local` emergency local dashboard nodes.

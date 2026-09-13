@@ -138,13 +138,15 @@ Since v1.2.0 every rig ships with a built-in cluster, no extra Docker container 
 
 ### How the cluster syncs
 
-Each rig runs a background worker that, for every known peer, pulls the peer's rig list, pushes its own merged list back (newer `updated_at` wins), and refreshes a stats cache. This means a rig added on any node propagates to the whole farm within one sync cycle. The cache also keeps the last known stats of offline rigs visible on the Cluster page.
+Each rig runs a background worker that, for every known peer, pulls the peer's rig list, pushes its own merged list back (newer `updated_at` wins), and refreshes a stats cache. This means a rig added on any node propagates to the whole farm within one sync cycle. Deletions propagate too: a removed rig is recorded as a deletion marker (tombstone) that tells peers to drop the entry on their next sync instead of pushing it back. The cache also keeps the last known stats of offline rigs visible on the Cluster page.
 
 Requirements on every rig: `curl` (present on HiveOS by default) and `sshpass` for password-based accesses (installed by `install.sh`, or auto-installed on demand).
 
 ---
 
-## Centralized Monitoring (Fleet Manager)
+## Centralized Monitoring (Fleet Manager) — Deprecated
+
+> ⚠️ **Deprecated since v1.2.0**: the built-in Cluster Mode (see above) replaces the Fleet Manager. Use the rig dashboard's **Cluster** and **SSH Accesses** pages instead. The `fleet-manager/` code is kept for reference only.
 
 The codebase includes **Fleet Manager**, a centralized monitoring server designed to run inside a Docker container.
 It allows you to:

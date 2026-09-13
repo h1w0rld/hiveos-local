@@ -116,14 +116,15 @@ def load_cluster_state():
         "cluster_name": "",
         "self_id": "",
         "sync_interval": DEFAULT_SYNC_INTERVAL,
-        "rigs": []
+        "rigs": [],
+        "removed": []
     }
     try:
         if os.path.exists(CLUSTER_CONF):
             with open(CLUSTER_CONF, 'r') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                for k in ("cluster_name", "self_id", "sync_interval", "rigs"):
+                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed"):
                     if k in data:
                         state[k] = data[k]
     except Exception as e:
@@ -135,6 +136,9 @@ def load_cluster_state():
     if not any(r.get("id") == state["self_id"] for r in rigs):
         rigs.insert(0, make_self_rig_entry(state))
     state["rigs"] = rigs
+    # Deletion tombstones: entries removed on any node, kept so deletes propagate
+    state["removed"] = [t for t in state.get("removed", [])
+                        if isinstance(t, dict) and t.get("id")]
     if not os.path.exists(CLUSTER_CONF):
         save_cluster_state(state)
     try:
@@ -175,8 +179,56 @@ def clean_rig_entry(entry):
         clean["accesses"] = [clean_access_entry(a) for a in accesses if isinstance(a, dict)]
     return clean
 
-def merge_rig_lists(base_rigs, incoming_rigs):
-    """Merge rig entries by id; the entry with the newer updated_at wins."""
+# Deletion tombstones older than this are dropped (a peer offline longer than
+# TTL may resurrect a deleted rig and must be cleaned up manually)
+TOMBSTONE_TTL = 30 * 24 * 3600
+
+def _norm_tombstone(t):
+    """Normalize a tombstone entry; returns None for invalid payloads."""
+    if not isinstance(t, dict) or not t.get("id"):
+        return None
+    try:
+        ts = int(t.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    return {"id": str(t["id"]), "updated_at": ts}
+
+def _merge_tombstones(base_removed, incoming_removed):
+    by_id = {}
+    for t in list(base_removed or []) + list(incoming_removed or []):
+        norm = _norm_tombstone(t)
+        if norm is None:
+            continue
+        cur = by_id.get(norm["id"])
+        if cur is None or norm["updated_at"] >= cur["updated_at"]:
+            by_id[norm["id"]] = norm
+    return list(by_id.values())
+
+def _prune_tombstones(removed, now=None):
+    now = int(now or time.time())
+    kept = []
+    for t in removed:
+        if now - int(t.get("updated_at") or 0) < TOMBSTONE_TTL:
+            kept.append(t)
+        else:
+            logging.info(f"Cluster merge: expired deletion tombstone for rig {t.get('id')}")
+    return kept
+
+def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_removed=None):
+    """Merge rig entries by id; the entry with the newer updated_at wins.
+
+    Deletion tombstones (from `removed` lists exchanged by peers) suppress rig
+    entries deleted on any node, so removals propagate instead of resurrecting.
+    Returns (rigs, removed)."""
+    removed = _merge_tombstones(base_removed, incoming_removed)
+    tomb = {t["id"]: t["updated_at"] for t in removed}
+
+    def _ts(entry):
+        try:
+            return int(entry.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     by_id = {}
     for r in base_rigs:
         if isinstance(r, dict) and r.get("id"):
@@ -186,6 +238,12 @@ def merge_rig_lists(base_rigs, incoming_rigs):
             continue
         clean = clean_rig_entry(inc)
         rid = clean["id"]
+        if rid in tomb and _ts(clean) <= tomb[rid]:
+            # This entry was deleted on a peer after its last edit
+            if rid in by_id:
+                logging.info(f"Cluster merge: rig '{by_id[rid].get('name', rid)}' removed by cluster deletion")
+                del by_id[rid]
+            continue
         existing = by_id.get(rid)
         if existing is None:
             clean.setdefault("updated_at", 0)
@@ -193,16 +251,19 @@ def merge_rig_lists(base_rigs, incoming_rigs):
             by_id[rid] = clean
             logging.info(f"Cluster merge: discovered new rig '{clean.get('name', rid)}'")
         else:
-            try:
-                inc_ts = int(clean.get("updated_at") or 0)
-                cur_ts = int(existing.get("updated_at") or 0)
-            except (TypeError, ValueError):
-                inc_ts, cur_ts = 0, 0
-            if inc_ts > cur_ts:
+            if _ts(clean) > _ts(existing):
                 # Preserve the locally-resolved is_self flag; adopt newer remote edits
                 clean["is_self"] = existing.get("is_self", False)
                 by_id[rid] = clean
-    return list(by_id.values())
+    # Locally known rigs deleted on a peer disappear as well
+    for rid in list(by_id):
+        if rid in tomb and _ts(by_id[rid]) <= tomb[rid]:
+            logging.info(f"Cluster merge: rig '{by_id[rid].get('name', rid)}' removed by cluster deletion")
+            del by_id[rid]
+        elif rid in tomb:
+            # Rig was edited/re-added after the deletion - the tombstone loses
+            removed = [t for t in removed if t["id"] != rid]
+    return list(by_id.values()), _prune_tombstones(removed)
 
 # ---------------- SSH transport for cluster communication ----------------
 
@@ -552,10 +613,12 @@ def run_sync_cycle(triggered_by="auto"):
             rig_id = rig["id"]
             entry = cache["rigs"].get(rig_id, {})
 
-            # 1. Pull the peer's cluster state and merge (learns about new rigs)
+            # 1. Pull the peer's cluster state and merge (learns about new rigs and deletions)
             ok, data, _, err, _ = cluster_remote_api(rig, "GET", "api/cluster/state", timeout=45)
             if ok and isinstance(data, dict) and isinstance(data.get("rigs"), list):
-                state["rigs"] = merge_rig_lists(state["rigs"], data["rigs"])
+                state["rigs"], state["removed"] = merge_rig_lists(
+                    state["rigs"], data["rigs"],
+                    base_removed=state.get("removed"), incoming_removed=data.get("removed"))
                 if data.get("cluster_name") and not state.get("cluster_name"):
                     state["cluster_name"] = data["cluster_name"]
                 entry["online"] = True
@@ -564,11 +627,12 @@ def run_sync_cycle(triggered_by="auto"):
                 entry["online"] = False
                 entry["error"] = err
 
-            # 2. Push our merged state back to the peer (propagates new rigs/passwords)
+            # 2. Push our merged state back to the peer (propagates new rigs/passwords/deletions)
             push_ok, _, _, push_err, _ = cluster_remote_api(
                 rig, "POST", "api/cluster/sync",
                 body={"cluster_name": state.get("cluster_name", ""),
-                      "rigs": state["rigs"], "from_id": state["self_id"]},
+                      "rigs": state["rigs"], "removed": state.get("removed", []),
+                      "from_id": state["self_id"]},
                 timeout=45)
             if not push_ok and not entry.get("online"):
                 entry["error"] = push_err
@@ -2327,11 +2391,21 @@ def api_cluster_rig_delete():
     rig_id = str(data.get("id", "")).strip()
     if rig_id == state["self_id"]:
         return jsonify({"success": False, "message": "Cannot remove the local rig from the cluster."}), 400
-    before = len(state["rigs"])
-    state["rigs"] = [r for r in state["rigs"] if r.get("id") != rig_id]
-    if len(state["rigs"]) == before:
+    rig = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
+    if rig is None:
         return jsonify({"success": False, "message": "Rig not found."}), 404
+    state["rigs"] = [r for r in state["rigs"] if r.get("id") != rig_id]
+    # Tombstone the deletion so peers drop the rig on the next sync instead of pushing it back
+    removed = [t for t in state.get("removed", []) if t.get("id") != rig_id]
+    try:
+        rig_ts = int(rig.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        rig_ts = 0
+    removed.append({"id": rig_id, "name": rig.get("name", rig_id),
+                    "updated_at": max(rig_ts, int(time.time()))})
+    state["removed"] = removed
     if save_cluster_state(state):
+        logging.info(f"Cluster rig '{rig.get('name', rig_id)}' removed by IP: {request.remote_addr}")
         return jsonify({"success": True, "message": "Rig removed from the cluster."})
     return jsonify({"success": False, "message": "Failed to update cluster configuration."}), 500
 
@@ -2474,7 +2548,8 @@ def api_cluster_state():
         "cluster_name": state.get("cluster_name", ""),
         "self_id": state["self_id"],
         "sync_interval": state.get("sync_interval", DEFAULT_SYNC_INTERVAL),
-        "rigs": state["rigs"]
+        "rigs": state["rigs"],
+        "removed": state.get("removed", [])
     })
 
 @app.route('/api/cluster/sync', methods=['POST'])
@@ -2484,7 +2559,10 @@ def api_cluster_sync_push():
         return jsonify({"success": False, "message": "Invalid sync payload"}), 400
     state = load_cluster_state()
     _CURRENT_SELF_ID["value"] = state["self_id"]
-    state["rigs"] = merge_rig_lists(state["rigs"], data["rigs"])
+    state["rigs"], state["removed"] = merge_rig_lists(
+        state["rigs"], data["rigs"],
+        base_removed=state.get("removed"),
+        incoming_removed=data.get("removed"))
     if data.get("cluster_name") and not state.get("cluster_name"):
         state["cluster_name"] = str(data["cluster_name"])
     saved = save_cluster_state(state)
