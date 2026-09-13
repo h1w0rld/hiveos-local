@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import socket
 import subprocess
 import platform
@@ -14,6 +15,8 @@ from flask import Flask, jsonify, request, render_template, session
 app = Flask(__name__)
 # Secure randomly-generated key for session management
 app.secret_key = os.urandom(24)
+# Never cache static assets: guarantees JS/CSS updates are picked up on reload
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 # Constants and Configuration Paths
 HIVE_CONFIG_DIR = "/hive-config"
@@ -26,7 +29,7 @@ AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 
 # Local Dashboard Release Version
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
@@ -405,6 +408,7 @@ def safe_float(value, default=0.0):
 # GPU metrics parser
 def get_gpu_stats():
     gpus = []
+    igpus = []  # Integrated graphics (CPU iGPU), shown in separate tab
     
     if HAS_HIVEOS or IS_LINUX:
         stdout, stderr, code = run_command("nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,power.draw,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.limit --format=csv,noheader,nounits")
@@ -507,8 +511,6 @@ def get_gpu_stats():
                 else:
                     continue
 
-                # Skip Intel integrated graphics (CPU iGPU): only discrete Arc
-                # cards carry device ids 0x56xx (Alchemist) or 0xE2xx (Battlemage)
                 device_path = f"/sys/class/drm/{card}/device/device"
                 dev_id = ""
                 if os.path.exists(device_path):
@@ -517,14 +519,16 @@ def get_gpu_stats():
                             dev_id = f.read().strip().lower()
                     except Exception:
                         dev_id = ""
-                if not dev_id.startswith(("0x56", "0xe2")):
-                    continue
-                    
+
+                # Discrete Arc cards carry device ids 0x56xx (Alchemist) or
+                # 0xE2xx (Battlemage); anything else is CPU integrated graphics
+                is_arc = dev_id.startswith(("0x56", "0xe2"))
+                
                 hwmon_path = f"/sys/class/drm/{card}/device/hwmon"
                 temp = 0
                 fan = 0
                 power = 0.0
-                model = "Intel Arc GPU"
+                model = "Intel Arc GPU" if is_arc else "Intel Integrated Graphics"
                 
                 if os.path.exists(hwmon_path):
                     try:
@@ -545,18 +549,17 @@ def get_gpu_stats():
                                     power = round(float(f.read().strip()) / 1000000.0, 1)
                     except Exception as e:
                         logging.debug(f"Failed to read Intel sysfs hwmon stats: {e}")
-                            
-                device_path = f"/sys/class/drm/{card}/device/device"
+                        
                 if os.path.exists(device_path):
                     try:
                         with open(device_path, 'r') as f:
-                            dev_id = f.read().strip()
-                        model = f"Intel Arc GPU ({dev_id})"
+                            dev_id_full = f.read().strip()
+                        model = f"{'Intel Arc GPU' if is_arc else 'Intel Integrated Graphics'} ({dev_id_full})"
                     except Exception:
                         pass
 
-                gpus.append({
-                    "id": f"INTEL_{intel_idx}",
+                entry = {
+                    "id": f"{'INTEL_' if is_arc else 'IGPU_'}{intel_idx}",
                     "index": intel_idx,
                     "brand": "INTEL",
                     "model": model,
@@ -568,10 +571,116 @@ def get_gpu_stats():
                     "core_clock": 0,
                     "mem_clock": 0,
                     "hashrate": 0.0
-                })
+                }
+                if is_arc:
+                    gpus.append(entry)
+                else:
+                    igpus.append(entry)
                 intel_idx += 1
 
-    return gpus
+    return {"gpus": gpus, "igpus": igpus}
+
+# ---- Miner hashrate resolution (fills GPU cards + Total Speed) ----
+_HASHRATE_UNITS = {"KH": 1e-3, "MH": 1.0, "GH": 1e3}
+
+def _parse_hashrate_str(text):
+    match = re.search(r'([0-9.]+)\s*(KH|MH|GH)', str(text))
+    if match:
+        return float(match.group(1)) * _HASHRATE_UNITS[match.group(2)]
+    return 0.0
+
+def _to_mh(value):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    # Miner APIs report raw H/s (tens of millions); values already in MH/s pass through
+    if v > 1_000_000:
+        return v / 1_000_000.0
+    return v
+
+def _extract_api_hashrate(data):
+    """Supports rigel / t-rex / gminer local JSON stats formats."""
+    total = 0.0
+    per_gpu = {}
+    if not isinstance(data, dict):
+        return total, per_gpu
+
+    # rigel: {"miners":[{"hashrate": H/s, "gpus":[{"id":0,"hashrate":H/s}]}]}
+    miners = data.get("miners")
+    if isinstance(miners, list) and miners:
+        m = miners[0]
+        total = _to_mh(m.get("hashrate"))
+        for g in m.get("gpus") or []:
+            if isinstance(g, dict):
+                idx = safe_int(g.get("id", g.get("gpu_id", -1)), -1)
+                if idx >= 0:
+                    per_gpu[idx] = _to_mh(g.get("hashrate"))
+        return total, per_gpu
+
+    # t-rex: {"hashrate": H/s, "gpus":[{"gpu_id":0,"hashrate":H/s}]}
+    if "hashrate" in data and "gpus" in data:
+        total = _to_mh(data.get("hashrate"))
+        for g in data.get("gpus") or []:
+            if isinstance(g, dict):
+                idx = safe_int(g.get("gpu_id", g.get("id", -1)), -1)
+                if idx >= 0:
+                    per_gpu[idx] = _to_mh(g.get("hashrate"))
+        return total, per_gpu
+
+    # gminer: {"miner":{"total_speed":["44.5 MH"]},"per_device":["11.1 MH",...]}
+    miner_block = data.get("miner")
+    if isinstance(miner_block, dict):
+        ts = miner_block.get("total_speed") or []
+        if isinstance(ts, list) and ts:
+            total = _parse_hashrate_str(ts[0])
+        for idx, val in enumerate(data.get("per_device") or []):
+            per_gpu[idx] = _parse_hashrate_str(val)
+    return total, per_gpu
+
+def get_miner_hashrate():
+    """Returns (total_mh, per_gpu dict) from local miner stats API, log fallback."""
+    total_mh = 0.0
+    per_gpu = {}
+
+    # 1. Miner HTTP stats APIs (rigel 4068, t-rex/lolminer 4028)
+    for port in (4068, 4028):
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = json.loads(resp.read().decode(errors="ignore"))
+            total_mh, per_gpu = _extract_api_hashrate(data)
+            if total_mh > 0 or per_gpu:
+                return total_mh, per_gpu
+        except Exception:
+            continue
+
+    # 2. Fallback: parse rigel-style miner log
+    miner_name = parse_shell_config(RIG_CONF_PATH).get("MINER", "").strip().lower()
+    if miner_name and miner_name != "none":
+        allowed_base = os.path.abspath("/var/log/miner")
+        for fname in (f"{miner_name}.log", "lastrun_noappend.log", "lastrun.log"):
+            path = os.path.abspath(os.path.join(allowed_base, miner_name, fname))
+            if not path.startswith(allowed_base + os.sep) or not os.path.exists(path):
+                continue
+            try:
+                with open(path, 'r', errors='ignore') as f:
+                    tail = f.readlines()[-60:]
+                for line in reversed(tail):
+                    m = re.search(r'Total speed:\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    if m and total_mh <= 0:
+                        total_mh = float(m.group(1)) * _HASHRATE_UNITS[m.group(2)]
+                    g = re.search(r'GPU(\d+):\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    if g:
+                        idx = int(g.group(1))
+                        if idx not in per_gpu:
+                            per_gpu[idx] = float(g.group(2)) * _HASHRATE_UNITS[g.group(3)]
+                if total_mh > 0 or per_gpu:
+                    break
+            except Exception:
+                continue
+
+    return total_mh, per_gpu
 
 # Read configs formatted
 def get_overclocks_formatted():
@@ -1366,16 +1475,22 @@ def pull_update():
 
 @app.route('/api/stats')
 def api_stats():
+    hw = get_gpu_stats()
+    total_mh, per_gpu = get_miner_hashrate()
+    for g in hw["gpus"]:
+        g["hashrate"] = round(per_gpu.get(g["index"], 0.0), 2)
     return jsonify({
         "system": get_system_stats(),
-        "gpus": get_gpu_stats(),
+        "gpus": hw["gpus"],
+        "igpus": hw["igpus"],
+        "total_hashrate_mh": round(total_mh, 2),
         "overclocks": get_overclocks_formatted(),
         "csrf_token": session.get('csrf_token', '')
     })
 
 @app.route('/')
 def dashboard():
-    return render_template('index.html')
+    return render_template('index.html', app_version=VERSION)
 
 if __name__ == '__main__':
     # 2. Strict Platform Locks

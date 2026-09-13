@@ -16,7 +16,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
     
     <!-- Custom Premium Styles -->
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ app_version }}">
 </head>
 <body>
     <!-- Theme Toggle -->
@@ -197,11 +197,21 @@
 
         <!-- GPU Monitor Grid -->
         <section class="mb-4">
-            <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <h2 class="h4 fw-bold mb-0">Graphics Processing Units (GPUs)</h2>
-                <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                    <i class="bi bi-arrow-clockwise"></i> Refresh Stats
-                </button>
+                <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
+                        <button id="showGpusBtn" type="button" class="btn btn-primary active">
+                            <i class="bi bi-gpu-card me-1"></i> GPUs
+                        </button>
+                        <button id="showIgpusBtn" type="button" class="btn btn-outline-primary">
+                            <i class="bi bi-motherboard me-1"></i> CPU iGPU
+                        </button>
+                    </div>
+                    <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Stats
+                    </button>
+                </div>
             </div>
             
             <div id="gpuContainer" class="row g-4">
@@ -211,6 +221,16 @@
                         <span class="visually-hidden">Loading GPU Stats...</span>
                     </div>
                     <p class="mt-2 text-muted">Reading local GPU hardware configuration...</p>
+                </div>
+            </div>
+
+            <!-- Integrated GPU (CPU graphics) tab content -->
+            <div id="igpuContainer" class="row g-4 d-none">
+                <div class="col-12 text-center py-5">
+                    <div class="spinner-border text-info" role="status">
+                        <span class="visually-hidden">Loading iGPU Stats...</span>
+                    </div>
+                    <p class="mt-2 text-muted">Reading integrated GPU configuration...</p>
                 </div>
             </div>
         </section>
@@ -798,6 +818,6 @@
     <!-- Bootstrap 5 JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <!-- Custom Application Logic -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v={{ app_version }}"></script>
 </body>
 </html>

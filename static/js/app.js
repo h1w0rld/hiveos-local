@@ -2,6 +2,48 @@
 let activeOverclocks = {};
 let csrfToken = '';
 
+// Self-healing CSRF: if any POST fails with 403 (stale token after
+// server restart or page reload), refresh the token and retry once
+const _originalFetch = window.fetch;
+window.fetch = async function(url, options = {}) {
+    let response = await _originalFetch(url, options);
+    const isApiPost = typeof url === 'string' && url.startsWith('/api/') && (options.method || 'GET').toUpperCase() === 'POST';
+    if (response.status === 403 && isApiPost) {
+        try {
+            const statsRes = await _originalFetch('/api/stats');
+            if (statsRes.ok) {
+                const statsData = await statsRes.json();
+                if (statsData.csrf_token) {
+                    csrfToken = statsData.csrf_token;
+                    options.headers = Object.assign({}, options.headers, { 'X-CSRF-Token': csrfToken });
+                    response = await _originalFetch(url, options);
+                }
+            }
+        } catch (e) {
+            console.error('CSRF token refresh failed:', e);
+        }
+    }
+    return response;
+};
+
+// Toggle between discrete GPU cards and CPU integrated graphics tab
+function switchHardwareTab(showGpus) {
+    const gpuContainer = document.getElementById('gpuContainer');
+    const igpuContainer = document.getElementById('igpuContainer');
+    const gpusBtn = document.getElementById('showGpusBtn');
+    const igpusBtn = document.getElementById('showIgpusBtn');
+    
+    gpuContainer.classList.toggle('d-none', !showGpus);
+    igpuContainer.classList.toggle('d-none', showGpus);
+    
+    gpusBtn.classList.toggle('btn-primary', showGpus);
+    gpusBtn.classList.toggle('btn-outline-primary', !showGpus);
+    gpusBtn.classList.toggle('active', showGpus);
+    igpusBtn.classList.toggle('btn-primary', !showGpus);
+    igpusBtn.classList.toggle('btn-outline-primary', showGpus);
+    igpusBtn.classList.toggle('active', !showGpus);
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // 1. Theme Toggle Logic
     const htmlElement = document.documentElement;
@@ -206,6 +248,10 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 800);
         });
     });
+
+    // Hardware view switch: discrete GPUs vs CPU integrated graphics
+    document.getElementById('showGpusBtn').addEventListener('click', () => switchHardwareTab(true));
+    document.getElementById('showIgpusBtn').addEventListener('click', () => switchHardwareTab(false));
 
     // 5. Form Submit Handlers for Overclocking
     document.getElementById('nvOcForm').addEventListener('submit', function(e) {
@@ -698,8 +744,9 @@ async function fetchStats() {
         const formattedHash = hashrate > 1000 ? (hashrate / 1000).toFixed(2) + ' KH/s' : hashrate.toFixed(0) + ' H/s';
         document.getElementById('cpuHashrateBadge').textContent = formattedHash;
 
-        // Render GPU cards
+        // Render GPU cards + integrated graphics tab
         renderGpus(data.gpus);
+        renderIgpus(data.igpus || []);
         
     } catch (error) {
         console.error("Error fetching stats:", error);
@@ -816,9 +863,70 @@ function renderGpus(gpus) {
     });
 }
 
+// Render CPU integrated graphics cards (separate tab)
+function renderIgpus(igpus) {
+    const container = document.getElementById('igpuContainer');
+    container.innerHTML = '';
+    
+    if (!igpus || igpus.length === 0) {
+        container.innerHTML = `
+            <div class="col-12 text-center py-4">
+                <p class="text-muted">No integrated graphics detected on this system.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    igpus.forEach(igpu => {
+        const tempClass = igpu.temp > 85 ? 'danger' : (igpu.temp > 70 ? 'warning' : 'success');
+        
+        const cardCol = document.createElement('div');
+        cardCol.className = 'col-md-6 col-lg-4';
+        
+        cardCol.innerHTML = `
+            <div class="card glass-card h-100">
+                <div class="card-body">
+                    <div class="gpu-header d-flex justify-content-between align-items-center mb-3">
+                        <span class="small fw-semibold text-muted">iGPU ${igpu.index}</span>
+                        <span class="badge bg-accent-glow text-info fw-bold">Integrated</span>
+                    </div>
+                    
+                    <h3 class="h5 fw-bold mb-1">${igpu.model}</h3>
+                    <p class="small text-muted mb-3">
+                        <span class="brand-${igpu.brand.toLowerCase()}">${igpu.brand}</span> • Built into processor, not used for mining
+                    </p>
+                    
+                    <div class="metric-row">
+                        <div class="metric-label">
+                            <span>Temperature</span>
+                            <span class="metric-value">${igpu.temp}°C</span>
+                        </div>
+                        <div class="progress bg-black bg-opacity-20" style="height: 8px;">
+                            <div class="progress-bar progress-bar-glow-${tempClass === 'danger' ? 'red' : (tempClass === 'success' ? 'green' : 'primary')}" 
+                                 role="progressbar" style="width: ${igpu.temp}%" aria-valuenow="${igpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                    </div>
+
+                    <div class="row g-2 mt-2 pt-2 border-top border-secondary-subtle text-center">
+                        <div class="col-6">
+                            <div class="small text-muted">Fan</div>
+                            <div class="fw-semibold small">${igpu.fan}%</div>
+                        </div>
+                        <div class="col-6">
+                            <div class="small text-muted">Power</div>
+                            <div class="fw-semibold small text-danger-emphasis">${igpu.power}W</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(cardCol);
+    });
+}
+
 // Prefill and open the correct modal for the selected GPU
-window.openOcModal = function(brand, index) {
-    const placeholders = document.querySelectorAll('.gpu-index-placeholder');
+window.openOcModal = function(brand, index) {    const placeholders = document.querySelectorAll('.gpu-index-placeholder');
     placeholders.forEach(el => el.textContent = index);
     
     const inputs = document.querySelectorAll('.gpu-index-input');
