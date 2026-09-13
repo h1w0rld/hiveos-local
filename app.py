@@ -404,7 +404,7 @@ def build_curl_command(method, path, has_body, password):
     parts = ["curl", "-s", "-m", "25",
              "-X", method,
              "-H", shlex.quote("Authorization: Bearer " + str(password)),
-             "-H", "Content-Type: application/json",
+             "-H", shlex.quote("Content-Type: application/json"),
              "-w", shlex.quote("\n__HC:%{http_code}")]
     if has_body:
         parts.append("--data-binary @-")
