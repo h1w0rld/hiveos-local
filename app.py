@@ -325,6 +325,7 @@ _SSH_BASE_OPTS = ["-o", "StrictHostKeyChecking=no",
 def build_ssh_command(access, remote_cmd, tmp_files):
     """Build a safe argv list for ssh (direct connection or via jump server)."""
     args = []
+    proxy_arg = None
     # Jump server hop via ProxyCommand
     if access.get("type") == "jump":
         jopts = " ".join(["-o StrictHostKeyChecking=no",
@@ -344,7 +345,7 @@ def build_ssh_command(access, remote_cmd, tmp_files):
             prefix, int(access.get("jump_port", 22)), jopts,
             shlex.quote(str(access.get("jump_user", ""))),
             shlex.quote(str(access.get("jump_host", ""))))
-        args += ["-o", "ProxyCommand=" + proxy]
+        proxy_arg = "ProxyCommand=" + proxy
 
     if access.get("auth") == "password":
         if not ensure_sshpass():
@@ -362,6 +363,8 @@ def build_ssh_command(access, remote_cmd, tmp_files):
             args += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
 
     args += _SSH_BASE_OPTS
+    if proxy_arg:
+        args += ["-o", proxy_arg]
     args += ["-p", str(access.get("port", 22)),
              "%s@%s" % (access.get("user", ""), access.get("host", "")),
              remote_cmd]
