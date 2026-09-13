@@ -28,8 +28,25 @@ PIN_PATH = os.path.join(HIVE_CONFIG_DIR, "dashboard.key")
 AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 
-# Local Dashboard Release Version
-VERSION = "1.1.0"
+# Local Dashboard Release Version (kept in sync with version.txt used for update checks)
+def _load_version():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.txt")) as f:
+            v = f.read().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return "1.1.2"
+
+VERSION = _load_version()
+
+# systemd/sudo environments lack /hive/bin, so miner screen children (miner-run) can not be
+# executed. Force an explicit PATH when invoking the hive miner wrapper.
+HIVE_MINER_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/hive/bin"
+MINER_START_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner start"
+MINER_STOP_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner stop"
+MINER_RESTART_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner restart"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
@@ -370,7 +387,9 @@ def get_system_stats():
                         break
         except Exception:
             pass
-    stats["coin"] = coin or "None"
+    stats["miner_running"] = is_miner_screen_running()
+    # "Mined Crypto" reflects the currently mined coin: hide it when the miner is stopped
+    stats["coin"] = (coin or "None") if stats["miner_running"] else "None"
 
     if IS_LINUX:
         try:
@@ -972,12 +991,12 @@ def miner_control():
     logging.info(f"Miner control request: '{action}' received from IP: {request.remote_addr}")
     
     if action == "start":
-        stdout, stderr, code = run_command("sudo /hive/bin/miner start")
+        stdout, stderr, code = run_command(MINER_START_CMD)
     elif action == "stop":
-        stdout, stderr, code = run_command("sudo /hive/bin/miner stop")
+        stdout, stderr, code = run_command(MINER_STOP_CMD)
     elif action == "restart":
         # Use the built-in hive restart (handles stop + start safely, even when miner is stopped)
-        stdout, stderr, code = run_command("sudo /hive/bin/miner restart")
+        stdout, stderr, code = run_command(MINER_RESTART_CMD)
 
     output = f"{stdout}\n{stderr}".strip()
 
@@ -1240,7 +1259,7 @@ def apply_preset():
                     write_shell_config(RIG_CONF_PATH, rig_conf)
                     
         logging.info(f"Preset '{name}' applied successfully by IP: {request.remote_addr}. Restarting miner...")
-        run_command("sudo /hive/bin/miner stop && sudo /hive/bin/miner start")
+        run_command(MINER_RESTART_CMD)
         return jsonify({"success": True, "message": f"Preset '{name}' applied successfully! Miner restarting..."})
     except Exception as e:
         logging.error(f"Failed to apply preset '{name}': {e}")
@@ -1399,7 +1418,7 @@ def handle_flightsheet():
     logging.info(f"Emergency Local Flight Sheet updated by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
     
     # Restart miner to apply settings on the fly
-    run_command("sudo /hive/bin/miner stop && sudo /hive/bin/miner start")
+    run_command(MINER_RESTART_CMD)
     return jsonify({"success": True, "message": "Flight sheet saved successfully! Miner daemon restarting..."})
 
 @app.route('/api/overclock/reset', methods=['POST'])
