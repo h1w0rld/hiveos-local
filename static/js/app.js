@@ -636,6 +636,11 @@ async function fetchStats() {
             loadTuningSettings();
         }
         
+        // Keep CSRF token fresh (survives page reloads while session is alive)
+        if (data.csrf_token) {
+            csrfToken = data.csrf_token;
+        }
+        
         // Save OC data globally to prefill forms
         activeOverclocks = data.overclocks;
         

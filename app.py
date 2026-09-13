@@ -26,7 +26,7 @@ AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 
 # Local Dashboard Release Version
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
@@ -293,6 +293,32 @@ def get_xmrig_hashrate():
             pass
     return 0.0
 
+# Resolve Hive OS client version (package version first, then /etc/hiveos-release)
+def get_hive_version():
+    stdout, _, code = run_command("dpkg -l hive 2>/dev/null | awk '/^ii/{print $3}'")
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    try:
+        with open('/etc/hiveos-release', 'r') as f:
+            release = parse_kv(f.read())
+        codename = release.get('CODENAME')
+        build_date = release.get('BUILD_DATE')
+        if codename:
+            return f"{codename} ({build_date})" if build_date else codename
+    except Exception:
+        pass
+    return "Not Found"
+
+def parse_kv(text):
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        result[key.strip()] = val.strip().strip('"').strip("'")
+    return result
+
 # System stats query
 def get_system_stats():
     stats = {
@@ -318,7 +344,7 @@ def get_system_stats():
     rig_conf = parse_shell_config(RIG_CONF_PATH)
     stats["rig_id"] = rig_conf.get("RIG_ID", "Not Found")
     stats["farm_hash"] = rig_conf.get("FARM_HASH", "Not Found")
-    stats["hive_version"] = rig_conf.get("HIVE_VERSION", "Not Found")
+    stats["hive_version"] = get_hive_version() if IS_LINUX else rig_conf.get("HIVE_VERSION", "Not Found")
     stats["active_miner"] = rig_conf.get("MINER", "None")
 
     wallet_conf = parse_shell_config(WALLET_CONF_PATH)
@@ -480,6 +506,19 @@ def get_gpu_stats():
                         continue
                 else:
                     continue
+
+                # Skip Intel integrated graphics (CPU iGPU): only discrete Arc
+                # cards carry device ids 0x56xx (Alchemist) or 0xE2xx (Battlemage)
+                device_path = f"/sys/class/drm/{card}/device/device"
+                dev_id = ""
+                if os.path.exists(device_path):
+                    try:
+                        with open(device_path, 'r') as f:
+                            dev_id = f.read().strip().lower()
+                    except Exception:
+                        dev_id = ""
+                if not dev_id.startswith(("0x56", "0xe2")):
+                    continue
                     
                 hwmon_path = f"/sys/class/drm/{card}/device/hwmon"
                 temp = 0
@@ -515,7 +554,7 @@ def get_gpu_stats():
                         model = f"Intel Arc GPU ({dev_id})"
                     except Exception:
                         pass
-                        
+
                 gpus.append({
                     "id": f"INTEL_{intel_idx}",
                     "index": intel_idx,
@@ -1330,7 +1369,8 @@ def api_stats():
     return jsonify({
         "system": get_system_stats(),
         "gpus": get_gpu_stats(),
-        "overclocks": get_overclocks_formatted()
+        "overclocks": get_overclocks_formatted(),
+        "csrf_token": session.get('csrf_token', '')
     })
 
 @app.route('/')
