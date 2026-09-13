@@ -337,7 +337,7 @@ def build_ssh_command(access, remote_cmd, tmp_files):
                 return None, ("sshpass is not installed on this rig. Run "
                               "'sudo apt-get install -y sshpass' or use SSH key authentication.")
             jpw_file = _write_temp_password(access.get("jump_password", ""), tmp_files)
-            prefix = "sshpass -f %s" % shlex.quote(jpw_file)
+            prefix = "sshpass -f %s ssh" % shlex.quote(jpw_file)
         else:
             jkey = str(access.get("jump_key_path", "")).strip()
             prefix = ("ssh -i %s -o IdentitiesOnly=yes" % shlex.quote(jkey)) if jkey else "ssh"
@@ -577,7 +577,7 @@ def _cluster_sync_worker():
     while True:
         interval = DEFAULT_SYNC_INTERVAL
         try:
-            state = load_cluster()
+            state = load_cluster_state()
             try:
                 interval = max(15, int(state.get("sync_interval", DEFAULT_SYNC_INTERVAL)))
             except (TypeError, ValueError):
