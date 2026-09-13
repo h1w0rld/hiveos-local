@@ -429,7 +429,12 @@ def cluster_remote_api(rig, method, path, body=None, timeout=40):
     Returns (ok, parsed_json_or_None, http_code, error_message, access_name).
     """
     password = str(rig.get("password", ""))
-    raw = json.dumps(body).encode("utf-8") if body is not None else None
+    if body is None:
+        raw = None
+    elif isinstance(body, (bytes, bytearray)):
+        raw = bytes(body)
+    else:
+        raw = json.dumps(body).encode("utf-8")
     curl_cmd = build_curl_command(method.upper(), path, raw is not None, password)
     last_error = "No SSH accesses configured for this rig"
     for access in rig.get("accesses", []):
