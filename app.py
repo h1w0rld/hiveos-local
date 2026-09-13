@@ -3,6 +3,7 @@ import re
 import json
 import hmac
 import uuid
+import signal
 import shlex
 import socket
 import shutil
@@ -371,23 +372,40 @@ def build_ssh_command(access, remote_cmd, tmp_files):
     return args, None
 
 def run_ssh_command(access, remote_cmd, timeout=35, stdin_data=None):
-    """Execute a command on a remote rig over SSH. Returns (ok, output, error)."""
+    """Execute a command on a remote rig over SSH. Returns (ok, output, error).
+
+    Uses a dedicated process group so a timed-out ssh can be killed together with
+    its children (ProxyCommand jump processes) - otherwise they keep the pipes
+    open and a naive communicate() drain would block the calling thread forever.
+    """
     tmp_files = []
+    proc = None
     try:
         args, err = build_ssh_command(access, remote_cmd, tmp_files)
         if err:
             return False, "", err
-        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": timeout}
-        if stdin_data is not None:
-            run_kwargs["input"] = stdin_data
-        else:
-            run_kwargs["stdin"] = subprocess.DEVNULL
-        res = subprocess.run(args, **run_kwargs)
-        out = res.stdout.decode(errors="ignore")
-        errout = res.stderr.decode(errors="ignore")
-        if res.returncode != 0:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.PIPE, start_new_session=True)
+        try:
+            out_bytes, err_bytes = proc.communicate(input=stdin_data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                out_bytes, err_bytes = proc.communicate(timeout=5)
+            except Exception:
+                out_bytes, err_bytes = b"", b""
+            return False, "", "SSH connection timed out"
+        out = (out_bytes or b"").decode(errors="ignore")
+        errout = (err_bytes or b"").decode(errors="ignore")
+        if proc.returncode != 0:
             msg = (errout or out).strip()
-            detail = msg.splitlines()[-1] if msg else "exit code %d" % res.returncode
+            detail = msg.splitlines()[-1] if msg else "exit code %d" % proc.returncode
             return False, out, detail
         return True, out, ""
     except subprocess.TimeoutExpired:
@@ -2540,7 +2558,7 @@ if __name__ == '__main__':
     
     if USE_WAITRESS:
         logging.info(f"Starting Waitress production WSGI server on http://{local_ip}:{port}")
-        serve(app, host='0.0.0.0', port=port, threads=4)
+        serve(app, host='0.0.0.0', port=port, threads=8)
     else:
         logging.warning("Waitress package not found. Falling back to Flask built-in development server.")
         app.run(host='0.0.0.0', port=port, debug=False)
