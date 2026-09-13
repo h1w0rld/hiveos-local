@@ -5,6 +5,28 @@ let activeHardwareTab = 'gpus';
 let lastStatsData = null;
 let lastHugepagesEnabled = false;
 
+// ---- Cluster / remote rig state ----
+let currentRigId = 'self';
+let clusterData = null;          // last /api/cluster/rigs payload
+let activeView = 'cluster';      // cluster | accesses | dashboard
+let editingRigId = null;         // rig being edited in rigModal
+let editingAccess = null;        // {rigId, accessId} being edited in accessModal
+let clusterPollTimer = null;
+
+// Build the API path for the currently managed rig:
+// local rig -> direct /api/... ; remote rig -> /api/remote/<rigId>/api/...
+function apiPath(path) {
+    if (currentRigId === 'self' || !currentRigId) {
+        return path;
+    }
+    return '/api/remote/' + encodeURIComponent(currentRigId) + '/' + path.replace(/^\//, '');
+}
+
+// Route API calls through the SSH proxy when a remote rig is selected
+function apiFetch(path, options = {}) {
+    return fetch(apiPath(path), options);
+}
+
 // Self-healing CSRF: if any POST fails with 403 (stale token after
 // server restart or page reload), refresh the token and retry once
 const _originalFetch = window.fetch;
@@ -111,7 +133,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     loginForm.addEventListener('submit', async function(e) {
         e.preventDefault();
-        const pin = document.getElementById('loginPin').value.trim();
+        const password = document.getElementById('loginPassword').value.trim();
         
         const submitBtn = loginForm.querySelector('button[type="submit"]');
         submitBtn.disabled = true;
@@ -123,7 +145,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ pin: pin })
+                body: JSON.stringify({ password: password })
             });
             const data = await response.json();
             
@@ -134,9 +156,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 revertBtn.classList.remove('d-none');
                 showToast("Authorized successfully!", true);
                 fetchStats();
+                loadClusterData();
+                loadAccessList();
             } else {
                 loginError.classList.remove('d-none');
-                document.getElementById('loginPin').value = '';
+                document.getElementById('loginPassword').value = '';
             }
         } catch (error) {
             console.error("Authentication failed:", error);
@@ -158,7 +182,7 @@ document.addEventListener('DOMContentLoaded', function() {
         icon.className = 'bi bi-arrow-counterclockwise spin-animation';
         
         try {
-            const response = await fetch('/api/revert', {
+            const response = await apiFetch('/api/revert', {
                 method: 'POST',
                 headers: {
                     'X-CSRF-Token': csrfToken
@@ -192,7 +216,7 @@ document.addEventListener('DOMContentLoaded', function() {
         icon.className = 'bi bi-gear-fill spin-animation';
         
         try {
-            const response = await fetch('/api/hugepages', {
+            const response = await apiFetch('/api/hugepages', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -224,7 +248,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Sending...`;
         
         try {
-            const response = await fetch('/api/miner/control', {
+            const response = await apiFetch('/api/miner/control', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -290,7 +314,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Applying...`;
         
         try {
-            const response = await fetch('/api/hugepages', {
+            const response = await apiFetch('/api/hugepages', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -329,10 +353,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Apply update trigger
     const applyUpdateBtn = document.getElementById('applyUpdateBtn');
     applyUpdateBtn.addEventListener('click', async function() {
-        const pinInput = document.getElementById('updateVerificationPin');
-        const pin = pinInput.value.trim();
-        if (pin.length !== 6 || !/^\d+$/.test(pin)) {
-            showToast("Please enter a valid 6-digit confirmation PIN.", false);
+        const passwordInput = document.getElementById('updateVerificationPin');
+        const password = passwordInput.value.trim();
+        if (!password) {
+            showToast("Please enter your access password to confirm the update.", false);
             return;
         }
         
@@ -345,13 +369,13 @@ document.addEventListener('DOMContentLoaded', function() {
         overlay.classList.add('d-flex');
         
         try {
-            const response = await fetch('/api/update/pull', {
+            const response = await apiFetch('/api/update/pull', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRF-Token': csrfToken
                 },
-                body: JSON.stringify({ pin: pin })
+                body: JSON.stringify({ password: password })
             });
             const data = await response.json();
             if (response.ok && data.success) {
@@ -412,7 +436,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Resetting...`;
         
         try {
-            const res = await fetch('/api/overclock/reset', {
+            const res = await apiFetch('/api/overclock/reset', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -450,7 +474,7 @@ document.addEventListener('DOMContentLoaded', function() {
             this.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>`;
             
             try {
-                const res = await fetch('/api/services/control', {
+                const res = await apiFetch('/api/services/control', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -491,7 +515,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const miner = document.getElementById('fsMiner').value;
 
         try {
-            const response = await fetch('/api/flightsheet', {
+            const response = await apiFetch('/api/flightsheet', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -575,7 +599,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     async function fetchMinerLog() {
         try {
-            const response = await fetch('/api/miner/log');
+            const response = await apiFetch('/api/miner/log');
             if (response.status === 401) return;
             const data = await response.json();
             
@@ -604,7 +628,7 @@ document.addEventListener('DOMContentLoaded', function() {
         };
         
         try {
-            const response = await fetch('/api/watchdog', {
+            const response = await apiFetch('/api/watchdog', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -641,7 +665,7 @@ document.addEventListener('DOMContentLoaded', function() {
         };
         
         try {
-            const response = await fetch('/api/autofan', {
+            const response = await apiFetch('/api/autofan', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -671,7 +695,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.disabled = true;
         
         try {
-            const response = await fetch('/api/presets/save', {
+            const response = await apiFetch('/api/presets/save', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -693,7 +717,104 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.disabled = false;
         }
     });
+
+    // 6. Main view routing (Cluster / SSH Accesses / Rig Dashboard)
+    document.querySelectorAll('#mainNavTabs .nav-link').forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            showView(this.dataset.view);
+        });
+    });
+
+    document.getElementById('rigScopeBackBtn').addEventListener('click', () => {
+        switchRig('self');
+        showView('cluster');
+    });
+
+    // Change password modal
+    document.getElementById('changePasswordBtn').addEventListener('click', () => {
+        document.getElementById('currentPasswordInput').value = '';
+        document.getElementById('newPasswordInput').value = '';
+        document.getElementById('confirmPasswordInput').value = '';
+        new bootstrap.Modal(document.getElementById('passwordModal')).show();
+    });
+    document.getElementById('passwordSaveBtn').addEventListener('click', changePassword);
+
+    // Cluster page bindings
+    document.getElementById('syncNowBtn').addEventListener('click', syncNow);
+    document.getElementById('clusterNameSaveBtn').addEventListener('click', saveClusterSettings);
+    document.getElementById('addRigBtn').addEventListener('click', () => openRigModal(null));
+
+    // Access page bindings
+    document.getElementById('accessRefreshBtn').addEventListener('click', loadAccessList);
+    document.getElementById('addAccessBtn').addEventListener('click', () => openAccessModal(null, null));
+
+    // 7. Cluster polling (only while the cluster view is active)
+    setInterval(() => {
+        if (activeView === 'cluster') {
+            loadClusterData(true);
+        }
+    }, 5000);
+
+    // Initial view from URL hash
+    const initialView = (location.hash || '').replace('#', '');
+    showView(['cluster', 'accesses', 'dashboard'].includes(initialView) ? initialView : 'cluster');
 });
+
+// ---------------- View routing ----------------
+
+function showView(view) {
+    activeView = view;
+    document.getElementById('view-cluster').classList.toggle('d-none', view !== 'cluster');
+    document.getElementById('view-accesses').classList.toggle('d-none', view !== 'accesses');
+    document.getElementById('view-dashboard').classList.toggle('d-none', view !== 'dashboard');
+
+    document.querySelectorAll('#mainNavTabs .nav-link').forEach(l => {
+        l.classList.toggle('active', l.dataset.view === view);
+    });
+
+    location.hash = view;
+
+    if (view === 'cluster') {
+        loadClusterData();
+    } else if (view === 'accesses') {
+        loadAccessList();
+    } else if (view === 'dashboard') {
+        fetchStats();
+    }
+}
+
+// Switch the rig being managed in the dashboard view (self = local rig)
+function switchRig(rigId) {
+    if (rigId === currentRigId) return;
+    currentRigId = rigId;
+    activeOverclocks = {};
+    lastStatsData = null;
+    updateRigScopeUi();
+    fetchStats();
+    loadTuningSettings();
+    loadPresetsList();
+    loadFlightSheetSettings();
+    showToast('Switched to ' + (rigId === 'self' ? 'the local rig' : getRigName(rigId)), true);
+}
+
+function getRigName(rigId) {
+    if (clusterData && clusterData.rigs) {
+        const rig = clusterData.rigs.find(r => r.id === rigId);
+        if (rig) return rig.name;
+    }
+    return rigId === 'self' ? 'This rig' : rigId;
+}
+
+function updateRigScopeUi() {
+    const banner = document.getElementById('rigScopeBanner');
+    if (currentRigId === 'self') {
+        banner.classList.add('d-none');
+    } else {
+        document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
+        banner.classList.remove('d-none');
+    }
+}
 
 // Toast notification helper
 function showToast(message, isSuccess = true) {
@@ -719,7 +840,7 @@ function showToast(message, isSuccess = true) {
 // Fetch stats from backend API
 async function fetchStats() {
     try {
-        const response = await fetch('/api/stats');
+        const response = await apiFetch('/api/stats');
         
         // Handle 401 Unauthorized status
         if (response.status === 401) {
@@ -742,6 +863,8 @@ async function fetchStats() {
             document.getElementById('revertSettingsBtn').classList.remove('d-none');
             document.getElementById('emergencyResetClocksBtn').classList.remove('d-none');
             loadTuningSettings();
+            loadClusterData();
+            loadAccessList();
         }
         
         // Keep CSRF token fresh (survives page reloads while session is alive)
@@ -1102,7 +1225,7 @@ async function submitOverclock(formElement, modalId) {
     submitBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...`;
 
     try {
-        const response = await fetch('/api/overclock', {
+        const response = await apiFetch('/api/overclock', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1133,7 +1256,7 @@ async function submitOverclock(formElement, modalId) {
 // Check for updates on GitHub
 async function checkUpdate(isManual = false) {
     try {
-        const response = await fetch('/api/update/check');
+        const response = await apiFetch('/api/update/check');
         if (response.status === 401) {
             if (isManual) showToast("Unauthorized. Please authorize your session first.", false);
             return;
@@ -1165,7 +1288,7 @@ async function checkUpdate(isManual = false) {
 // Load tuning settings on authorization
 async function loadTuningSettings() {
     try {
-        const wdRes = await fetch('/api/watchdog');
+        const wdRes = await apiFetch('/api/watchdog');
         if (wdRes.ok) {
             const wdData = await wdRes.json();
             if (wdData.success) {
@@ -1174,7 +1297,7 @@ async function loadTuningSettings() {
             }
         }
         
-        const afRes = await fetch('/api/autofan');
+        const afRes = await apiFetch('/api/autofan');
         if (afRes.ok) {
             const afData = await afRes.json();
             if (afData.success) {
@@ -1199,7 +1322,7 @@ async function loadTuningSettings() {
 async function loadPresetsList() {
     const container = document.getElementById('presetsContainer');
     try {
-        const response = await fetch('/api/presets');
+        const response = await apiFetch('/api/presets');
         const data = await response.json();
         if (response.ok && data.success) {
             if (data.presets.length === 0) {
@@ -1252,7 +1375,7 @@ async function loadPresetsList() {
 
 async function applyPreset(name) {
     try {
-        const response = await fetch('/api/presets/apply', {
+        const response = await apiFetch('/api/presets/apply', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1274,7 +1397,7 @@ async function applyPreset(name) {
 
 async function deletePreset(name) {
     try {
-        const response = await fetch('/api/presets/delete', {
+        const response = await apiFetch('/api/presets/delete', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1296,7 +1419,7 @@ async function deletePreset(name) {
 
 async function loadFlightSheetSettings() {
     try {
-        const res = await fetch('/api/flightsheet');
+        const res = await apiFetch('/api/flightsheet');
         if (res.ok) {
             const data = await res.json();
             if (data && data.success) {
@@ -1328,7 +1451,7 @@ async function runDiagnostics() {
     document.getElementById('diagGpuLogs').textContent = 'Running system tests...';
 
     try {
-        const res = await fetch('/api/diagnostics');
+        const res = await apiFetch('/api/diagnostics');
         if (res.ok) {
             const data = await res.json();
             if (data.success) {
@@ -1356,4 +1479,642 @@ async function runDiagnostics() {
         runBtn.disabled = false;
         runBtn.innerHTML = origHTML;
     }
+}
+
+// ---------------- Cluster page ----------------
+
+async function loadClusterData(silent = false) {
+    if (!silent && !document.getElementById('clusterRigsContainer').dataset.loaded) {
+        document.getElementById('clusterRigsContainer').innerHTML =
+            '<div class="col-12 text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Loading cluster rigs...</p></div>';
+    }
+    try {
+        const response = await fetch('/api/cluster/rigs');
+        if (response.status === 401) {
+            document.getElementById('loginOverlay').classList.remove('d-none');
+            return;
+        }
+        const data = await response.json();
+        if (response.ok && data.success) {
+            clusterData = data;
+            renderCluster();
+            // Keep sshpass availability warning on the accesses page up to date
+            document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
+        }
+    } catch (error) {
+        if (!silent) {
+            document.getElementById('clusterRigsContainer').innerHTML =
+                '<div class="col-12"><div class="alert alert-danger text-center glass-card py-4"><i class="bi bi-wifi-off fs-1 d-block mb-2"></i><h4 class="alert-heading fw-bold">Failed to Load Cluster</h4><p class="mb-0 small">' + (error.message || '') + '</p></div></div>';
+        }
+    }
+}
+
+function renderCluster() {
+    if (!clusterData || !clusterData.rigs) return;
+    const container = document.getElementById('clusterRigsContainer');
+    container.dataset.loaded = '1';
+
+    // Cluster settings
+    document.getElementById('clusterNameBadge').textContent = clusterData.cluster_name || '';
+    document.getElementById('clusterNameBadge').classList.toggle('d-none', !clusterData.cluster_name);
+    const nameInput = document.getElementById('clusterNameInput');
+    if (document.activeElement !== nameInput) {
+        nameInput.value = clusterData.cluster_name || '';
+    }
+    document.getElementById('clusterSyncStatus').textContent = clusterData.last_sync_message || '';
+
+    const online = clusterData.rigs.filter(r => r.online).length;
+    document.getElementById('clusterOnline').textContent = online + ' / ' + clusterData.rigs.length;
+
+    if (clusterData.last_sync > 0) {
+        const ago = Math.max(0, Math.round((Date.now() / 1000) - clusterData.last_sync));
+        document.getElementById('clusterLastSync').textContent = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
+        document.getElementById('clusterLastSync').className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
+    }
+
+    // Farm-wide totals (GPUs only; skip offline rigs with no cached stats)
+    let totalHashrate = 0, totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0;
+    clusterData.rigs.forEach(rig => {
+        const stats = rig.stats;
+        if (!stats) return;
+        const mh = (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
+        totalHashrate += mh;
+        (stats.gpus || []).forEach(g => {
+            totalPower += g.power || 0;
+            tempSum += g.temp || 0;
+            tempCount += 1;
+        });
+        totalGpus += (stats.gpus || []).length;
+    });
+    document.getElementById('clusterTotalHashrate').textContent = totalHashrate.toFixed(2) + ' MH/s';
+    document.getElementById('clusterTotalPower').textContent = totalPower.toFixed(1) + ' W';
+    document.getElementById('clusterTotalGpus').textContent = totalGpus;
+    document.getElementById('clusterAvgTemp').textContent = (tempCount ? (tempSum / tempCount).toFixed(1) : 0) + ' °C';
+
+    // Rig cards
+    container.innerHTML = '';
+    if (clusterData.rigs.length === 0) {
+        container.innerHTML = '<div class="col-12 text-center py-4"><p class="text-muted">No rigs in the cluster yet. Add the first rig with the button above.</p></div>';
+    }
+    clusterData.rigs.forEach(rig => {
+        const stats = rig.stats;
+        const system = stats && stats.system ? stats.system : {};
+        const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
+        const totalHash = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)).toFixed(2) + ' MH/s' : 'n/a';
+        const power = stats ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : 'n/a';
+        const temps = stats && stats.gpus && stats.gpus.length
+            ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : 'n/a';
+        const isSelf = !!rig.is_self;
+
+        const statusBadge = isSelf
+            ? '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>'
+            : (rig.online
+                ? '<span class="badge bg-success-glow border border-success text-success"><span class="pulse-indicator"></span>ONLINE</span>'
+                : '<span class="badge bg-danger-glow border border-danger text-danger">OFFLINE</span>');
+
+        const lastSeen = rig.last_sync ? new Date(rig.last_sync * 1000).toLocaleTimeString() : 'never';
+        const errLine = (!rig.online && rig.last_error)
+            ? '<p class="small text-danger mb-2"><i class="bi bi-exclamation-triangle-fill"></i> ' + escapeHtml(rig.last_error) + '</p>'
+            : '';
+
+        const col = document.createElement('div');
+        col.className = 'col-md-6 col-lg-4';
+        col.innerHTML = `
+            <div class="card glass-card h-100">
+                <div class="card-body d-flex flex-column">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h3 class="h5 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
+                        ${statusBadge}
+                    </div>
+                    <p class="small text-muted mb-2">
+                        <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || 'no label')}
+                        ${isSelf ? '' : ' • ' + rig.accesses.length + ' SSH access' + (rig.accesses.length === 1 ? '' : 'es')}
+                    </p>
+                    ${errLine}
+                    <div class="row g-2 mt-1 pt-2 border-top border-secondary-subtle text-center">
+                        <div class="col-4">
+                            <div class="small text-muted">GPUs</div>
+                            <div class="fw-semibold small">${gpuCount === null ? 'n/a' : gpuCount}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="small text-muted">Speed</div>
+                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="small text-muted">Temp</div>
+                            <div class="fw-semibold small">${temps}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="small text-muted">Miner</div>
+                            <div class="fw-semibold small">${escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)'))}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="small text-muted">Coin</div>
+                            <div class="fw-semibold small text-warning">${escapeHtml(system.coin || 'None')}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="small text-muted">Power</div>
+                            <div class="fw-semibold small text-danger-emphasis">${power}</div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-2">Uptime: ${escapeHtml(system.uptime || 'unknown')} • Dashboard v${escapeHtml(system.dashboard_version || '?')} • seen ${lastSeen}</div>
+                    <div class="mt-3 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')">
+                            <i class="bi bi-box-arrow-in-right"></i> ${isSelf ? 'Open Dashboard' : 'Manage Rig'}
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" title="Edit rig" onclick="openRigModal('${rig.id}')">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        ${isSelf ? '' : '<button class="btn btn-sm btn-outline-danger" title="Remove rig from cluster" onclick="deleteRig(\'' + rig.id + '\')"><i class="bi bi-trash"></i></button>'}
+                    </div>
+                </div>
+            </div>`;
+        container.appendChild(col);
+    });
+}
+
+// Open the dashboard view scoped to the selected rig
+window.openRigDashboard = function(rigId) {
+    switchRig(rigId);
+    showView('dashboard');
+};
+
+window.syncNow = async function() {
+    const spinner = document.getElementById('clusterSyncSpinner');
+    const status = document.getElementById('clusterSyncStatus');
+    spinner.classList.remove('d-none');
+    status.textContent = 'Syncing...';
+    try {
+        await fetch('/api/cluster/sync/now', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': csrfToken }
+        });
+    } catch (e) { /* ignore */ }
+    setTimeout(() => loadClusterData(true), 2500);
+};
+
+function saveClusterSettings() {
+    const name = document.getElementById('clusterNameInput').value.trim();
+    fetch('/api/cluster/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ cluster_name: name })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            showToast(data.message, true);
+            loadClusterData(true);
+        } else {
+            showToast(data.message || 'Failed to save cluster settings.', false);
+        }
+    })
+    .catch(() => showToast('Network error saving cluster settings.', false));
+}
+
+// ---------------- Rig modal ----------------
+
+function openRigModal(rigId) {
+    editingRigId = rigId;
+    const isSelf = rigId === null || (clusterData && clusterData.self_id === rigId);
+    const rig = rigId && clusterData ? clusterData.rigs.find(r => r.id === rigId) : null;
+
+    document.getElementById('rigModalTitle').textContent = rig ? ('Edit Rig: ' + rig.name) : 'Add Rig';
+    document.getElementById('rigNameInput').value = rig ? rig.name : '';
+    document.getElementById('rigHostLabelInput').value = rig ? (rig.host_label || '') : '';
+
+    const pwInput = document.getElementById('rigPasswordInput');
+    if (rig && rig.is_self) {
+        pwInput.value = '';
+        pwInput.disabled = true;
+        document.getElementById('rigPasswordHelp').textContent = 'This is the local rig. Its dashboard password is managed with the Password button in the header.';
+    } else if (rig) {
+        pwInput.value = '********';
+        pwInput.disabled = false;
+        document.getElementById('rigPasswordHelp').textContent = 'Leave masked (********) to keep the current stored password, or type a new one.';
+    } else {
+        pwInput.value = '';
+        pwInput.disabled = false;
+        document.getElementById('rigPasswordHelp').textContent = 'Web panel password of that rig (other rigs use it to call its API).';
+    }
+
+    document.getElementById('rigModalDeleteBtn').classList.toggle('d-none', !rig || !!rig.is_self);
+    document.getElementById('rigModalTestResults').innerHTML = '';
+    renderRigModalAccesses(rig);
+    new bootstrap.Modal(document.getElementById('rigModal')).show();
+}
+
+function renderRigModalAccesses(rig) {
+    const list = document.getElementById('rigModalAccessList');
+    const accesses = rig ? rig.accesses : [];
+    if (!accesses.length) {
+        list.innerHTML = '<div class="text-center text-muted small py-3">No SSH accesses configured for this rig yet.</div>';
+        return;
+    }
+    let html = '<div class="list-group list-group-flush">';
+    accesses.forEach(a => {
+        const route = a.type === 'jump'
+            ? escapeHtml(a.user + '@' + a.host + ':' + a.port) + ' <i class="bi bi-arrow-right"></i> jump ' + escapeHtml(a.jump_user + '@' + a.jump_host)
+            : escapeHtml(a.user + '@' + a.host + ':' + a.port);
+        const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
+        html += `
+            <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center py-2 px-2 flex-wrap gap-2">
+                <div>
+                    <span class="fw-semibold small">${escapeHtml(a.name)}</span>
+                    <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">${a.type === 'jump' ? 'JUMP' : 'DIRECT'}</span>
+                    <div class="small text-muted font-monospace">${route}</div>
+                </div>
+                <div class="d-flex gap-2">
+                    <span class="small text-muted">${auth}</span>
+                    <button class="btn btn-xs btn-outline-primary py-0 px-2" onclick="openAccessModal('${rig ? rig.id : ''}', '${a.id}')" title="Edit access"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-xs btn-outline-danger py-0 px-2" onclick="deleteAccess('${rig ? rig.id : ''}', '${a.id}')" title="Delete access"><i class="bi bi-trash"></i></button>
+                </div>
+            </div>`;
+    });
+    html += '</div>';
+    document.getElementById('rigModalAccessList').innerHTML = html;
+}
+
+window.openRigModal = openRigModal;
+
+window.saveRigModal = async function() {
+    const name = document.getElementById('rigNameInput').value.trim();
+    const password = document.getElementById('rigPasswordInput').value.trim();
+    const hostLabel = document.getElementById('rigHostLabelInput').value.trim();
+
+    if (!name) { showToast('Please enter a rig name.', false); return; }
+    if (editingRigId && !isSelfRig(editingRigId) && password && password !== '********' && password.length < 4) {
+        showToast('Dashboard password must be at least 4 characters.', false);
+        return;
+    }
+    if (!editingRigId && !password) {
+        showToast('Enter the dashboard password of the remote rig.', false);
+        return;
+    }
+
+    const payload = { name: name, host_label: hostLabel };
+    if (editingRigId) payload.id = editingRigId;
+    if (password && password !== '********') payload.password = password;
+
+    try {
+        const response = await fetch('/api/cluster/rig', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToast(data.message, true);
+            bootstrap.Modal.getInstance(document.getElementById('rigModal')).hide();
+            loadClusterData(true);
+            loadAccessList();
+        } else {
+            showToast(data.message || 'Failed to save rig.', false);
+        }
+    } catch (e) {
+        showToast('Network error saving rig.', false);
+    }
+};
+document.getElementById('rigModalSaveBtn').addEventListener('click', saveRigModal);
+document.getElementById('rigModalAddAccessBtn').addEventListener('click', () => openAccessModal(editingRigId, null));
+
+document.getElementById('rigModalDeleteBtn').addEventListener('click', function() {
+    if (!editingRigId) return;
+    const name = getRigName(editingRigId);
+    if (confirm('Remove rig "' + name + '" from the cluster? The rig itself keeps running untouched.')) {
+        deleteRig(editingRigId);
+        bootstrap.Modal.getInstance(document.getElementById('rigModal')).hide();
+    }
+});
+
+window.testRigAccesses = async function(rigId) {
+    const resultsEl = document.getElementById('rigModalTestResults');
+    resultsEl.innerHTML = '<span class="text-muted"><i class="bi bi-arrow-repeat spin-animation"></i> Testing accesses...</span>';
+    try {
+        const response = await fetch('/api/cluster/rig/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: rigId })
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            let html = '';
+            (data.results || []).forEach(r => {
+                html += '<div class="' + (r.ok ? 'text-success' : 'text-danger') + '">' +
+                        '<i class="bi ' + (r.ok ? 'bi-check-circle-fill' : 'bi-x-circle-fill') + '"></i> ' +
+                        escapeHtml(r.name) + ': ' + escapeHtml(r.detail) + '</div>';
+            });
+            html += '<div class="' + (data.api_ok ? 'text-success' : 'text-warning') + '">' +
+                    '<i class="bi ' + (data.api_ok ? 'bi-check-circle-fill' : 'bi-x-circle-fill') + '"></i> ' +
+                    escapeHtml(data.api_detail || '') + '</div>';
+            resultsEl.innerHTML = html || '<span class="text-warning">No accesses configured for this rig.</span>';
+        } else {
+            resultsEl.innerHTML = '<span class="text-danger">' + escapeHtml(data.message || 'Test failed.') + '</span>';
+        }
+    } catch (e) {
+        resultsEl.innerHTML = '<span class="text-danger">Network error during test.</span>';
+    }
+};
+document.getElementById('rigModalTestBtn').addEventListener('click', () => {
+    if (editingRigId) {
+        testRigAccesses(editingRigId);
+    } else {
+        document.getElementById('rigModalTestResults').innerHTML =
+            '<span class="text-warning">Save the rig first, then test its accesses.</span>';
+    }
+});
+
+window.deleteRig = async function(rigId) {
+    if (!confirm('Remove this rig from the cluster?')) return;
+    try {
+        const response = await fetch('/api/cluster/rig/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: rigId })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Removed.' : 'Failed to remove rig.'), !!data.success);
+        if (data.success) {
+            if (currentRigId === rigId) switchRig('self');
+            loadClusterData(true);
+            loadAccessList();
+        }
+    } catch (e) {
+        showToast('Network error removing rig.', false);
+    }
+};
+
+function isSelfRig(rigId) {
+    return !rigId || (clusterData && clusterData.self_id === rigId);
+}
+
+// ---------------- SSH accesses page ----------------
+
+async function loadAccessList() {
+    try {
+        const response = await fetch('/api/cluster/rigs');
+        if (response.status === 401) {
+            document.getElementById('loginOverlay').classList.remove('d-none');
+            return;
+        }
+        const data = await response.json();
+        if (response.ok && data.success) {
+            clusterData = data;
+            document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
+            renderAccesses();
+        }
+    } catch (e) {
+        console.error('Failed to load accesses:', e);
+    }
+}
+
+function renderAccesses() {
+    const body = document.getElementById('accessesTableBody');
+    if (!clusterData || !clusterData.rigs) return;
+
+    const rows = [];
+    clusterData.rigs.forEach(rig => {
+        const rigLabel = escapeHtml(rig.name) + (rig.is_self ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">this rig</span>' : '');
+        if (!rig.accesses.length) {
+            rows.push('<tr><td>' + rigLabel + '</td><td colspan="5" class="text-muted small">No SSH accesses configured yet</td></tr>');
+            return;
+        }
+        rig.accesses.forEach((a, idx) => {
+            const route = a.type === 'jump'
+                ? escapeHtml(a.user + '@' + a.host + ':' + a.port) + ' <i class="bi bi-arrow-right-short"></i> <span class="text-info">via ' + escapeHtml(a.jump_user + '@' + a.jump_host + ':' + a.jump_port) + '</span>'
+                : escapeHtml(a.user + '@' + a.host + ':' + a.port);
+            const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
+            rows.push('<tr>' +
+                (idx === 0 ? '<td rowspan="' + rig.accesses.length + '" class="fw-semibold align-middle">' + rigLabel + '</td>' : '') +
+                '<td class="fw-semibold">' + escapeHtml(a.name) + '</td>' +
+                '<td><span class="badge ' + (a.type === 'jump' ? 'bg-warning-glow text-warning' : 'bg-accent-glow text-primary') + '">' + (a.type === 'jump' ? 'JUMP' : 'DIRECT') + '</span></td>' +
+                '<td class="font-monospace small">' + route + '</td>' +
+                '<td class="small text-muted">' + auth + '</td>' +
+                '<td class="text-end">' +
+                '<div class="btn-group btn-group-sm">' +
+                '<button class="btn btn-outline-info" title="Test connection" onclick="testAccess(\'' + rig.id + '\', \'' + a.id + '\', this)"><i class="bi bi-plug"></i></button>' +
+                '<button class="btn btn-outline-primary" title="Edit" onclick="openAccessModal(\'' + rig.id + '\', \'' + a.id + '\')"><i class="bi bi-pencil"></i></button>' +
+                '<button class="btn btn-outline-danger" title="Delete" onclick="deleteAccess(\'' + rig.id + '\', \'' + a.id + '\')"><i class="bi bi-trash"></i></button>' +
+                '</div></td></tr>');
+        });
+    });
+
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No SSH accesses configured yet. Click "Add Access" to create one.</td></tr>';
+    } else {
+        body.innerHTML = rows.join('');
+    }
+}
+
+window.testAccess = async function(rigId, accessId, btn) {
+    const rig = clusterData.rigs.find(r => r.id === rigId);
+    const access = rig ? rig.accesses.find(a => a.id === accessId) : null;
+    if (!access) return;
+    if (btn) btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    try {
+        const response = await fetch('/api/cluster/access/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rig_id: rigId, access: access })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+    } catch (e) {
+        showToast('Network error testing access.', false);
+    } finally {
+        if (btn) btn.innerHTML = '<i class="bi bi-plug"></i>';
+    }
+};
+
+// ---------------- Access modal ----------------
+
+function openAccessModal(rigId, accessId) {
+    editingAccess = { rigId: rigId, accessId: accessId };
+    const rigSelect = document.getElementById('accessRigSelect');
+    rigSelect.innerHTML = (clusterData && clusterData.rigs ? clusterData.rigs : [])
+        .map(r => '<option value="' + r.id + '">' + escapeHtml(r.name || r.id) + '</option>').join('');
+
+    const access = (rigId && accessId && clusterData)
+        ? (clusterData.rigs.find(r => r.id === rigId) || { accesses: [] }).accesses.find(a => a.id === accessId)
+        : null;
+
+    document.getElementById('accessModalTitle').textContent = access ? 'Edit SSH Access' : 'Add SSH Access';
+    document.getElementById('accessNameInput').value = access ? access.name : '';
+    document.getElementById('accessHostInput').value = access ? access.host : '';
+    document.getElementById('accessPortInput').value = access ? access.port : 22;
+    document.getElementById('accessUserInput').value = access ? access.user : '';
+    document.getElementById('accessTypeSelect').value = access ? access.type : 'direct';
+    document.getElementById('accessAuthSelect').value = access ? access.auth : 'password';
+    document.getElementById('accessPasswordInput').value = access && access.auth === 'password' ? (access.password || '********') : '';
+    document.getElementById('accessKeyPathInput').value = access && access.key_path ? access.key_path : '';
+    document.getElementById('jumpHostInput').value = access && access.jump_host ? access.jump_host : '';
+    document.getElementById('jumpPortInput').value = access && access.jump_port ? access.jump_port : 22;
+    document.getElementById('jumpUserInput').value = access && access.jump_user ? access.jump_user : '';
+    document.getElementById('jumpAuthSelect').value = access && access.jump_auth ? access.jump_auth : 'password';
+    document.getElementById('jumpPasswordInput').value = access && access.jump_auth === 'password' ? (access.jump_password || '********') : '';
+    document.getElementById('jumpKeyPathInput').value = access && access.jump_key_path ? access.jump_key_path : '';
+
+    if (rigId && access) rigSelect.value = rigId;
+    toggleAccessModalFields();
+    document.getElementById('accessTestResult').textContent = '';
+    new bootstrap.Modal(document.getElementById('accessModal')).show();
+}
+
+window.openAccessModal = openAccessModal;
+
+function toggleAccessModalFields() {
+    const type = document.getElementById('accessTypeSelect').value;
+    const auth = document.getElementById('accessAuthSelect').value;
+    const jauth = document.getElementById('jumpAuthSelect').value;
+    document.getElementById('jumpSettingsBlock').classList.toggle('d-none', type !== 'jump');
+    document.getElementById('accessPasswordBlock').classList.toggle('d-none', auth !== 'password');
+    document.getElementById('accessKeyBlock').classList.toggle('d-none', auth !== 'key');
+    document.getElementById('jumpPasswordBlock').classList.toggle('d-none', jauth !== 'password');
+    document.getElementById('jumpKeyBlock').classList.toggle('d-none', jauth !== 'key');
+}
+
+document.getElementById('accessTypeSelect').addEventListener('change', toggleAccessModalFields);
+document.getElementById('accessAuthSelect').addEventListener('change', toggleAccessModalFields);
+document.getElementById('jumpAuthSelect').addEventListener('change', toggleAccessModalFields);
+
+function collectAccessPayload() {
+    const type = document.getElementById('accessTypeSelect').value;
+    const payload = {
+        id: editingAccess && editingAccess.accessId ? editingAccess.accessId : '',
+        name: document.getElementById('accessNameInput').value.trim(),
+        type: type,
+        host: document.getElementById('accessHostInput').value.trim(),
+        port: parseInt(document.getElementById('accessPortInput').value, 10) || 22,
+        user: document.getElementById('accessUserInput').value.trim(),
+        auth: document.getElementById('accessAuthSelect').value,
+        password: document.getElementById('accessPasswordInput').value,
+        key_path: document.getElementById('accessKeyPathInput').value.trim()
+    };
+    if (type === 'jump') {
+        payload.jump_host = document.getElementById('jumpHostInput').value.trim();
+        payload.jump_port = parseInt(document.getElementById('jumpPortInput').value, 10) || 22;
+        payload.jump_user = document.getElementById('jumpUserInput').value.trim();
+        payload.jump_auth = document.getElementById('jumpAuthSelect').value;
+        payload.jump_password = document.getElementById('jumpPasswordInput').value;
+        payload.jump_key_path = document.getElementById('jumpKeyPathInput').value.trim();
+    }
+    return payload;
+}
+
+window.saveAccessModal = async function() {
+    const rigId = document.getElementById('accessRigSelect').value;
+    const payload = collectAccessPayload();
+    try {
+        const response = await fetch('/api/cluster/access', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rig_id: rigId, access: payload })
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToast(data.message, true);
+            bootstrap.Modal.getInstance(document.getElementById('accessModal')).hide();
+            loadClusterData(true).then(() => {
+                if (editingRigId) renderRigModalAccesses(clusterData ? clusterData.rigs.find(r => r.id === editingRigId) : null);
+            });
+            loadAccessList();
+        } else {
+            showToast(data.message || 'Failed to save SSH access.', false);
+        }
+    } catch (e) {
+        showToast('Network error saving SSH access.', false);
+    }
+};
+document.getElementById('accessSaveBtn').addEventListener('click', saveAccessModal);
+
+document.getElementById('accessTestBtn').addEventListener('click', async function() {
+    const btn = this;
+    const resultEl = document.getElementById('accessTestResult');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Testing...';
+    resultEl.textContent = '';
+    try {
+        const response = await fetch('/api/cluster/access/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rig_id: document.getElementById('accessRigSelect').value, access: collectAccessPayload() })
+        });
+        const data = await response.json();
+        resultEl.innerHTML = '<span class="' + (data.success ? 'text-success' : 'text-danger') + '">' +
+            escapeHtml(data.message || (data.success ? 'Connection OK' : 'Connection failed')) + '</span>';
+    } catch (e) {
+        resultEl.innerHTML = '<span class="text-danger">Network error.</span>';
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-plug"></i> Test Connection';
+    }
+});
+
+window.deleteAccess = async function(rigId, accessId) {
+    if (!confirm('Delete this SSH access?')) return;
+    try {
+        const response = await fetch('/api/cluster/access/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rig_id: rigId, access_id: accessId })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Deleted.' : 'Failed to delete access.'), !!data.success);
+        if (data.success) {
+            loadClusterData(true).then(() => {
+                if (editingRigId) renderRigModalAccesses(clusterData ? clusterData.rigs.find(r => r.id === editingRigId) : null);
+            });
+            loadAccessList();
+        }
+    } catch (e) {
+        showToast('Network error deleting access.', false);
+    }
+};
+
+// ---------------- Password change ----------------
+
+async function changePassword() {
+    const current = document.getElementById('currentPasswordInput').value;
+    const newPw = document.getElementById('newPasswordInput').value;
+    const confirmPw = document.getElementById('confirmPasswordInput').value;
+    const btn = document.getElementById('passwordSaveBtn');
+
+    if (newPw !== confirmPw) {
+        showToast('New passwords do not match.', false);
+        return;
+    }
+    if (newPw.trim().length < 4) {
+        showToast('New password must be at least 4 characters.', false);
+        return;
+    }
+
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+    try {
+        const response = await fetch('/api/auth/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ current_password: current, new_password: newPw.trim() })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Password updated.' : 'Failed to change password.'), !!data.success);
+        if (response.ok && data.success) {
+            bootstrap.Modal.getInstance(document.getElementById('passwordModal')).hide();
+        }
+    } catch (e) {
+        showToast('Network error changing password.', false);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Update Password';
+    }
+}
+
+// ---------------- Helpers ----------------
+
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    return String(text)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }

@@ -8,3 +8,4 @@ mock_rig.conf
 .vscode/
 venv/
 env/
+hiveos-local.log

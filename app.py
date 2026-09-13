@@ -1,16 +1,20 @@
 import os
 import re
 import json
+import hmac
+import uuid
+import shlex
 import socket
+import shutil
+import tempfile
 import subprocess
 import platform
-import shutil
 import logging
 import threading
 import random
 import time
 import urllib.request
-from flask import Flask, jsonify, request, render_template, session
+from flask import Flask, jsonify, request, render_template, session, Response
 
 app = Flask(__name__)
 # Secure randomly-generated key for session management
@@ -27,6 +31,10 @@ WALLET_CONF_PATH = os.path.join(HIVE_CONFIG_DIR, "wallet.conf")
 PIN_PATH = os.path.join(HIVE_CONFIG_DIR, "dashboard.key")
 AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
+CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
+CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
+DEFAULT_SYNC_INTERVAL = 60
+DASHBOARD_PORT = 1337
 
 # Local Dashboard Release Version (kept in sync with version.txt used for update checks)
 def _load_version():
@@ -86,28 +94,537 @@ def get_local_ip():
         s.close()
     return ip
 
-# Load or generate access authentication PIN
-def load_or_generate_pin():
+def make_self_rig_entry(state):
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    now = int(time.time())
+    return {
+        "id": state["self_id"],
+        "name": rig_conf.get("RIG_ID", "") or socket.gethostname(),
+        "host_label": get_local_ip(),
+        "is_self": True,
+        "password": str(app.config.get('ACCESS_PASSWORD', '')),
+        "accesses": [],
+        "updated_at": now,
+        "added_at": now,
+    }
+
+def load_cluster_state():
+    state = {
+        "cluster_name": "",
+        "self_id": "",
+        "sync_interval": DEFAULT_SYNC_INTERVAL,
+        "rigs": []
+    }
+    try:
+        if os.path.exists(CLUSTER_CONF):
+            with open(CLUSTER_CONF, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k in ("cluster_name", "self_id", "sync_interval", "rigs"):
+                    if k in data:
+                        state[k] = data[k]
+    except Exception as e:
+        logging.error(f"Failed to read cluster config: {e}")
+
+    if not state.get("self_id"):
+        state["self_id"] = uuid.uuid4().hex
+    rigs = [r for r in state.get("rigs", []) if isinstance(r, dict) and r.get("id")]
+    if not any(r.get("id") == state["self_id"] for r in rigs):
+        rigs.insert(0, make_self_rig_entry(state))
+    state["rigs"] = rigs
+    if not os.path.exists(CLUSTER_CONF):
+        save_cluster_state(state)
+    try:
+        os.chmod(CLUSTER_CONF, 0o600)
+    except Exception:
+        pass
+    # Normalize self flags and keep the self entry password in sync with the live dashboard key
+    for r in state["rigs"]:
+        if r.get("id") == state["self_id"]:
+            r["is_self"] = True
+            r["password"] = str(app.config.get('ACCESS_PASSWORD', ''))
+        else:
+            r["is_self"] = False
+    return state
+
+def save_cluster_state(state):
+    try:
+        with config_lock:
+            with open(CLUSTER_CONF, 'w') as f:
+                json.dump(state, f, indent=2)
+            os.chmod(CLUSTER_CONF, 0o600)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save cluster config: {e}")
+        return False
+
+def clean_access_entry(access):
+    return {k: access[k] for k in ACCESS_ENTRY_FIELDS if k in access}
+
+def clean_rig_entry(entry):
+    """Keep only known rig fields; normalize is_self relative to the local self id."""
+    clean = {k: entry[k] for k in RIG_ENTRY_FIELDS if k in entry}
+    clean["is_self"] = (clean.get("id") == _CURRENT_SELF_ID.get("value", ""))
+    accesses = clean.get("accesses")
+    if not isinstance(accesses, list):
+        clean["accesses"] = []
+    else:
+        clean["accesses"] = [clean_access_entry(a) for a in accesses if isinstance(a, dict)]
+    return clean
+
+def merge_rig_lists(base_rigs, incoming_rigs):
+    """Merge rig entries by id; the entry with the newer updated_at wins."""
+    by_id = {}
+    for r in base_rigs:
+        if isinstance(r, dict) and r.get("id"):
+            by_id[r["id"]] = r
+    for inc in incoming_rigs or []:
+        if not isinstance(inc, dict) or not inc.get("id"):
+            continue
+        clean = clean_rig_entry(inc)
+        rid = clean["id"]
+        existing = by_id.get(rid)
+        if existing is None:
+            clean.setdefault("updated_at", 0)
+            clean.setdefault("added_at", int(time.time()))
+            by_id[rid] = clean
+            logging.info(f"Cluster merge: discovered new rig '{clean.get('name', rid)}'")
+        else:
+            try:
+                inc_ts = int(clean.get("updated_at") or 0)
+                cur_ts = int(existing.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                inc_ts, cur_ts = 0, 0
+            if inc_ts > cur_ts:
+                # Preserve the locally-resolved is_self flag; adopt newer remote edits
+                clean["is_self"] = existing.get("is_self", False)
+                by_id[rid] = clean
+    return list(by_id.values())
+
+# ---------------- SSH transport for cluster communication ----------------
+
+VALID_HOST_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9\.\-]*$')
+VALID_USER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\.\-\@\$]*$')
+VALID_KEYPATH_RE = re.compile(r'^[A-Za-z0-9\./_\-]{1,200}$')
+
+_sshpass_install_attempted = False
+
+def ensure_sshpass():
+    """Install sshpass (SSH password auth helper) on demand. Returns True if available."""
+    global _sshpass_install_attempted
+    if shutil.which("sshpass"):
+        return True
+    if _sshpass_install_attempted:
+        return False
+    _sshpass_install_attempted = True
+    devnull = subprocess.DEVNULL
+    for cmd in (["sudo", "-n", "apt-get", "install", "-y", "sshpass"],
+                ["apt-get", "install", "-y", "sshpass"]):
+        try:
+            res = subprocess.run(cmd, stdout=devnull, stderr=devnull, timeout=180)
+            if res.returncode == 0 and shutil.which("sshpass"):
+                logging.info("Installed sshpass package for cluster SSH password authentication")
+                return True
+        except Exception as e:
+            logging.warning(f"sshpass auto-install attempt failed: {e}")
+    return False
+
+def validate_access_payload(access):
+    """Validate an SSH access definition. Returns (clean_access, error_message)."""
+    if not isinstance(access, dict):
+        return None, "Access payload must be an object."
+    a_type = str(access.get("type", "direct")).strip().lower()
+    if a_type not in ("direct", "jump"):
+        return None, "Access type must be 'direct' or 'jump'."
+    name = str(access.get("name", "")).strip()
+    if not name or len(name) > 60:
+        return None, "Access name must be 1-60 characters."
+    host = str(access.get("host", "")).strip()
+    if not VALID_HOST_RE.match(host):
+        return None, "Invalid target host (use IP address or hostname)."
+    user = str(access.get("user", "")).strip()
+    if not VALID_USER_RE.match(user):
+        return None, "Invalid SSH user name."
+    try:
+        port = int(access.get("port", 22))
+    except (TypeError, ValueError):
+        return None, "SSH port must be an integer."
+    if not (1 <= port <= 65535):
+        return None, "SSH port must be between 1 and 65535."
+    auth = str(access.get("auth", "password")).strip().lower()
+    if auth not in ("password", "key"):
+        return None, "SSH auth must be 'password' or 'key'."
+    clean = {
+        "id": str(access.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "name": name,
+        "type": a_type,
+        "host": host,
+        "port": port,
+        "user": user,
+        "auth": auth,
+    }
+    if auth == "password":
+        password = str(access.get("password", ""))
+        if len(password) > 128:
+            return None, "SSH password is too long."
+        clean["password"] = password
+    else:
+        key_path = str(access.get("key_path", "")).strip()
+        if key_path:
+            if not VALID_KEYPATH_RE.match(key_path):
+                return None, "Invalid SSH private key path."
+            clean["key_path"] = key_path
+    if a_type == "jump":
+        jhost = str(access.get("jump_host", "")).strip()
+        if not VALID_HOST_RE.match(jhost):
+            return None, "Invalid jump server host (use IP address or hostname)."
+        juser = str(access.get("jump_user", "")).strip()
+        if not VALID_USER_RE.match(juser):
+            return None, "Invalid jump server SSH user name."
+        try:
+            jport = int(access.get("jump_port", 22))
+        except (TypeError, ValueError):
+            return None, "Jump server SSH port must be an integer."
+        if not (1 <= jport <= 65535):
+            return None, "Jump server SSH port must be between 1 and 65535."
+        jauth = str(access.get("jump_auth", "password")).strip().lower()
+        if jauth not in ("password", "key"):
+            return None, "Jump server auth must be 'password' or 'key'."
+        clean["jump_host"] = jhost
+        clean["jump_port"] = jport
+        clean["jump_user"] = juser
+        clean["jump_auth"] = jauth
+        if jauth == "password":
+            jpassword = str(access.get("jump_password", ""))
+            if len(jpassword) > 128:
+                return None, "Jump server password is too long."
+            clean["jump_password"] = jpassword
+        else:
+            jkey = str(access.get("jump_key_path", "")).strip()
+            if jkey:
+                if not VALID_KEYPATH_RE.match(jkey):
+                    return None, "Invalid jump server SSH key path."
+                clean["jump_key_path"] = jkey
+    return clean, ""
+
+def _write_temp_password(password, tmp_files):
+    fd, path = tempfile.mkstemp(prefix="hvssh_", suffix=".pw", dir="/tmp")
+    with os.fdopen(fd, "w") as f:
+        f.write(str(password))
+    os.chmod(path, 0o600)
+    tmp_files.append(path)
+    return path
+
+_SSH_BASE_OPTS = ["-o", "StrictHostKeyChecking=no",
+                  "-o", "UserKnownHostsFile=/dev/null",
+                  "-o", "ConnectTimeout=12",
+                  "-o", "ServerAliveInterval=5",
+                  "-o", "ServerAliveCountMax=3",
+                  "-o", "LogLevel=ERROR"]
+
+def build_ssh_command(access, remote_cmd, tmp_files):
+    """Build a safe argv list for ssh (direct connection or via jump server)."""
+    args = []
+    # Jump server hop via ProxyCommand
+    if access.get("type") == "jump":
+        jopts = " ".join(["-o StrictHostKeyChecking=no",
+                          "-o UserKnownHostsFile=/dev/null",
+                          "-o ConnectTimeout=12",
+                          "-o LogLevel=ERROR"])
+        if access.get("jump_auth") == "password":
+            if not ensure_sshpass():
+                return None, ("sshpass is not installed on this rig. Run "
+                              "'sudo apt-get install -y sshpass' or use SSH key authentication.")
+            jpw_file = _write_temp_password(access.get("jump_password", ""), tmp_files)
+            prefix = "sshpass -f %s" % shlex.quote(jpw_file)
+        else:
+            jkey = str(access.get("jump_key_path", "")).strip()
+            prefix = ("ssh -i %s -o IdentitiesOnly=yes" % shlex.quote(jkey)) if jkey else "ssh"
+        proxy = "%s -p %d %s -W %%h:%%p %s@%s" % (
+            prefix, int(access.get("jump_port", 22)), jopts,
+            shlex.quote(str(access.get("jump_user", ""))),
+            shlex.quote(str(access.get("jump_host", ""))))
+        args += ["-o", "ProxyCommand=" + proxy]
+
+    if access.get("auth") == "password":
+        if not ensure_sshpass():
+            return None, ("sshpass is not installed on this rig. Run "
+                          "'sudo apt-get install -y sshpass' or use SSH key authentication.")
+        pw_file = _write_temp_password(access.get("password", ""), tmp_files)
+        args += ["sshpass", "-f", pw_file]
+        args += ["ssh", "-o", "PreferredAuthentications=password",
+                 "-o", "PubkeyAuthentication=no",
+                 "-o", "NumberOfPasswordPrompts=1"]
+    else:
+        args += ["ssh", "-o", "BatchMode=yes"]
+        key_path = str(access.get("key_path", "")).strip()
+        if key_path:
+            args += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
+
+    args += _SSH_BASE_OPTS
+    args += ["-p", str(access.get("port", 22)),
+             "%s@%s" % (access.get("user", ""), access.get("host", "")),
+             remote_cmd]
+    return args, None
+
+def run_ssh_command(access, remote_cmd, timeout=35):
+    """Execute a command on a remote rig over SSH. Returns (ok, output, error)."""
+    tmp_files = []
+    try:
+        args, err = build_ssh_command(access, remote_cmd, tmp_files)
+        if err:
+            return False, "", err
+        res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             stdin=subprocess.DEVNULL, timeout=timeout)
+        out = res.stdout.decode(errors="ignore")
+        errout = res.stderr.decode(errors="ignore")
+        if res.returncode != 0:
+            msg = (errout or out).strip()
+            detail = msg.splitlines()[-1] if msg else "exit code %d" % res.returncode
+            return False, out, detail
+        return True, out, ""
+    except subprocess.TimeoutExpired:
+        return False, "", "SSH connection timed out"
+    except FileNotFoundError as e:
+        return False, "", "%s not found on this rig" % e.filename
+    except Exception as e:
+        return False, "", str(e)
+    finally:
+        for p in tmp_files:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+def build_curl_command(method, path, has_body, password):
+    """HTTP request against the remote rig's local dashboard, executed over SSH."""
+    parts = ["curl", "-s", "-m", "25",
+             "-X", method,
+             "-H", shlex.quote("Authorization: Bearer " + str(password)),
+             "-H", "Content-Type: application/json",
+             "-w", shlex.quote("\n__HC:%{http_code}")]
+    if has_body:
+        parts.append("--data-binary @-")
+    parts.append(shlex.quote("http://127.0.0.1:%d/%s" % (DASHBOARD_PORT, path.lstrip('/'))))
+    return " ".join(parts)
+
+def _parse_curl_output(output):
+    """Split the curl -w status trailer from the JSON body. Returns (body, http_code)."""
+    code = 200
+    body = output
+    m = re.search(r'__HC:(\d+)\s*$', output)
+    if m:
+        code = int(m.group(1))
+        body = output[:m.start()].rstrip("\n")
+    return body, code
+
+def cluster_remote_api(rig, method, path, body=None, timeout=40):
+    """Call a remote rig's dashboard API over its configured SSH accesses.
+
+    Tries each access in order until one succeeds. Requires curl on the remote rig
+    and sshpass locally for password-based accesses.
+    Returns (ok, parsed_json_or_None, http_code, error_message, access_name).
+    """
+    password = str(rig.get("password", ""))
+    raw = json.dumps(body).encode("utf-8") if body is not None else None
+    curl_cmd = build_curl_command(method.upper(), path, raw is not None, password)
+    last_error = "No SSH accesses configured for this rig"
+    for access in rig.get("accesses", []):
+        access_name = access.get("name") or access.get("id", "?")
+        ok, out, ssh_err = run_ssh_command(access, curl_cmd, timeout=timeout)
+        if not ok:
+            last_error = "%s: %s" % (access_name, ssh_err)
+            continue
+        body_text, http_code = _parse_curl_output(out)
+        try:
+            data = json.loads(body_text)
+        except Exception:
+            last_error = "%s: invalid response from remote dashboard (HTTP %d)" % (access_name, http_code)
+            continue
+        if http_code >= 400:
+            msg = "HTTP %d" % http_code
+            if isinstance(data, dict) and data.get("message"):
+                msg += " - %s" % data.get("message")
+            last_error = "%s: %s" % (access_name, msg)
+            continue
+        return True, data, http_code, "", access_name
+    return False, None, 0, last_error, ""
+
+# ---------------- Cluster stats cache ----------------
+
+def load_cluster_cache():
+    try:
+        if os.path.exists(CLUSTER_CACHE):
+            with open(CLUSTER_CACHE, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logging.error(f"Failed to read cluster cache: {e}")
+    return {"rigs": {}}
+
+def write_cluster_cache(cache):
+    try:
+        with config_lock:
+            with open(CLUSTER_CACHE, 'w') as f:
+                json.dump(cache, f)
+            os.chmod(CLUSTER_CACHE, 0o600)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save cluster cache: {e}")
+        return False
+
+def collect_stats_payload():
+    """Full stats payload shared between /api/stats and the cluster cache."""
+    hw = get_gpu_stats()
+    total_mh, per_gpu = get_miner_hashrate()
+    for g in hw["gpus"]:
+        g["hashrate"] = round(per_gpu.get(g["index"], 0.0), 2)
+    return {
+        "system": get_system_stats(),
+        "gpus": hw["gpus"],
+        "igpus": hw["igpus"],
+        "total_hashrate_mh": round(total_mh, 2),
+        "overclocks": get_overclocks_formatted(),
+        "csrf_token": session.get('csrf_token', '')
+    }
+
+_cluster_sync_lock = threading.Lock()
+_cluster_last_sync = {"ts": 0, "ok": True, "message": "Not synced yet"}
+
+def run_sync_cycle(triggered_by="auto"):
+    """One cluster sync pass: exchange rig lists with every peer and refresh stats cache."""
+    if not _cluster_sync_lock.acquire(blocking=False):
+        return False, "Another sync cycle is already running"
+    try:
+        state = load_cluster()
+        _CURRENT_SELF_ID["value"] = state["self_id"]
+        cache = load_cluster_cache()
+        cache.setdefault("rigs", {})
+
+        # Cache the local rig's stats as well
+        try:
+            cache["rigs"][state["self_id"]] = {
+                "stats": collect_stats_payload(),
+                "fetched_at": int(time.time()),
+                "online": True,
+                "error": ""
+            }
+        except Exception as e:
+            logging.error(f"Cluster cache: failed to collect local stats: {e}")
+
+        for rig in list(state["rigs"]):
+            if rig.get("id") == state["self_id"]:
+                continue
+            rig_id = rig["id"]
+            entry = cache["rigs"].get(rig_id, {})
+
+            # 1. Pull the peer's cluster state and merge (learns about new rigs)
+            ok, data, _, err, _ = cluster_remote_api(rig, "GET", "api/cluster/state", timeout=45)
+            if ok and isinstance(data, dict) and isinstance(data.get("rigs"), list):
+                state["rigs"] = merge_rig_lists(state["rigs"], data["rigs"])
+                if data.get("cluster_name") and not state.get("cluster_name"):
+                    state["cluster_name"] = data["cluster_name"]
+                entry["online"] = True
+                entry["error"] = ""
+            else:
+                entry["online"] = False
+                entry["error"] = err
+
+            # 2. Push our merged state back to the peer (propagates new rigs/passwords)
+            push_ok, _, _, push_err, _ = cluster_remote_api(
+                rig, "POST", "api/cluster/sync",
+                body={"cluster_name": state.get("cluster_name", ""),
+                      "rigs": state["rigs"], "from_id": state["self_id"]},
+                timeout=45)
+            if not push_ok and not entry.get("online"):
+                entry["error"] = push_err
+
+            # 3. Refresh the live stats cache for this peer
+            sok, sdata, _, serr, _ = cluster_remote_api(rig, "GET", "api/stats", timeout=45)
+            if sok:
+                entry["stats"] = sdata
+                entry["fetched_at"] = int(time.time())
+                entry["online"] = True
+                entry["error"] = ""
+            elif not entry.get("online"):
+                entry["error"] = serr
+
+            cache["rigs"][rig_id] = entry
+
+        save_cluster_state(state)
+        write_cluster_cache(cache)
+
+        _cluster_last_sync["ts"] = int(time.time())
+        offline = [r.get("name") or r.get("id") for r in state["rigs"]
+                   if r.get("id") != state["self_id"]
+                   and not cache["rigs"].get(r["id"], {}).get("online")]
+        _cluster_last_sync["ok"] = not offline
+        _cluster_last_sync["message"] = ("All peers reachable" if not offline
+                                         else "Offline: " + ", ".join(str(x) for x in offline))
+        if triggered_by != "auto":
+            logging.info(f"Cluster sync cycle completed (triggered by {triggered_by})")
+        return True, "Sync cycle finished"
+    finally:
+        _cluster_sync_lock.release()
+
+def _cluster_sync_worker():
+    # Give the service a moment to finish booting before the first cycle
+    time.sleep(15)
+    while True:
+        interval = DEFAULT_SYNC_INTERVAL
+        try:
+            state = load_cluster()
+            try:
+                interval = max(15, int(state.get("sync_interval", DEFAULT_SYNC_INTERVAL)))
+            except (TypeError, ValueError):
+                interval = DEFAULT_SYNC_INTERVAL
+            run_sync_cycle(triggered_by="auto")
+        except Exception as e:
+            logging.error(f"Cluster sync worker error: {e}")
+        time.sleep(interval)
+
+def start_cluster_worker():
+    t = threading.Thread(target=_cluster_sync_worker, daemon=True, name="cluster-sync")
+    t.start()
+    logging.info("Cluster sync worker started")
+
+# Load or generate dashboard access password (legacy 6-digit PINs stay valid as passwords)
+def load_or_generate_access_key():
     with config_lock:
         if os.path.exists(PIN_PATH):
             try:
                 with open(PIN_PATH, 'r') as f:
-                    pin = f.read().strip()
-                    if len(pin) == 6 and pin.isdigit():
-                        return pin
+                    key = f.read().strip()
+                    # Accept any non-empty password; legacy 6-digit PINs keep working
+                    if key:
+                        return key
             except Exception as e:
-                logging.error(f"Failed to read access PIN: {e}")
+                logging.error(f"Failed to read access password: {e}")
         
-        # Generate new 6-digit random PIN
-        pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
+        # Generate new 6-digit random password
+        key = "".join([str(random.randint(0, 9)) for _ in range(6)])
         try:
             with open(PIN_PATH, 'w') as f:
-                f.write(pin)
+                f.write(key)
             os.chmod(PIN_PATH, 0o600) # Read/write by root only
-            logging.info(f"Generated new dashboard access PIN: {pin}")
+            logging.info(f"Generated new dashboard access password: {key}")
         except Exception as e:
-            logging.error(f"Failed to write access PIN: {e}")
-        return pin
+            logging.error(f"Failed to write access password: {e}")
+        return key
+
+# Dashboard access password (loaded or generated once at import time)
+ACCESS_PASSWORD = load_or_generate_access_key()
+app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
+
+# ---------------- Cluster (multi-rig) state management ----------------
+
+RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at"]
+ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
+                       "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
+
+# Helper carrying self id for entry cleaning (avoids passing it through call stacks)
+_CURRENT_SELF_ID = {"value": ""}
 
 # Parse shell-like config files with locking
 def parse_shell_config(filepath):
@@ -779,6 +1296,18 @@ def get_overclocks_formatted():
 def require_auth():
     if request.path in ['/', '/api/login'] or request.path.startswith('/static/'):
         return
+
+    # Machine-to-machine cluster calls authenticate with a bearer token
+    # carrying the rig's dashboard password (not subject to CSRF)
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:].strip()
+        expected = str(app.config.get('ACCESS_PASSWORD', ''))
+        if token and expected and hmac.compare_digest(token, expected):
+            request.bearer_auth = True
+            return
+        return jsonify({"success": False, "authenticated": False, "message": "Unauthorized"}), 401
+
     if not session.get('authenticated'):
         return jsonify({"success": False, "authenticated": False, "message": "Unauthorized"}), 401
         
@@ -804,11 +1333,11 @@ def api_login():
             return jsonify({"success": False, "message": f"Too many failed attempts. Try again in {remaining} seconds."}), 429
             
     data = request.get_json()
-    if not data or 'pin' not in data:
-        return jsonify({"success": False, "message": "Missing PIN"}), 400
+    if not data or ('password' not in data and 'pin' not in data):
+        return jsonify({"success": False, "message": "Missing password"}), 400
         
-    user_pin = str(data['pin']).strip()
-    if user_pin == app.config['ACCESS_PIN']:
+    user_key = str(data.get('password', data.get('pin', ''))).strip()
+    if user_key and hmac.compare_digest(user_key, str(app.config['ACCESS_PASSWORD'])):
         # Reset failure record
         if ip in failed_login_attempts:
             del failed_login_attempts[ip]
@@ -833,8 +1362,52 @@ def api_login():
         logging.warning(f"IP {ip} locked out for 15 minutes due to 5 failed attempts")
         return jsonify({"success": False, "message": "Too many failed attempts. Locked out for 15 minutes."}), 429
         
-    logging.warning(f"Invalid access PIN attempt {record['count']}/5 from IP: {ip}")
-    return jsonify({"success": False, "message": f"Invalid PIN. {5 - record['count']} attempts remaining."}), 401
+    logging.warning(f"Invalid access password attempt {record['count']}/5 from IP: {ip}")
+    return jsonify({"success": False, "message": f"Invalid password. {5 - record['count']} attempts remaining."}), 401
+
+@app.route('/api/auth/password', methods=['POST'])
+def change_password():
+    """Change the dashboard access password (replaces the legacy PIN concept)."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+
+    current = str(data.get("current_password", ""))
+    new_password = str(data.get("new_password", "")).strip()
+
+    if not current or not hmac.compare_digest(current, str(app.config['ACCESS_PASSWORD'])):
+        logging.warning(f"Failed password change verification from IP: {request.remote_addr}")
+        return jsonify({"success": False, "message": "Current password is incorrect."}), 401
+
+    if not (4 <= len(new_password) <= 64):
+        return jsonify({"success": False, "message": "New password must be 4-64 characters long."}), 400
+    if not re.match(r'^[A-Za-z0-9!@\#$%^\&\*\(\)_\-+=\[\]\{\};:,\.<>\?/~\s]+$', new_password):
+        return jsonify({"success": False, "message": "Password contains unsupported characters."}), 400
+
+    try:
+        with config_lock:
+            with open(PIN_PATH, 'w') as f:
+                f.write(new_password)
+            os.chmod(PIN_PATH, 0o600)
+    except Exception as e:
+        logging.error(f"Failed to write new access password: {e}")
+        return jsonify({"success": False, "message": "Failed to save the new password."}), 500
+
+    app.config['ACCESS_PASSWORD'] = new_password
+
+    # Bump the self cluster entry so peers adopt the new password on next sync
+    try:
+        state = load_cluster_state()
+        for r in state["rigs"]:
+            if r.get("id") == state["self_id"]:
+                r["password"] = new_password
+                r["updated_at"] = int(time.time())
+        save_cluster_state(state)
+    except Exception as e:
+        logging.error(f"Failed to propagate new password to cluster config: {e}")
+
+    logging.info(f"Dashboard access password changed by IP: {request.remote_addr}")
+    return jsonify({"success": True, "message": "Access password updated successfully!"})
 
 @app.route('/api/overclock', methods=['POST'])
 def save_overclock():
@@ -1529,15 +2102,15 @@ def check_update():
 @app.route('/api/update/pull', methods=['POST'])
 def pull_update():
     data = request.get_json()
-    if not data or 'pin' not in data:
-        return jsonify({"success": False, "message": "Missing PIN verification parameter"}), 400
+    if not data or ('password' not in data and 'pin' not in data):
+        return jsonify({"success": False, "message": "Missing password verification parameter"}), 400
         
-    user_pin = str(data['pin']).strip()
-    if user_pin != app.config['ACCESS_PIN']:
-        logging.warning(f"Failed update PIN verification attempt from IP: {request.remote_addr}")
-        return jsonify({"success": False, "message": "Invalid PIN verification code. Update aborted."}), 401
+    user_key = str(data.get('password', data.get('pin', ''))).strip()
+    if not user_key or not hmac.compare_digest(user_key, str(app.config['ACCESS_PASSWORD'])):
+        logging.warning(f"Failed update password verification attempt from IP: {request.remote_addr}")
+        return jsonify({"success": False, "message": "Invalid password verification. Update aborted."}), 401
 
-    logging.info(f"Dashboard update authorized with PIN by IP: {request.remote_addr}")
+    logging.info(f"Dashboard update authorized with password by IP: {request.remote_addr}")
     cwd = os.getcwd()
     
     # Add safe directory flag
@@ -1559,18 +2132,355 @@ def pull_update():
 
 @app.route('/api/stats')
 def api_stats():
-    hw = get_gpu_stats()
-    total_mh, per_gpu = get_miner_hashrate()
-    for g in hw["gpus"]:
-        g["hashrate"] = round(per_gpu.get(g["index"], 0.0), 2)
+    return jsonify(collect_stats_payload())
+
+# ---------------- Cluster API (UI + peer exchange) ----------------
+
+def _find_rig(state, rig_id):
+    for r in state["rigs"]:
+        if r.get("id") == rig_id:
+            return r
+    return None
+
+def _rig_view(rig, state, cache):
+    """Serialize a rig entry with cached stats for the UI."""
+    entry = cache.get("rigs", {}).get(rig["id"], {})
+    stats = entry.get("stats")
+    is_self = rig.get("id") == state["self_id"]
+    view = {
+        "id": rig.get("id"),
+        "name": rig.get("name", ""),
+        "host_label": rig.get("host_label", ""),
+        "is_self": is_self,
+        "accesses": [clean_access_entry(a) for a in rig.get("accesses", [])],
+        "updated_at": rig.get("updated_at", 0),
+        "online": bool(entry.get("online")) if rig.get("id") != state["self_id"] else True,
+        "last_sync": entry.get("fetched_at", 0),
+        "last_error": entry.get("error", ""),
+        "stats": stats
+    }
+    # Mask SSH passwords in UI responses
+    masked = []
+    for a in view["accesses"]:
+        m = dict(a)
+        if "password" in m:
+            m["password"] = "********" if m["password"] else ""
+        if "jump_password" in m:
+            m["jump_password"] = "********" if m["jump_password"] else ""
+        masked.append(m)
+    view["accesses"] = masked
+    return view
+
+@app.route('/api/cluster/rigs', methods=['GET'])
+def api_cluster_rigs():
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    cache = load_cluster_cache()
+    rigs = []
+    for r in state["rigs"]:
+        if r.get("id") == state["self_id"]:
+            # Self stats are always served fresh
+            try:
+                entry = {"stats": collect_stats_payload(), "fetched_at": int(time.time()),
+                         "online": True, "error": ""}
+            except Exception:
+                entry = cache.get("rigs", {}).get(state["self_id"], {})
+        else:
+            entry = cache.get("rigs", {}).get(r["id"], {})
+        rigs.append(_rig_view(r, state, {"rigs": {r["id"]: entry}}))
     return jsonify({
-        "system": get_system_stats(),
-        "gpus": hw["gpus"],
-        "igpus": hw["igpus"],
-        "total_hashrate_mh": round(total_mh, 2),
-        "overclocks": get_overclocks_formatted(),
-        "csrf_token": session.get('csrf_token', '')
+        "success": True,
+        "cluster_name": state.get("cluster_name", ""),
+        "self_id": state["self_id"],
+        "sync_interval": state.get("sync_interval", DEFAULT_SYNC_INTERVAL),
+        "last_sync": _cluster_last_sync["ts"],
+        "last_sync_ok": _cluster_last_sync["ok"],
+        "last_sync_message": _cluster_last_sync["message"],
+        "sshpass_available": bool(shutil.which("sshpass")),
+        "rigs": rigs
     })
+
+@app.route('/api/cluster/settings', methods=['POST'])
+def api_cluster_settings():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    if "cluster_name" in data:
+        cname = str(data.get("cluster_name", "")).strip()
+        if len(cname) > 60 or not re.match(r'^[A-Za-z0-9_\-\s]*$', cname):
+            return jsonify({"success": False, "message": "Invalid cluster name."}), 400
+        state["cluster_name"] = cname
+    if "sync_interval" in data:
+        try:
+            interval = int(data.get("sync_interval"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Sync interval must be an integer."}), 400
+        if not (15 <= interval <= 3600):
+            return jsonify({"success": False, "message": "Sync interval must be between 15 and 3600 seconds."}), 400
+        state["sync_interval"] = interval
+    if save_cluster_state(state):
+        return jsonify({"success": True, "message": "Cluster settings saved."})
+    return jsonify({"success": False, "message": "Failed to save cluster settings."}), 500
+
+@app.route('/api/cluster/rig', methods=['POST'])
+def api_cluster_rig_save():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+
+    rig_id = str(data.get("id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    password = str(data.get("password", ""))
+    host_label = str(data.get("host_label", "")).strip()
+
+    if not name or len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s\.]+$', name):
+        return jsonify({"success": False, "message": "Invalid rig name (1-60 chars, letters/digits/space/-_.)."}), 400
+    if password and len(password) > 128:
+        return jsonify({"success": False, "message": "Dashboard password is too long."}), 400
+    if host_label and len(host_label) > 80:
+        return jsonify({"success": False, "message": "Host label is too long."}), 400
+
+    now = int(time.time())
+    existing = None
+    if rig_id:
+        existing = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
+        if existing is None:
+            return jsonify({"success": False, "message": "Rig not found."}), 404
+
+    if existing is None:
+        if not password:
+            return jsonify({"success": False, "message": "Dashboard password of the remote rig is required."}), 400
+        rig = {
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "host_label": host_label,
+            "is_self": False,
+            "password": password,
+            "accesses": [],
+            "updated_at": now,
+            "added_at": now
+        }
+        state["rigs"].append(rig)
+        action = "added"
+    else:
+        is_self = existing.get("id") == state["self_id"]
+        if is_self:
+            existing["name"] = name
+            existing["host_label"] = host_label or existing.get("host_label", "")
+        else:
+            existing["name"] = name
+            existing["host_label"] = host_label
+            if password:
+                existing["password"] = password
+        existing["updated_at"] = now
+        action = "updated"
+
+    if save_cluster_state(state):
+        logging.info(f"Cluster rig '{name}' {action} by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": f"Rig '{name}' {action} successfully!", "rig_id": existing["id"] if existing else rig["id"]})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/rig/delete', methods=['POST'])
+def api_cluster_rig_delete():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig_id = str(data.get("id", "")).strip()
+    if rig_id == state["self_id"]:
+        return jsonify({"success": False, "message": "Cannot remove the local rig from the cluster."}), 400
+    before = len(state["rigs"])
+    state["rigs"] = [r for r in state["rigs"] if r.get("id") != rig_id]
+    if len(state["rigs"]) == before:
+        return jsonify({"success": False, "message": "Rig not found."}), 404
+    if save_cluster_state(state):
+        return jsonify({"success": True, "message": "Rig removed from the cluster."})
+    return jsonify({"success": False, "message": "Failed to update cluster configuration."}), 500
+
+@app.route('/api/cluster/access', methods=['POST'])
+def api_cluster_access_save():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig_id = str(data.get("rig_id", "")).strip()
+    rig = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found."}), 404
+
+    # Accept masked passwords (UI resubmits unchanged secrets as '********')
+    incoming = dict(data.get("access") or {})
+    for secret_field in ("password", "jump_password"):
+        if incoming.get(secret_field) == "********":
+            existing_access = next((a for a in rig.get("accesses", [])
+                                    if a.get("id") == str(incoming.get("id", "")).strip()), None)
+            if existing_access and existing_access.get(secret_field):
+                incoming[secret_field] = existing_access.get(secret_field)
+            else:
+                incoming.pop(secret_field, None)
+
+    clean, err = validate_access_payload(incoming)
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+
+    accesses = [a for a in rig.get("accesses", []) if a.get("id") != clean["id"]]
+    accesses.append(clean)
+    rig["accesses"] = accesses
+    rig["updated_at"] = int(time.time())
+
+    if save_cluster_state(state):
+        logging.info(f"SSH access '{clean['name']}' saved for rig '{rig.get('name')}' by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "SSH access saved successfully!", "access_id": clean["id"]})
+    return jsonify({"success": False, "message": "Failed to save SSH access."}), 500
+
+@app.route('/api/cluster/access/delete', methods=['POST'])
+def api_cluster_access_delete():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig_id = str(data.get("rig_id", "")).strip()
+    access_id = str(data.get("access_id", "")).strip()
+    rig = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found."}), 404
+    before = len(rig.get("accesses", []))
+    rig["accesses"] = [a for a in rig.get("accesses", []) if a.get("id") != access_id]
+    if len(rig["accesses"]) == before:
+        return jsonify({"success": False, "message": "Access not found."}), 404
+    rig["updated_at"] = int(time.time())
+    if save_cluster_state(state):
+        return jsonify({"success": True, "message": "SSH access removed."})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/access/test', methods=['POST'])
+def api_cluster_access_test():
+    """Test an SSH access (unsaved payload allowed) by running hostname over SSH."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    incoming = dict(data.get("access") or {})
+    # When testing a saved access by id, load it (keeps masked secrets usable)
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    access_id = str(incoming.get("id", "")).strip()
+    if incoming.get("password") == "********" or incoming.get("jump_password") == "********" or access_id:
+        rig_id = str(data.get("rig_id", "")).strip()
+        rig = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
+        saved = next((a for a in (rig.get("accesses", []) if rig else []) if a.get("id") == access_id), None)
+        if saved:
+            for secret_field in ("password", "jump_password"):
+                if incoming.get(secret_field) in ("********", None, ""):
+                    incoming[secret_field] = saved.get(secret_field, "")
+    clean, err = validate_access_payload(incoming)
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+
+    ok, out, ssh_err = run_ssh_command(clean, "hostname && echo __OK__", timeout=30)
+    if ok and "__OK__" in out:
+        hostname = out.replace("__OK__", "").strip().splitlines()
+        hostname = hostname[0].strip() if hostname else "unknown"
+        return jsonify({"success": True,
+                        "message": "SSH connection OK. Remote host: %s" % hostname,
+                        "hostname": hostname})
+    return jsonify({"success": False, "message": "SSH test failed: %s" % (ssh_err or "unknown error")})
+
+@app.route('/api/cluster/rig/test', methods=['POST'])
+def api_cluster_rig_test():
+    """Test all SSH accesses of a saved rig in order, returning per-access results."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig = next((r for r in state["rigs"] if r.get("id") == str(data.get("id", "")).strip()), None)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found."}), 404
+
+    results = []
+    for access in rig.get("accesses", []):
+        ok, out, ssh_err = run_ssh_command(access, "hostname && echo __OK__", timeout=30)
+        results.append({
+            "id": access.get("id"),
+            "name": access.get("name"),
+            "ok": bool(ok and "__OK__" in out),
+            "detail": ("hostname: %s" % out.replace("__OK__", "").strip().splitlines()[0].strip()
+                       if ok and "__OK__" in out else (ssh_err or "unknown error"))
+        })
+    # Also verify the remote dashboard API with the stored password when SSH works
+    api_ok, _, _, api_err, api_access = cluster_remote_api(rig, "GET", "api/cluster/state", timeout=40)
+    return jsonify({"success": True, "results": results,
+                    "api_ok": api_ok,
+                    "api_detail": ("Dashboard API reachable via '%s'" % api_access) if api_ok
+                                  else ("Dashboard API check failed: %s" % api_err)})
+
+@app.route('/api/cluster/sync/now', methods=['POST'])
+def api_cluster_sync_now():
+    def _run():
+        try:
+            run_sync_cycle(triggered_by="manual")
+        except Exception as e:
+            logging.error(f"Manual cluster sync failed: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"success": True, "message": "Cluster sync started..."})
+
+# Peer exchange endpoints (bearer or session authenticated)
+@app.route('/api/cluster/state', methods=['GET'])
+def api_cluster_state():
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    return jsonify({
+        "success": True,
+        "cluster_name": state.get("cluster_name", ""),
+        "self_id": state["self_id"],
+        "sync_interval": state.get("sync_interval", DEFAULT_SYNC_INTERVAL),
+        "rigs": state["rigs"]
+    })
+
+@app.route('/api/cluster/sync', methods=['POST'])
+def api_cluster_sync_push():
+    data = request.get_json()
+    if not data or not isinstance(data.get("rigs"), list):
+        return jsonify({"success": False, "message": "Invalid sync payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    state["rigs"] = merge_rig_lists(state["rigs"], data["rigs"])
+    if data.get("cluster_name") and not state.get("cluster_name"):
+        state["cluster_name"] = str(data["cluster_name"])
+    saved = save_cluster_state(state)
+    return jsonify({"success": bool(saved), "message": "Cluster state merged." if saved else "Failed to persist merged state."})
+
+# ---------------- Remote rig proxy (full dashboard over SSH) ----------------
+
+@app.route('/api/remote/<rig_id>/<path:subpath>', methods=['GET', 'POST'])
+def api_remote_proxy(rig_id, subpath):
+    if not subpath.startswith("api/"):
+        return jsonify({"success": False, "message": "Invalid remote path."}), 404
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig = next((r for r in state["rigs"]
+                if r.get("id") == rig_id and r["id"] != state["self_id"]), None)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found in cluster."}), 404
+
+    body = request.get_data(cache=True) if request.method == "POST" else None
+    ok, data, http_code, err, access_name = cluster_remote_api(rig, request.method, subpath, body=body)
+    if not ok:
+        logging.warning(f"Remote proxy to rig '{rig.get('name')}' failed: {err}")
+        return jsonify({"success": False,
+                        "message": "Cannot reach rig '%s' (%s)" % (rig.get("name", rig_id), err)}), 502
+    resp = Response(json.dumps(data if data is not None else {}),
+                    status=http_code if http_code >= 400 else 200,
+                    mimetype='application/json')
+    resp.headers['X-Remote-Rig'] = rig.get("name", rig_id)
+    return resp
 
 @app.route('/')
 def dashboard():
@@ -1594,8 +2504,9 @@ if __name__ == '__main__':
 
     # Initialize presets directory
     os.makedirs(PRESETS_DIR, exist_ok=True)
-
-    app.config['ACCESS_PIN'] = load_or_generate_pin()
+    
+    # Start the background cluster synchronization worker
+    start_cluster_worker()
     
     local_ip = get_local_ip()
     port = 1337
@@ -1611,7 +2522,7 @@ if __name__ == '__main__':
     print("="*60)
     print(" -> STATUS: Running in PRODUCTION MODE (HiveOS host verified)")
     print(" -> CONFIGS: Reading/Writing from /hive-config/")
-    print(f" -> ACCESS PIN: {app.config['ACCESS_PIN']}")
+    print(f" -> ACCESS PASSWORD: {app.config['ACCESS_PASSWORD']}")
     print(f" -> DASHBOARD ADDRESS: http://{local_ip}:{port}")
     print("="*60 + "\n")
     

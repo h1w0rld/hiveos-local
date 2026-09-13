@@ -53,8 +53,44 @@
                 <div class="badge bg-dark-card border border-secondary-subtle py-2 px-3 text-secondary-emphasis">
                     <i class="bi bi-tag-fill me-1"></i> v<span id="dashboardVersion">1.0.0</span>
                 </div>
+                <button id="changePasswordBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1 py-2 px-3" title="Change access password">
+                    <i class="bi bi-key-fill"></i> Password
+                </button>
             </div>
         </header>
+
+        <!-- Main Navigation Tabs -->
+        <nav class="mb-4">
+            <ul class="nav main-nav-tabs gap-2 flex-nowrap overflow-auto pb-1" id="mainNavTabs">
+                <li class="nav-item">
+                    <a class="nav-link active" href="#cluster" data-view="cluster">
+                        <i class="bi bi-diagram-3-fill me-1"></i> Cluster
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="#accesses" data-view="accesses">
+                        <i class="bi bi-key-fill me-1"></i> SSH Accesses
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="#dashboard" data-view="dashboard">
+                        <i class="bi bi-speedometer2 me-1"></i> Rig Dashboard
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Current rig scope banner (visible in dashboard view when managing a remote rig) -->
+        <div id="rigScopeBanner" class="alert glass-card border-warning-subtle d-none mb-4 d-flex flex-wrap justify-content-between align-items-center gap-2" role="alert">
+            <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-hdd-network fs-5 text-warning"></i>
+                <span class="fw-semibold">Managing remote rig: <span id="rigScopeName" class="text-warning">RIG</span></span>
+                <span class="badge bg-warning-glow border border-warning text-warning fw-semibold">REMOTE</span>
+            </div>
+            <button id="rigScopeBackBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
+                <i class="bi bi-arrow-left"></i> Back to Cluster
+            </button>
+        </div>
 
         <!-- Update Available Banner -->
         <div id="updateBanner" class="alert alert-warning glass-card d-none mb-4 d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3" role="alert">
@@ -65,13 +101,161 @@
                 </span>
             </div>
             <div class="d-flex align-items-center gap-2">
-                <input type="password" id="updateVerificationPin" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" maxlength="6" placeholder="Enter PIN to confirm" style="width: 150px; height: 31px; border: 1px solid rgba(255, 193, 7, 0.4);">
+                <input type="password" id="updateVerificationPin" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" placeholder="Password to confirm" style="width: 170px; height: 31px; border: 1px solid rgba(255, 193, 7, 0.4);">
                 <button id="applyUpdateBtn" class="btn btn-warning btn-sm fw-semibold d-flex align-items-center gap-1">
                     <i class="bi bi-arrow-down-circle-fill"></i> Update Now
                 </button>
             </div>
         </div>
 
+        <!-- ============================================================= -->
+        <!-- VIEW: CLUSTER (all rigs overview)                             -->
+        <!-- ============================================================= -->
+        <div id="view-cluster" class="view-section">
+            <!-- Cluster Summary -->
+            <section class="row g-4 mb-4">
+                <div class="col-md-12">
+                    <div class="card glass-card">
+                        <div class="card-body">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                                <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                    <i class="bi bi-diagram-3-fill text-primary"></i> Farm Cluster Overview
+                                    <span id="clusterNameBadge" class="badge bg-accent-glow text-primary fw-semibold d-none"></span>
+                                </h2>
+                                <div class="d-flex flex-wrap gap-2 align-items-center">
+                                    <div class="input-group input-group-sm" style="width: 170px;" title="Cluster name (synced between rigs)">
+                                        <span class="input-group-text bg-dark-input border-secondary-subtle"><i class="bi bi-tags"></i></span>
+                                        <input type="text" class="form-control bg-dark-input text-white border-secondary-subtle" id="clusterNameInput" placeholder="Cluster name">
+                                        <button id="clusterNameSaveBtn" class="btn btn-outline-secondary" title="Save cluster name"><i class="bi bi-check-lg"></i></button>
+                                    </div>
+                                    <button id="syncNowBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1">
+                                        <i class="bi bi-arrow-repeat"></i> Sync Now
+                                    </button>
+                                    <button id="addRigBtn" class="btn btn-sm btn-primary fw-semibold d-flex align-items-center gap-1">
+                                        <i class="bi bi-plus-lg"></i> Add Rig
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Rigs Online</span>
+                                        <span id="clusterOnline" class="stat-value text-success">0 / 0</span>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Total Speed</span>
+                                        <span id="clusterTotalHashrate" class="stat-value text-primary-gradient fw-bold">0 MH/s</span>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Total GPUs</span>
+                                        <span id="clusterTotalGpus" class="stat-value text-success">0</span>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Total Power</span>
+                                        <span id="clusterTotalPower" class="stat-value text-danger-emphasis">0 W</span>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Avg Temp</span>
+                                        <span id="clusterAvgTemp" class="stat-value">0 °C</span>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Last Sync</span>
+                                        <span id="clusterLastSync" class="stat-value">never</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Rigs grid -->
+            <section class="mb-4">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <h2 class="h4 fw-bold mb-0">Mining Rigs</h2>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="small text-muted d-flex align-items-center gap-1">
+                            <i class="bi bi-arrow-repeat spin-animation d-none" id="clusterSyncSpinner"></i>
+                            <span id="clusterSyncStatus" class="text-muted"></span>
+                        </span>
+                    </div>
+                </div>
+                <div id="clusterRigsContainer" class="row g-4">
+                    <div class="col-12 text-center py-5">
+                        <div class="spinner-border text-primary" role="status"></div>
+                        <p class="mt-2 text-muted">Loading cluster rigs...</p>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- ============================================================= -->
+        <!-- VIEW: SSH ACCESSES (all configured SSH routes)                -->
+        <!-- ============================================================= -->
+        <div id="view-accesses" class="view-section d-none">
+            <section class="mb-4">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                            <div>
+                                <h2 class="h5 fw-bold mb-1 d-flex align-items-center gap-2">
+                                    <i class="bi bi-key-fill text-warning"></i> SSH Access Configuration
+                                </h2>
+                                <p class="text-muted small mb-0">
+                                    Every rig can be reached by multiple SSH routes: direct connection or via a jump server.
+                                    Accesses sync across the cluster together with their rigs.
+                                </p>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button id="accessRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                                <button id="addAccessBtn" class="btn btn-sm btn-primary fw-semibold d-flex align-items-center gap-1">
+                                    <i class="bi bi-plus-lg"></i> Add Access
+                                </button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.9rem;">
+                                <thead>
+                                    <tr class="text-muted border-bottom border-secondary-subtle">
+                                        <th>Rig</th>
+                                        <th>Access Name</th>
+                                        <th>Type</th>
+                                        <th>Connection</th>
+                                        <th>Auth</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="accessesTableBody">
+                                    <tr><td colspan="6" class="text-center text-muted py-4">Loading accesses...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="sshpassWarning" class="alert alert-warning small mt-3 mb-0 d-none border-warning-subtle">
+                            <i class="bi bi-exclamation-triangle-fill"></i>
+                            <strong>sshpass is not installed</strong> — password-based SSH accesses will not work.
+                            Install it with: <code>sudo apt-get install -y sshpass</code> or use SSH key authentication instead.
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- ============================================================= -->
+        <!-- VIEW: RIG DASHBOARD (existing local/remote monitoring UI)     -->
+        <!-- ============================================================= -->
+        <div id="view-dashboard" class="view-section d-none">
         <!-- System Overview Panel -->
         <section class="row g-4 mb-4">
             <div class="col-md-12">
@@ -531,6 +715,7 @@
                 </div>
             </div>
         </section>
+        </div><!-- /view-dashboard -->
 
         <!-- Footer -->
         <footer class="text-center text-muted small py-4 mt-5 border-top border-secondary-subtle">
@@ -800,6 +985,196 @@
         </div>
     </div>
 
+    <!-- Rig Add/Edit Modal (includes access management) -->
+    <div class="modal fade" id="rigModal" tabindex="-1" aria-labelledby="rigModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold" id="rigModalLabel">
+                        <i class="bi bi-diagram-3 text-primary me-2"></i> <span id="rigModalTitle">Add Rig</span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3 mb-2">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Rig Name</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="rigNameInput" placeholder="e.g. RIG1" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Dashboard Password of This Rig</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="rigPasswordInput" placeholder="Web panel password on that rig">
+                            <div class="form-text small" id="rigPasswordHelp">Used by other rigs to call this rig's API. For the local rig change it via the Password button in the header.</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small fw-semibold text-muted mb-1">Note / Host Label (optional)</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="rigHostLabelInput" placeholder="e.g. netbird 100.127.0.109 / LAN 192.168.1.109">
+                        </div>
+                    </div>
+                    <hr class="border-secondary-subtle">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="fw-bold mb-0"><i class="bi bi-key-fill text-warning me-1"></i> SSH Accesses</h6>
+                        <button type="button" id="rigModalAddAccessBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
+                            <i class="bi bi-plus-lg"></i> Add Access
+                        </button>
+                    </div>
+                    <div id="rigModalAccessList" class="border border-secondary-subtle rounded bg-dark-card p-2" style="min-height: 80px;"></div>
+                    <div class="mt-2 d-flex justify-content-end">
+                        <button type="button" id="rigModalTestBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1">
+                            <i class="bi bi-plug"></i> Test All Accesses
+                        </button>
+                    </div>
+                    <div id="rigModalTestResults" class="mt-2 small"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-danger me-auto d-none" id="rigModalDeleteBtn">
+                        <i class="bi bi-trash"></i> Remove Rig
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" id="rigModalSaveBtn" class="btn btn-primary fw-semibold">Save Rig</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SSH Access Add/Edit Modal -->
+    <div class="modal fade" id="accessModal" tabindex="-1" aria-labelledby="accessModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold" id="accessModalLabel">
+                        <i class="bi bi-key-fill text-warning me-2"></i> <span id="accessModalTitle">Add SSH Access</span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Rig</label>
+                            <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="accessRigSelect" required></select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Access Name</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="accessNameInput" placeholder="e.g. NetBird direct / via jump" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Access Type</label>
+                            <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="accessTypeSelect">
+                                <option value="direct">Direct SSH connection</option>
+                                <option value="jump">SSH via jump server</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold text-muted mb-1">Target Host (rig)</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="accessHostInput" placeholder="100.127.0.109" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold text-muted mb-1">SSH Port</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="accessPortInput" value="22" min="1" max="65535" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">SSH User</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="accessUserInput" placeholder="user" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Auth Method</label>
+                            <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="accessAuthSelect">
+                                <option value="password">Password (sshpass)</option>
+                                <option value="key">SSH private key</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6" id="accessPasswordBlock">
+                            <label class="form-label small fw-semibold text-muted mb-1">SSH Password</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="accessPasswordInput" placeholder="SSH password">
+                        </div>
+                        <div class="col-md-6 d-none" id="accessKeyBlock">
+                            <label class="form-label small fw-semibold text-muted mb-1">Private Key Path (optional)</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="accessKeyPathInput" placeholder="/root/.ssh/id_ed25519">
+                        </div>
+                    </div>
+
+                    <!-- Jump server settings -->
+                    <div id="jumpSettingsBlock" class="d-none mt-3 border border-secondary-subtle rounded p-3 bg-dark-card">
+                        <h6 class="fw-bold mb-2 text-secondary-emphasis"><i class="bi bi-arrow-right-square-fill me-1"></i> Jump Server</h6>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump Host</label>
+                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpHostInput" placeholder="100.127.0.1">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump Port</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="jumpPortInput" value="22" min="1" max="65535">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump User</label>
+                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpUserInput" placeholder="user">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump Auth</label>
+                                <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="jumpAuthSelect">
+                                    <option value="password">Password (sshpass)</option>
+                                    <option value="key">SSH private key</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6" id="jumpPasswordBlock">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump Password</label>
+                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpPasswordInput" placeholder="Jump server SSH password">
+                            </div>
+                            <div class="col-md-6 d-none" id="jumpKeyBlock">
+                                <label class="form-label small fw-semibold text-muted mb-1">Jump Private Key Path (optional)</label>
+                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpKeyPathInput" placeholder="/root/.ssh/id_ed25519">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="accessTestBtn" class="btn btn-outline-info fw-semibold d-flex align-items-center gap-1 me-auto">
+                        <i class="bi bi-plug"></i> Test Connection
+                    </button>
+                    <span id="accessTestResult" class="small me-2"></span>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" id="accessSaveBtn" class="btn btn-primary fw-semibold">Save Access</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Password Modal -->
+    <div class="modal fade" id="passwordModal" tabindex="-1" aria-labelledby="passwordModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold" id="passwordModalLabel">
+                        <i class="bi bi-key-fill text-primary me-2"></i> Change Access Password
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info small border-info-subtle" role="alert">
+                        <i class="bi bi-info-circle-fill"></i> The access password protects this rig's dashboard.
+                        After changing it, other cluster rigs adopt the new password automatically on the next sync.
+                    </div>
+                    <div class="mb-3">
+                        <label for="currentPasswordInput" class="form-label fw-medium">Current Password / PIN</label>
+                        <input type="password" class="form-control bg-dark-input font-monospace" id="currentPasswordInput" autocomplete="current-password" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="newPasswordInput" class="form-label fw-medium">New Password (4-64 characters)</label>
+                        <input type="password" class="form-control bg-dark-input font-monospace" id="newPasswordInput" autocomplete="new-password" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="confirmPasswordInput" class="form-label fw-medium">Confirm New Password</label>
+                        <input type="password" class="form-control bg-dark-input font-monospace" id="confirmPasswordInput" autocomplete="new-password" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" id="passwordSaveBtn" class="btn btn-primary fw-semibold">Update Password</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notifications -->
     <div class="toast-container position-fixed bottom-0 end-0 p-3">
         <div id="statusToast" class="toast align-items-center border-0" role="alert" aria-live="assertive" aria-atomic="true">
@@ -820,11 +1195,11 @@
                 <div class="mb-3">
                     <i class="bi bi-shield-lock-fill fs-1 text-primary-gradient"></i>
                 </div>
-                <h3 class="fw-bold mb-2">Access PIN Required</h3>
-                <p class="text-muted small mb-4">This local emergency dashboard is PIN protected. Enter the 6-digit access key displayed on the server terminal during installation.</p>
+                <h3 class="fw-bold mb-2">Access Password Required</h3>
+                <p class="text-muted small mb-4">This dashboard is password protected. Enter the access key displayed on the server terminal during installation.</p>
                 <form id="loginForm">
                     <div class="mb-3">
-                        <input type="password" class="form-control form-control-lg text-center bg-dark-input fw-bold font-monospace" id="loginPin" maxlength="6" placeholder="Enter PIN" autocomplete="current-password" required>
+                        <input type="password" class="form-control form-control-lg text-center bg-dark-input fw-bold font-monospace" id="loginPassword" placeholder="Enter password" autocomplete="current-password" required>
                     </div>
                     <button type="submit" class="btn btn-primary w-100 py-2 fw-semibold mb-2">Authorize Session</button>
                     <div id="loginError" class="text-danger small mt-2 d-none">

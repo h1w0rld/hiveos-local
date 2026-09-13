@@ -282,3 +282,50 @@ body {
 [data-bs-theme="light"] .toast {
     background: rgba(255, 255, 255, 0.9) !important;
 }
+
+/* Main navigation tabs (Cluster / SSH Accesses / Rig Dashboard) */
+.main-nav-tabs .nav-link {
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 12px;
+    font-weight: 600;
+    padding: 10px 22px;
+    white-space: nowrap;
+    transition: all 0.25s ease;
+}
+
+.main-nav-tabs .nav-link:hover {
+    color: var(--text-primary);
+    border-color: rgba(99, 102, 241, 0.4);
+}
+
+.main-nav-tabs .nav-link.active {
+    background: var(--primary-gradient);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 6px 18px -6px rgba(99, 102, 241, 0.6);
+}
+
+/* Spinning icons (used by busy indicators) */
+.spin-animation {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Cluster rig cards */
+.cluster-rig-badge {
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+/* Small button variant used in access lists */
+.btn-xs {
+    --bs-btn-padding-y: 0.15rem;
+    --bs-btn-padding-x: 0.45rem;
+    --bs-btn-font-size: 0.75rem;
+}

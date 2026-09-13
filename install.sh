@@ -70,10 +70,10 @@ if [ "$1" == "--upgrade" ] || [ "$1" == "--update" ]; then
 fi
 echo "[+] Detected installation directory: $DIR"
 
-# 1. Install Dependencies (Flask + Waitress)
-echo "[+] Checking/Installing Python3 dependencies (Flask, Waitress)..."
+# 1. Install Dependencies (Flask + Waitress + sshpass for cluster SSH auth)
+echo "[+] Checking/Installing Python3 dependencies (Flask, Waitress, sshpass)..."
 if command -v apt-get &> /dev/null; then
-  apt-get update -y && apt-get install -y python3-flask python3-pip
+  apt-get update -y && apt-get install -y python3-flask python3-pip sshpass
   # Try to install waitress via apt or pip requirements
   apt-get install -y python3-waitress || python3 -m pip install -r "$DIR/requirements.txt"
 else
@@ -117,7 +117,7 @@ systemctl restart hiveos-local.service
 echo "[+] Initializing security keys..."
 sleep 1.5
 
-# 4. Read Access PIN
+# 4. Read Access Password (dashboard.key may hold a PIN or a full password)
 PIN_KEY_PATH="/hive-config/dashboard.key"
 if [ ! -f "$PIN_KEY_PATH" ]; then
   # Fallback to local directory if not running on standard HiveOS directory structure
@@ -125,9 +125,9 @@ if [ ! -f "$PIN_KEY_PATH" ]; then
 fi
 
 if [ -f "$PIN_KEY_PATH" ]; then
-  ACCESS_PIN=$(cat "$PIN_KEY_PATH")
+  ACCESS_KEY=$(cat "$PIN_KEY_PATH")
 else
-  ACCESS_PIN="[ERROR: Key file not found]"
+  ACCESS_KEY="[ERROR: Key file not found]"
 fi
 
 # 5. Detect LAN IP Address
@@ -152,7 +152,8 @@ echo -e ""
 echo -e "Open the dashboard in any local web browser:"
 echo -e "-> \033[1;36mhttp://${LOCAL_IP}:1337\033[0m"
 echo -e ""
-echo -e "\033[1;33m[!] IMPORTANT SECURITY ACCESS PIN:\033[0m"
-echo -e "Authorization Key: \033[1;32m${ACCESS_PIN}\033[0m"
-echo -e "Please keep this PIN safe. It is required to log into the dashboard."
+echo -e "\033[0;33m[!] IMPORTANT ACCESS PASSWORD:\033[0m"
+echo -e "Authorization Key: \033[1;32m${ACCESS_KEY}\033[0m"
+echo -e "Please keep this password safe. It is required to log into the dashboard."
+echo -e "It can be changed any time in the web UI (Password button in the header)."
 echo -e "==================================================================\n"
