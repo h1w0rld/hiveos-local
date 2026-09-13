@@ -1,6 +1,9 @@
 // Global state to store overclock configurations
 let activeOverclocks = {};
 let csrfToken = '';
+let activeHardwareTab = 'gpus';
+let lastStatsData = null;
+let lastHugepagesEnabled = false;
 
 // Self-healing CSRF: if any POST fails with 403 (stale token after
 // server restart or page reload), refresh the token and retry once
@@ -33,6 +36,8 @@ function switchHardwareTab(showGpus) {
     const gpusBtn = document.getElementById('showGpusBtn');
     const igpusBtn = document.getElementById('showIgpusBtn');
     
+    activeHardwareTab = showGpus ? 'gpus' : 'igpus';
+    
     gpuContainer.classList.toggle('d-none', !showGpus);
     igpuContainer.classList.toggle('d-none', showGpus);
     
@@ -42,6 +47,29 @@ function switchHardwareTab(showGpus) {
     igpusBtn.classList.toggle('btn-primary', !showGpus);
     igpusBtn.classList.toggle('btn-outline-primary', showGpus);
     igpusBtn.classList.toggle('active', !showGpus);
+    
+    if (lastStatsData) {
+        updateHardwareStatBoxes(lastStatsData);
+    }
+}
+
+// Stat boxes reflect the active hardware tab (GPUs vs CPU iGPU)
+function updateHardwareStatBoxes(data) {
+    const gpuCountEl = document.getElementById('statGpuCount');
+    const speedEl = document.getElementById('statTotalHashrate');
+    if (!gpuCountEl || !speedEl || !data) return;
+    
+    if (activeHardwareTab === 'igpus') {
+        const igpuCount = (data.igpus || []).length;
+        gpuCountEl.textContent = igpuCount + ' iGPU' + (igpuCount === 1 ? '' : 's');
+        
+        const cpuHash = (data.system.cpu && data.system.cpu.hashrate) || 0;
+        speedEl.textContent = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' KH/s' : cpuHash.toFixed(0) + ' H/s';
+    } else {
+        const totalHashrate = data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
+        gpuCountEl.textContent = data.gpus.length + ' Cards';
+        speedEl.textContent = totalHashrate.toFixed(2) + ' MH/s';
+    }
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -252,6 +280,40 @@ document.addEventListener('DOMContentLoaded', function() {
     // Hardware view switch: discrete GPUs vs CPU integrated graphics
     document.getElementById('showGpusBtn').addEventListener('click', () => switchHardwareTab(true));
     document.getElementById('showIgpusBtn').addEventListener('click', () => switchHardwareTab(false));
+
+    // CPU mining settings modal save handler
+    document.getElementById('cpuSettingsSaveBtn').addEventListener('click', async function() {
+        const enable = document.getElementById('cpuHugepagesSelect').value === 'enable';
+        const btn = this;
+        btn.disabled = true;
+        const origHTML = btn.innerHTML;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Applying...`;
+        
+        try {
+            const response = await fetch('/api/hugepages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken
+                },
+                body: JSON.stringify({ enable: enable })
+            });
+            const data = await response.json();
+            if (response.ok && data.success) {
+                showToast(data.message, true);
+                fetchStats();
+                bootstrap.Modal.getInstance(document.getElementById('cpuSettingsModal')).hide();
+            } else {
+                showToast(data.message || "Failed to configure Huge Pages.", false);
+            }
+        } catch (error) {
+            console.error("Huge Pages toggle failed:", error);
+            showToast("Network error trying to toggle Huge Pages.", false);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = origHTML;
+        }
+    });
 
     // 5. Form Submit Handlers for Overclocking
     document.getElementById('nvOcForm').addEventListener('submit', function(e) {
@@ -704,14 +766,12 @@ async function fetchStats() {
         document.getElementById('statVersion').textContent = data.system.hive_version;
 
         // Calculate and Update GPU Overall Summaries
-        let totalHashrate = 0;
         let totalPower = 0;
         let sumTemp = 0;
         let sumFan = 0;
         let gpuCount = data.gpus.length;
 
         data.gpus.forEach(gpu => {
-            totalHashrate += gpu.hashrate;
             totalPower += gpu.power;
             sumTemp += gpu.temp;
             sumFan += gpu.fan;
@@ -720,12 +780,13 @@ async function fetchStats() {
         let avgTemp = gpuCount > 0 ? (sumTemp / gpuCount).toFixed(1) : 0;
         let avgFan = gpuCount > 0 ? (sumFan / gpuCount).toFixed(1) : 0;
 
-        document.getElementById('statGpuCount').textContent = gpuCount + ' Cards';
-        document.getElementById('statTotalHashrate').textContent = totalHashrate.toFixed(2) + ' MH/s';
         document.getElementById('statAvgTemp').textContent = avgTemp + ' °C';
         document.getElementById('statAvgFan').textContent = avgFan + ' %';
         document.getElementById('statTotalPower').textContent = totalPower.toFixed(1) + ' W';
         document.getElementById('statCoin').textContent = data.system.coin || 'Unknown';
+        
+        // Total GPUs / Total Speed reflect the active hardware tab
+        updateHardwareStatBoxes(data);
         
         // Update CPU Mining Panel
         document.getElementById('cpuModelName').textContent = data.system.cpu.model;
@@ -743,10 +804,12 @@ async function fetchStats() {
         const hashrate = data.system.cpu.hashrate;
         const formattedHash = hashrate > 1000 ? (hashrate / 1000).toFixed(2) + ' KH/s' : hashrate.toFixed(0) + ' H/s';
         document.getElementById('cpuHashrateBadge').textContent = formattedHash;
+        lastHugepagesEnabled = !!data.system.cpu.hugepages;
 
         // Render GPU cards + integrated graphics tab
         renderGpus(data.gpus);
-        renderIgpus(data.igpus || []);
+        renderIgpus(data.igpus || [], data.system);
+        lastStatsData = data;
         
     } catch (error) {
         console.error("Error fetching stats:", error);
@@ -863,17 +926,66 @@ function renderGpus(gpus) {
     });
 }
 
-// Render CPU integrated graphics cards (separate tab)
-function renderIgpus(igpus) {
+// Render CPU integrated graphics cards + CPU mining card (separate tab)
+function renderIgpus(igpus, system) {
     const container = document.getElementById('igpuContainer');
     container.innerHTML = '';
     
-    if (!igpus || igpus.length === 0) {
-        container.innerHTML = `
-            <div class="col-12 text-center py-4">
-                <p class="text-muted">No integrated graphics detected on this system.</p>
+    // CPU mining card with settings access
+    const cpu = system && system.cpu ? system.cpu : null;
+    if (cpu) {
+        const cpuHash = cpu.hashrate || 0;
+        const cpuHashStr = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' KH/s' : cpuHash.toFixed(0) + ' H/s';
+        const cpuTempClass = cpu.temp > 85 ? 'red' : (cpu.temp > 70 ? 'primary' : 'green');
+        
+        const cpuCol = document.createElement('div');
+        cpuCol.className = 'col-md-6 col-lg-4';
+        cpuCol.innerHTML = `
+            <div class="card glass-card h-100">
+                <div class="card-body d-flex flex-column justify-content-between">
+                    <div>
+                        <div class="gpu-header d-flex justify-content-between align-items-center mb-3">
+                            <span class="small fw-semibold text-muted">CPU</span>
+                            <span class="badge bg-accent-glow text-info fw-bold font-monospace">${cpuHashStr}</span>
+                        </div>
+                        
+                        <h3 class="h6 fw-bold mb-1" style="font-size: 0.95rem;">${cpu.model}</h3>
+                        <p class="small text-muted mb-3">
+                            <span class="brand-intel">XMRig CPU Mining</span> • Huge Pages: ${cpu.hugepages ? '<span class="text-success fw-semibold">Enabled</span>' : '<span class="text-danger fw-semibold">Disabled</span>'}
+                        </p>
+                        
+                        <div class="metric-row">
+                            <div class="metric-label">
+                                <span>Temperature</span>
+                                <span class="metric-value">${cpu.temp}°C</span>
+                            </div>
+                            <div class="progress bg-black bg-opacity-20" style="height: 8px;">
+                                <div class="progress-bar progress-bar-glow-${cpuTempClass}" 
+                                     role="progressbar" style="width: ${cpu.temp}%" aria-valuenow="${cpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-4">
+                        <button class="btn btn-sm btn-outline-info w-100 py-2 fw-semibold d-flex align-items-center justify-content-center gap-1" 
+                                onclick="openCpuSettings()">
+                            <i class="bi bi-gear"></i> Edit CPU Settings
+                        </button>
+                    </div>
+                </div>
             </div>
         `;
+        container.appendChild(cpuCol);
+    }
+    
+    if (!igpus || igpus.length === 0) {
+        if (!cpu) {
+            container.innerHTML = `
+                <div class="col-12 text-center py-4">
+                    <p class="text-muted">No integrated graphics detected on this system.</p>
+                </div>
+            `;
+        }
         return;
     }
     
@@ -924,6 +1036,13 @@ function renderIgpus(igpus) {
         container.appendChild(cardCol);
     });
 }
+
+// Open CPU mining settings modal
+window.openCpuSettings = function() {
+    document.getElementById('cpuHugepagesSelect').value = lastHugepagesEnabled ? 'enable' : 'disable';
+    const modal = new bootstrap.Modal(document.getElementById('cpuSettingsModal'));
+    modal.show();
+};
 
 // Prefill and open the correct modal for the selected GPU
 window.openOcModal = function(brand, index) {    const placeholders = document.querySelectorAll('.gpu-index-placeholder');

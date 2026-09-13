@@ -29,7 +29,7 @@ AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 
 # Local Dashboard Release Version
-VERSION = "1.0.9"
+VERSION = "1.1.0"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
@@ -606,7 +606,19 @@ def _extract_api_hashrate(data):
     if not isinstance(data, dict):
         return total, per_gpu
 
-    # rigel: {"miners":[{"hashrate": H/s, "gpus":[{"id":0,"hashrate":H/s}]}]}
+    # rigel: {"name":"Rigel","hashrate":{"algo":H/s},"devices":[{"id":0,"hashrate":{"algo":H/s}}]}
+    devices = data.get("devices")
+    if isinstance(devices, list) and devices and isinstance(data.get("hashrate"), dict):
+        total = max((_to_mh(v) for v in data["hashrate"].values()), default=0.0)
+        for g in devices:
+            if isinstance(g, dict):
+                idx = safe_int(g.get("id", -1), -1)
+                hr = g.get("hashrate")
+                if idx >= 0 and isinstance(hr, dict) and hr:
+                    per_gpu[idx] = max((_to_mh(v) for v in hr.values()), default=0.0)
+        return total, per_gpu
+
+    # rigel (older): {"miners":[{"hashrate": H/s, "gpus":[{"id":0,"hashrate":H/s}]}]}
     miners = data.get("miners")
     if isinstance(miners, list) and miners:
         m = miners[0]
@@ -643,8 +655,8 @@ def get_miner_hashrate():
     total_mh = 0.0
     per_gpu = {}
 
-    # 1. Miner HTTP stats APIs (rigel 4068, t-rex/lolminer 4028)
-    for port in (4068, 4028):
+    # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068, lolminer 4028)
+    for port in (5000, 4067, 4068, 4028):
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:
@@ -667,14 +679,22 @@ def get_miner_hashrate():
                 with open(path, 'r', errors='ignore') as f:
                     tail = f.readlines()[-60:]
                 for line in reversed(tail):
-                    m = re.search(r'Total speed:\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    # rigel: "|  Total: 245.8 MH/s|..." or legacy "Total speed: 245.8 MH/s"
+                    m = re.search(r'Total(?: speed)?:\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
                     if m and total_mh <= 0:
                         total_mh = float(m.group(1)) * _HASHRATE_UNITS[m.group(2)]
-                    g = re.search(r'GPU(\d+):\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    # rigel table row: "|6|RTX 3070 Laptop GPU|30.43 MH/s|22.50 MH/s|..."
+                    g = re.search(r'\|\s*(\d+)\s*\|[^|]*\|\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
                     if g:
                         idx = int(g.group(1))
                         if idx not in per_gpu:
                             per_gpu[idx] = float(g.group(2)) * _HASHRATE_UNITS[g.group(3)]
+                    # legacy plain: "GPU0: 55.00 MH/s"
+                    g2 = re.search(r'GPU(\d+):\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    if g2:
+                        idx = int(g2.group(1))
+                        if idx not in per_gpu:
+                            per_gpu[idx] = float(g2.group(2)) * _HASHRATE_UNITS[g2.group(3)]
                 if total_mh > 0 or per_gpu:
                     break
             except Exception:
