@@ -370,7 +370,7 @@ def build_ssh_command(access, remote_cmd, tmp_files):
              remote_cmd]
     return args, None
 
-def run_ssh_command(access, remote_cmd, timeout=35):
+def run_ssh_command(access, remote_cmd, timeout=35, stdin_data=None):
     """Execute a command on a remote rig over SSH. Returns (ok, output, error)."""
     tmp_files = []
     try:
@@ -378,7 +378,8 @@ def run_ssh_command(access, remote_cmd, timeout=35):
         if err:
             return False, "", err
         res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             stdin=subprocess.DEVNULL, timeout=timeout)
+                             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                             input=stdin_data, timeout=timeout)
         out = res.stdout.decode(errors="ignore")
         errout = res.stderr.decode(errors="ignore")
         if res.returncode != 0:
@@ -439,7 +440,7 @@ def cluster_remote_api(rig, method, path, body=None, timeout=40):
     last_error = "No SSH accesses configured for this rig"
     for access in rig.get("accesses", []):
         access_name = access.get("name") or access.get("id", "?")
-        ok, out, ssh_err = run_ssh_command(access, curl_cmd, timeout=timeout)
+        ok, out, ssh_err = run_ssh_command(access, curl_cmd, timeout=timeout, stdin_data=raw)
         if not ok:
             last_error = "%s: %s" % (access_name, ssh_err)
             continue
