@@ -15,7 +15,7 @@ import threading
 import random
 import time
 import urllib.request
-from flask import Flask, jsonify, request, render_template, session, Response
+from flask import Flask, jsonify, request, render_template, session, Response, has_request_context
 
 app = Flask(__name__)
 # Secure randomly-generated key for session management
@@ -61,8 +61,10 @@ MINER_RESTART_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner restart"
 IS_LINUX = platform.system() == "Linux"
 HAS_HIVEOS = IS_LINUX and os.path.exists(HIVE_CONFIG_DIR)
 
-# Thread safety lock for files access
-config_lock = threading.Lock()
+# Thread safety lock for files access.
+# RLock (reentrant): preset save/apply handlers legitimately nest config file
+# access inside an already-held config_lock - a plain Lock deadlocks there.
+config_lock = threading.RLock()
 
 # IP failed logins tracker for rate-limiting
 failed_login_attempts = {}
@@ -516,7 +518,8 @@ def collect_stats_payload():
         "igpus": hw["igpus"],
         "total_hashrate_mh": round(total_mh, 2),
         "overclocks": get_overclocks_formatted(),
-        "csrf_token": session.get('csrf_token', '')
+        # csrf_token only makes sense inside a request context (worker threads have none)
+        "csrf_token": session.get('csrf_token', '') if has_request_context() else ''
     }
 
 _cluster_sync_lock = threading.Lock()
