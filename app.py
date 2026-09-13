@@ -500,7 +500,7 @@ def run_sync_cycle(triggered_by="auto"):
     if not _cluster_sync_lock.acquire(blocking=False):
         return False, "Another sync cycle is already running"
     try:
-        state = load_cluster()
+        state = load_cluster_state()
         _CURRENT_SELF_ID["value"] = state["self_id"]
         cache = load_cluster_cache()
         cache.setdefault("rigs", {})
