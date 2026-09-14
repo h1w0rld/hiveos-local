@@ -2215,7 +2215,7 @@ def _apply_flight_sheet(coin, wallet, pool, miner):
 
     if not re.match(r'^[A-Za-z0-9_\-\s]+$', coin):
         return False, "Invalid Coin parameter. Use alphanumeric characters only."
-    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@]+$', wallet):
+    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@\:]+$', wallet):
         return False, "Invalid Wallet format."
     if not re.match(r'^[a-zA-Z0-9\.\-\:\/]+$', pool):
         return False, "Invalid Pool URL format."
@@ -2303,7 +2303,7 @@ def _validate_fsheet_entry(entry):
     miner = str(entry.get("miner", "none")).strip().lower()
     if not re.match(r'^[A-Za-z0-9_\-\s]*$', coin):
         return None, "Invalid coin symbol."
-    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@]*$', wallet):
+    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@\:]*$', wallet):
         return None, "Invalid wallet address."
     if not re.match(r'^[a-zA-Z0-9\.\-\:\/]*$', pool):
         return None, "Invalid pool URL format."
