@@ -38,11 +38,20 @@
             </div>
 
             <div class="d-flex flex-wrap gap-2 align-items-center mt-2 mt-md-0">
+                <!-- Cluster selector (group rigs by cluster) -->
+                <div class="dropdown" id="clusterScopeDropdown">
+                    <button class="btn btn-sm btn-dark-card border border-secondary-subtle d-flex align-items-center gap-2 py-2 px-3" data-bs-toggle="dropdown" aria-expanded="false" id="clusterScopeBtn" title="Select cluster and its rigs">
+                        <i class="bi bi-diagram-3-fill text-info"></i>
+                        <span class="fw-semibold" id="clusterScopeName">Cluster</span>
+                        <i class="bi bi-chevron-down small"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow" id="clusterScopeMenu"></ul>
+                </div>
                 <!-- Rig selector (HiveOS-style top bar control) -->
                 <div class="dropdown" id="rigScopeDropdown">
                     <button class="btn btn-sm btn-dark-card border border-secondary-subtle d-flex align-items-center gap-2 py-2 px-3" data-bs-toggle="dropdown" aria-expanded="false" id="rigScopeBtn" title="Select rig to manage">
                         <i class="bi bi-hdd-network text-warning"></i>
-                        <span class="fw-semibold" id="rigScopeName">This rig</span>
+                        <span class="fw-semibold" id="rigScopeName">Local rig</span>
                         <span class="badge bg-warning-glow border border-warning text-warning d-none" id="rigScopeBadge">REMOTE</span>
                         <i class="bi bi-chevron-down small"></i>
                     </button>
@@ -196,30 +205,41 @@
             <section class="mb-3">
                 <div class="card glass-card">
                     <div class="card-body">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
-                            <h2 class="h6 fw-bold mb-0 d-flex align-items-center gap-2">
-                                <i class="bi bi-router-fill text-info"></i> Jump Servers
-                                <span class="badge bg-secondary-subtle text-secondary-emphasis small">shared library</span>
-                            </h2>
-                            <button id="addJumpBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
-                                <i class="bi bi-plus-lg"></i> Add Jump Server
-                            </button>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.88rem;">
-                                <thead>
-                                    <tr class="text-muted border-bottom border-secondary-subtle">
-                                        <th>Name</th>
-                                        <th>Connection</th>
-                                        <th>Auth</th>
-                                        <th class="text-end">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="jumpTableBody">
-                                    <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+                            <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                                <h2 class="h6 fw-bold mb-0 d-flex align-items-center gap-2">
+                                    <i class="bi bi-router-fill text-info"></i> Jump Servers
+                                    <span class="badge bg-secondary-subtle text-secondary-emphasis small">shared library</span>
+                                </h2>
+                                <div class="d-flex gap-2">
+                                    <button id="jumpRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button id="addJumpBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
+                                        <i class="bi bi-plus-lg"></i> Add Jump Server
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.88rem;">
+                                    <colgroup>
+                                        <col style="width: 13%"><col style="width: 17%"><col style="width: 9%">
+                                        <col style="width: 27%"><col style="width: 12%"><col style="width: 22%">
+                                    </colgroup>
+                                    <thead>
+                                        <tr class="text-muted border-bottom border-secondary-subtle">
+                                            <th>Scope</th>
+                                            <th>Name</th>
+                                            <th>Type</th>
+                                            <th>Connection</th>
+                                            <th>Auth</th>
+                                            <th class="text-end">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="jumpTableBody">
+                                        <tr><td colspan="6" class="text-center text-muted py-3">Loading...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                     </div>
                 </div>
             </section>
@@ -243,6 +263,10 @@
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.88rem;">
+                                <colgroup>
+                                    <col style="width: 13%"><col style="width: 17%"><col style="width: 9%">
+                                    <col style="width: 27%"><col style="width: 12%"><col style="width: 22%">
+                                </colgroup>
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
                                         <th>Rig</th>
@@ -279,6 +303,9 @@
                     <div class="card-body">
                         <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
                             <i class="bi bi-info-circle text-primary"></i> System Diagnostics
+                            <span class="badge bg-accent-glow text-primary fw-semibold d-flex align-items-center gap-1" id="dashboardRigName" title="Currently managed rig">
+                                <i class="bi bi-hdd-rack"></i> <span id="dashboardRigNameText">Local rig</span>
+                            </span>
                         </h2>
                         <div class="row g-3">
                             <div class="col-6 col-sm-4 col-md-2">
@@ -1026,6 +1053,28 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
+                    <!-- Discovered rigs: adopt rigs already added on other cluster rigs -->
+                    <div id="rigCandidatesBlock" class="mb-2 d-none">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="fw-bold mb-0"><i class="bi bi-radar text-info me-1"></i> Discovered rigs
+                                <span class="small text-muted fw-normal">(already added on other cluster rigs)</span>
+                            </h6>
+                            <button type="button" id="rigCandidatesRefreshBtn" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Re-scan cluster">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                        </div>
+                        <div id="rigCandidatesList" class="border border-secondary-subtle rounded bg-dark-card p-2"></div>
+                        <div class="mt-2 d-flex justify-content-end">
+                            <button type="button" id="rigCandidatesAddBtn" class="btn btn-sm btn-primary fw-semibold d-flex align-items-center gap-1" disabled>
+                                <i class="bi bi-plus-lg"></i> Add Selected
+                            </button>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 mt-3 mb-1">
+                            <hr class="flex-grow-1 border-secondary-subtle my-0">
+                            <span class="small text-muted">or add manually</span>
+                            <hr class="flex-grow-1 border-secondary-subtle my-0">
+                        </div>
+                    </div>
                     <div class="row g-3 mb-2">
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold text-muted mb-1">Rig Name</label>
@@ -1191,6 +1240,10 @@
                     </div>
                 </div>
                 <div class="modal-footer">
+                    <button type="button" id="jumpTestBtn" class="btn btn-outline-info fw-semibold d-flex align-items-center gap-1 me-auto">
+                        <i class="bi bi-plug"></i> Test Connection
+                    </button>
+                    <span id="jumpTestResult" class="small me-2"></span>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" id="jumpSaveBtn" class="btn btn-primary fw-semibold">Save Jump Server</button>
                 </div>
@@ -1267,6 +1320,12 @@
                     <div class="mb-3">
                         <label for="confirmPasswordInput" class="form-label fw-medium">Confirm New Password</label>
                         <input type="password" class="form-control bg-dark-input font-monospace" id="confirmPasswordInput" autocomplete="new-password" required>
+                    </div>
+                    <div class="form-check" id="applyToClusterBlock">
+                        <input class="form-check-input" type="checkbox" id="applyToClusterCheck" checked>
+                        <label class="form-check-label small" for="applyToClusterCheck">
+                            Apply to <strong>all rigs</strong> in the cluster (keeps one shared password across the farm)
+                        </label>
                     </div>
                 </div>
                 <div class="modal-footer">

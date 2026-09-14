@@ -357,6 +357,25 @@ body {
     border-top: none;
 }
 
+/* SSH accesses view: keep tables transparent (no solid dark fill) */
+#view-accesses .table {
+    --bs-table-bg: transparent;
+    --bs-table-striped-bg: transparent;
+    --bs-table-hover-bg: transparent;
+}
+
+#view-accesses .table td,
+#view-accesses .table th {
+    background-color: transparent;
+}
+
+/* Reserved line for the algorithm name under hashrate values (prevents height jumps) */
+.algo-line {
+    min-height: 1.25rem;
+    margin-top: 2px;
+    margin-bottom: 0;
+}
+
 .min-w-0 {
     min-width: 0;
 }

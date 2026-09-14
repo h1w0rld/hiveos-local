@@ -107,7 +107,8 @@ function fmtSpeed(mh) {
 
 function fmtSpeedHtml(mh, algo) {
     const base = '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
-    return algo ? base + '<div class="small text-muted">' + escapeHtml(algo) + '</div>' : base;
+    // Algo line is always rendered (with a reserved height) so the stat boxes keep a stable height
+    return base + '<div class="small text-muted algo-line">' + (algo ? escapeHtml(algo) : '&nbsp;') + '</div>';
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -773,6 +774,7 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('currentPasswordInput').value = '';
         document.getElementById('newPasswordInput').value = '';
         document.getElementById('confirmPasswordInput').value = '';
+        document.getElementById('applyToClusterCheck').checked = true;
         new bootstrap.Modal(document.getElementById('passwordModal')).show();
     });
     document.getElementById('passwordSaveBtn').addEventListener('click', changePassword);
@@ -786,6 +788,40 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('accessRefreshBtn').addEventListener('click', loadAccessList);
     document.getElementById('addAccessBtn').addEventListener('click', () => openAccessModal(null, null));
     document.getElementById('addJumpBtn').addEventListener('click', () => openJumpModal(null));
+    document.getElementById('jumpRefreshBtn').addEventListener('click', loadAccessList);
+    document.getElementById('jumpTestBtn').addEventListener('click', async function() {
+        const btn = this;
+        const resultEl = document.getElementById('jumpTestResult');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Testing...';
+        resultEl.textContent = '';
+        const payload = {
+            jump: {
+                id: editingJumpId || '',
+                host: document.getElementById('jumpServerHostInput').value.trim(),
+                port: parseInt(document.getElementById('jumpServerPortInput').value, 10) || 22,
+                user: document.getElementById('jumpServerUserInput').value.trim(),
+                auth: document.getElementById('jumpServerAuthSelect').value,
+                password: document.getElementById('jumpServerPasswordInput').value,
+                key_path: document.getElementById('jumpServerKeyPathInput').value.trim()
+            }
+        };
+        try {
+            const response = await fetch('/api/cluster/jump/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            resultEl.innerHTML = '<span class="' + (data.success ? 'text-success' : 'text-danger') + '">' +
+                escapeHtml(data.message || (data.success ? 'Connection OK' : 'Connection failed')) + '</span>';
+        } catch (e) {
+            resultEl.innerHTML = '<span class="text-danger">Network error.</span>';
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-plug"></i> Test Connection';
+        }
+    });
     document.getElementById('jumpSaveBtn').addEventListener('click', saveJumpModal);
     document.getElementById('jumpServerAuthSelect').addEventListener('change', function() {
         document.getElementById('jumpServerPasswordBlock').classList.toggle('d-none', this.value !== 'password');
@@ -841,23 +877,25 @@ function switchRig(rigId) {
     loadPresetsList();
     loadFsheets();
     loadFans();
-    showToast('Switched to ' + (rigId === 'self' ? 'the local rig' : getRigName(rigId)), true);
+    showToast('Switched to ' + getRigName(rigId), true);
 }
 
 function getRigName(rigId) {
     if (clusterData && clusterData.rigs) {
-        const rig = clusterData.rigs.find(r => r.id === rigId);
+        const target = (!rigId || rigId === 'self') ? clusterData.self_id : rigId;
+        const rig = clusterData.rigs.find(r => r.id === target);
         if (rig) return rig.name;
     }
-    return rigId === 'self' ? 'This rig' : rigId;
+    return (!rigId || rigId === 'self') ? 'Local rig' : rigId;
 }
 
 function updateRigScopeUi() {
     // Top-bar rig selector: shows the managed rig with a REMOTE marker
     const isSelf = currentRigId === 'self' || !currentRigId;
-    document.getElementById('rigScopeName').textContent = isSelf ? getRigName(currentRigId) : getRigName(currentRigId);
+    document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
     document.getElementById('rigScopeBadge').classList.toggle('d-none', isSelf);
     renderRigScopeMenu();
+    renderClusterScopeMenu();
 }
 
 function renderRigScopeMenu() {
@@ -884,6 +922,32 @@ function renderRigScopeMenu() {
 window.switchRigGlobal = function(rigId) {
     switchRig(rigId);
 };
+
+// Cluster dropdown: lists the cluster and its rigs (selecting a rig switches scope)
+function renderClusterScopeMenu() {
+    const menu = document.getElementById('clusterScopeMenu');
+    const btnName = document.getElementById('clusterScopeName');
+    if (!menu || !btnName) return;
+    if (!clusterData || !clusterData.rigs) {
+        menu.innerHTML = '<li><span class="dropdown-item text-muted">Loading...</span></li>';
+        return;
+    }
+    const cname = clusterData.cluster_name || 'Unnamed cluster';
+    btnName.textContent = cname;
+    const online = clusterData.rigs.filter(r => r.online).length;
+    const items = ['<li><h6 class="dropdown-header"><i class="bi bi-diagram-3-fill text-info me-1"></i>' +
+        escapeHtml(cname) + ' (' + online + '/' + clusterData.rigs.length + ' online)</h6></li>'];
+    clusterData.rigs.forEach(rig => {
+        const active = currentRigId === rig.id || (rig.is_self && (currentRigId === 'self' || !currentRigId));
+        const off = !rig.online;
+        items.push('<li><button class="dropdown-item' + (active ? ' active' : '') + '"' + (off ? ' disabled' : '') +
+            ' onclick="switchRigGlobal(\'' + (rig.is_self ? 'self' : rig.id) + '\')">' +
+            '<i class="bi bi-hdd-rack me-2"></i>' + escapeHtml(rig.name || rig.id) +
+            (rig.is_self ? ' <span class="small text-muted">(local)</span>' : '') +
+            (off ? ' <span class="badge bg-danger-glow text-danger ms-1">OFFLINE</span>' : '') + '</button></li>');
+    });
+    menu.innerHTML = items.join('');
+}
 
 // Toast notification helper
 function showToast(message, isSuccess = true) {
@@ -946,6 +1010,7 @@ async function fetchStats() {
         
         // Update header & badges
         document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
+        document.getElementById('dashboardRigNameText').textContent = getRigName(currentRigId);
         document.getElementById('dashboardVersion').textContent = data.system.dashboard_version;
         document.getElementById('currentVerText').textContent = data.system.dashboard_version;
         
@@ -1570,13 +1635,17 @@ function renderCluster() {
     document.getElementById('clusterNameBadge').textContent = clusterData.cluster_name || '';
     document.getElementById('clusterNameBadge').classList.toggle('d-none', !clusterData.cluster_name);
     const nameInput = document.getElementById('clusterNameInput');
-    if (document.activeElement !== nameInput) {
-        nameInput.value = clusterData.cluster_name || '';
+    // Keep the input empty (no prefilled value) - the current name is shown in the badge
+    if (document.activeElement !== nameInput && nameInput.dataset.touched !== '1') {
+        nameInput.value = '';
+        nameInput.placeholder = clusterData.cluster_name || 'Cluster name';
     }
     document.getElementById('clusterSyncStatus').textContent = clusterData.last_sync_message || '';
 
     const online = clusterData.rigs.filter(r => r.online).length;
     document.getElementById('clusterOnline').textContent = online + ' / ' + clusterData.rigs.length;
+    // Keep the header rig/cluster dropdowns populated with all cluster rigs
+    updateRigScopeUi();
 
     if (clusterData.last_sync > 0) {
         const ago = Math.max(0, Math.round((Date.now() / 1000) - clusterData.last_sync));
@@ -1657,7 +1726,7 @@ function renderCluster() {
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Speed</div>
-                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}${isOnline && stats && stats.miner_algo ? '<div class="small text-muted fw-normal">' + escapeHtml(stats.miner_algo) + '</div>' : ''}</div>
+                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}<div class="small text-muted fw-normal algo-line">${isOnline && stats && stats.miner_algo ? escapeHtml(stats.miner_algo) : '&nbsp;'}</div></div>
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Temp</div>
@@ -1676,7 +1745,7 @@ function renderCluster() {
                             <div class="fw-semibold small text-danger-emphasis">${power}</div>
                         </div>
                     </div>
-                    <div class="mt-2 d-flex gap-2">
+                    <div class="mt-auto pt-3 d-flex gap-2">
                         <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')" ${isSelf ? '' : (isOnline ? '' : 'disabled')}>
                             <i class="bi bi-gear-wide-connected"></i> Manage Rig
                         </button>
@@ -1712,7 +1781,8 @@ window.syncNow = async function() {
 };
 
 function saveClusterSettings() {
-    const name = document.getElementById('clusterNameInput').value.trim();
+    const nameInput = document.getElementById('clusterNameInput');
+    const name = nameInput.value.trim();
     fetch('/api/cluster/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
@@ -1721,6 +1791,9 @@ function saveClusterSettings() {
     .then(r => r.json())
     .then(data => {
         if (data.success) {
+            nameInput.dataset.touched = '1';
+            nameInput.value = '';
+            nameInput.placeholder = name || 'Cluster name';
             showToast(data.message, true);
             loadClusterData(true);
         } else {
@@ -1759,8 +1832,82 @@ function openRigModal(rigId) {
     document.getElementById('rigModalDeleteBtn').classList.toggle('d-none', !rig || !!rig.is_self);
     document.getElementById('rigModalTestResults').innerHTML = '';
     renderRigModalAccesses(rig);
+    // When adding a new rig, offer rigs already added on other cluster rigs (checkbox list)
+    const candidatesBlock = document.getElementById('rigCandidatesBlock');
+    candidatesBlock.classList.toggle('d-none', !!rigId);
+    if (!rigId) loadRigCandidates();
     new bootstrap.Modal(document.getElementById('rigModal')).show();
 }
+
+// ---------------- Discovered rig candidates (checkbox adoption) ----------------
+
+let rigCandidates = [];
+
+async function loadRigCandidates() {
+    const block = document.getElementById('rigCandidatesBlock');
+    const listEl = document.getElementById('rigCandidatesList');
+    block.classList.remove('d-none');
+    listEl.innerHTML = '<div class="text-muted small py-2"><i class="bi bi-arrow-repeat spin-animation"></i> Scanning cluster rigs...</div>';
+    document.getElementById('rigCandidatesAddBtn').disabled = true;
+    try {
+        const response = await fetch('/api/cluster/rig/candidates');
+        const data = await response.json();
+        rigCandidates = (data.success && data.candidates) || [];
+    } catch (e) {
+        rigCandidates = [];
+    }
+    renderRigCandidates();
+}
+
+function renderRigCandidates() {
+    const listEl = document.getElementById('rigCandidatesList');
+    const addBtn = document.getElementById('rigCandidatesAddBtn');
+    if (!rigCandidates.length) {
+        listEl.innerHTML = '<div class="text-muted small py-2">No new rigs discovered on cluster peers. Add one manually below.</div>';
+        addBtn.disabled = true;
+        return;
+    }
+    listEl.innerHTML = rigCandidates.map(c =>
+        '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0">' +
+            '<input class="form-check-input rig-candidate-check" type="checkbox" value="' + escapeHtml(c.id) + '" id="cand_' + escapeHtml(c.id) + '">' +
+            '<label class="form-check-label flex-grow-1 small text-truncate" for="cand_' + escapeHtml(c.id) + '">' +
+                '<span class="fw-semibold">' + escapeHtml(c.name) + '</span>' +
+                (c.host_label ? ' <span class="text-muted font-monospace">' + escapeHtml(c.host_label) + '</span>' : '') +
+                ' <span class="text-muted"><i class="bi bi-arrow-left-right ms-1"></i> via ' + escapeHtml(c.source || '?') + '</span>' +
+            '</label>' +
+        '</div>').join('');
+    addBtn.disabled = false;
+}
+
+window.addSelectedRigCandidates = async function() {
+    const selected = Array.from(document.querySelectorAll('.rig-candidate-check:checked')).map(cb => cb.value);
+    if (!selected.length) {
+        showToast('Select at least one rig to add.', false);
+        return;
+    }
+    const rigs = rigCandidates.filter(c => selected.includes(c.id));
+    const btn = document.getElementById('rigCandidatesAddBtn');
+    btn.disabled = true;
+    try {
+        const response = await fetch('/api/cluster/rig/adopt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rigs: rigs })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Rigs added.' : 'Failed to add rigs.'), !!data.success);
+        if (data.success) {
+            rigCandidates = rigCandidates.filter(c => !selected.includes(c.id));
+            renderRigCandidates();
+            loadClusterData(true);
+            loadAccessList();
+        }
+    } catch (e) {
+        showToast('Network error adding rigs.', false);
+    } finally {
+        btn.disabled = false;
+    }
+};
 
 function renderRigModalAccesses(rig) {
     const list = document.getElementById('rigModalAccessList');
@@ -1835,6 +1982,8 @@ window.saveRigModal = async function() {
 };
 document.getElementById('rigModalSaveBtn').addEventListener('click', saveRigModal);
 document.getElementById('rigModalAddAccessBtn').addEventListener('click', () => openAccessModal(editingRigId, null));
+document.getElementById('rigCandidatesRefreshBtn').addEventListener('click', loadRigCandidates);
+document.getElementById('rigCandidatesAddBtn').addEventListener('click', () => addSelectedRigCandidates());
 
 document.getElementById('rigModalDeleteBtn').addEventListener('click', function() {
     if (!editingRigId) return;
@@ -1934,15 +2083,18 @@ function renderAccesses() {
     // Jump server library table
     const jumps = clusterData.jump_hosts || [];
     if (!jumps.length) {
-        jumpBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">No jump servers yet. Add one and reuse it for any rig.</td></tr>';
+        jumpBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted small py-3">No jump servers yet. Add one and reuse it for any rig.</td></tr>';
     } else {
         jumpBody.innerHTML = jumps.map(j => {
             const auth = j.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
             return '<tr>' +
+                '<td class="small text-muted"><i class="bi bi-router-fill text-info me-1"></i>All rigs</td>' +
                 '<td class="fw-semibold">' + escapeHtml(j.name) + '</td>' +
+                '<td><span class="badge bg-warning-glow text-warning">JUMP</span></td>' +
                 '<td class="font-monospace small">' + escapeHtml(j.user + '@' + j.host + ':' + j.port) + '</td>' +
                 '<td class="small text-muted">' + auth + '</td>' +
                 '<td class="text-end"><div class="btn-group btn-group-sm">' +
+                '<button class="btn btn-outline-info" title="Test connection" onclick="testJump(\'' + j.id + '\', this)"><i class="bi bi-plug"></i></button>' +
                 '<button class="btn btn-outline-primary" title="Edit" onclick="openJumpModal(\'' + j.id + '\')"><i class="bi bi-pencil"></i></button>' +
                 '<button class="btn btn-outline-danger" title="Delete" onclick="deleteJump(\'' + j.id + '\')"><i class="bi bi-trash"></i></button>' +
                 '</div></td></tr>';
@@ -2006,6 +2158,25 @@ window.testAccess = async function(rigId, accessId, btn) {
         showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
     } catch (e) {
         showToast('Network error testing access.', false);
+    } finally {
+        if (btn) btn.innerHTML = '<i class="bi bi-plug"></i>';
+    }
+};
+
+window.testJump = async function(jumpId, btn) {
+    const jump = ((clusterData && clusterData.jump_hosts) || []).find(j => j.id === jumpId);
+    if (!jump) return;
+    if (btn) btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    try {
+        const response = await fetch('/api/cluster/jump/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ jump: { id: jumpId } })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+    } catch (e) {
+        showToast('Network error testing jump server.', false);
     } finally {
         if (btn) btn.innerHTML = '<i class="bi bi-plug"></i>';
     }
@@ -2563,7 +2734,11 @@ async function changePassword() {
         const response = await fetch('/api/auth/password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-            body: JSON.stringify({ current_password: current, new_password: newPw.trim() })
+            body: JSON.stringify({
+                current_password: current,
+                new_password: newPw.trim(),
+                apply_to_cluster: document.getElementById('applyToClusterCheck').checked
+            })
         });
         const data = await response.json();
         showToast(data.message || (data.success ? 'Password updated.' : 'Failed to change password.'), !!data.success);

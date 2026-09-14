@@ -1602,8 +1602,47 @@ def change_password():
     except Exception as e:
         logging.error(f"Failed to propagate new password to cluster config: {e}")
 
+    # Optionally apply the same password to every remote rig in the cluster,
+    # so the whole farm keeps one shared dashboard password
+    results = []
+    if data.get("apply_to_cluster"):
+        state = load_cluster_state()
+        _CURRENT_SELF_ID["value"] = state["self_id"]
+        state_changed = False
+        ok_count = 0
+        for rig in state["rigs"]:
+            if rig.get("id") == state["self_id"]:
+                continue
+            ok, _, _, err, _ = cluster_remote_api(
+                rig, "POST", "api/auth/password",
+                body={"current_password": rig.get("password", ""), "new_password": new_password},
+                timeout=45)
+            results.append({"rig": rig.get("name", rig.get("id", "?")), "ok": bool(ok),
+                            "error": "" if ok else err})
+            if ok:
+                # Store the new password and bump updated_at so peers sync it
+                rig["password"] = new_password
+                rig["updated_at"] = int(time.time())
+                state_changed = True
+                ok_count += 1
+        if state_changed:
+            save_cluster_state(state)
+        failed = [r["rig"] for r in results if not r["ok"]]
+        if failed:
+            logging.warning(f"Cluster password change failed on rigs: {', '.join(failed)}")
+        else:
+            logging.info(f"Cluster password change applied to {ok_count} remote rig(s)")
+
     logging.info(f"Dashboard access password changed by IP: {request.remote_addr}")
-    return jsonify({"success": True, "message": "Access password updated successfully!"})
+    message = "Access password updated successfully!"
+    if data.get("apply_to_cluster") and results:
+        ok_n = sum(1 for r in results if r["ok"])
+        failed = [r["rig"] for r in results if not r["ok"]]
+        if failed:
+            message = f"Password updated locally and on {ok_n}/{len(results)} remote rig(s). Failed: {', '.join(failed)}"
+        else:
+            message = f"Password updated on the local rig and all {ok_n} remote rig(s)!"
+    return jsonify({"success": True, "message": message, "results": results})
 
 @app.route('/api/overclock', methods=['POST'])
 def save_overclock():
@@ -2752,6 +2791,82 @@ def api_cluster_rig_delete():
         return jsonify({"success": True, "message": "Rig removed from the cluster."})
     return jsonify({"success": False, "message": "Failed to update cluster configuration."}), 500
 
+@app.route('/api/cluster/rig/candidates', methods=['GET'])
+def api_cluster_rig_candidates():
+    """Rigs that already exist on peers' cluster states but are missing locally."""
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    local_ids = {r.get("id") for r in state["rigs"]}
+    removed_ids = {t.get("id") for t in state.get("removed", [])}
+    candidates = {}
+    for rig in state["rigs"]:
+        if rig.get("id") == state["self_id"]:
+            continue
+        ok, peer_state, _, _, _ = cluster_remote_api(rig, "GET", "api/cluster/state", timeout=20)
+        if not ok or not isinstance(peer_state, dict):
+            continue
+        for r in peer_state.get("rigs", []):
+            if not isinstance(r, dict):
+                continue
+            rid = str(r.get("id", "")).strip()
+            if not rid or rid in local_ids or rid in removed_ids or rid in candidates:
+                continue
+            if not r.get("name") or not r.get("password"):
+                continue
+            candidates[rid] = {
+                "id": rid,
+                "name": r.get("name"),
+                "host_label": r.get("host_label", ""),
+                "password": r.get("password", ""),
+                "accesses": [clean_access_entry(a) for a in (r.get("accesses") or []) if isinstance(a, dict)],
+                "source": rig.get("name", rig.get("id", "?"))
+            }
+    return jsonify({"success": True, "candidates": list(candidates.values())})
+
+@app.route('/api/cluster/rig/adopt', methods=['POST'])
+def api_cluster_rig_adopt():
+    """Add rigs discovered on peers (id/name/password/accesses) to the local cluster."""
+    data = request.get_json()
+    if not data or not isinstance(data.get("rigs"), list):
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    local_ids = {r.get("id") for r in state["rigs"]}
+    removed_ids = {t.get("id") for t in state.get("removed", [])}
+    now = int(time.time())
+    added = []
+    for incoming in data["rigs"]:
+        if not isinstance(incoming, dict):
+            continue
+        rid = str(incoming.get("id", "")).strip()
+        name = str(incoming.get("name", "")).strip()
+        password = str(incoming.get("password", ""))
+        if not rid or not name or not password:
+            continue
+        if rid == state["self_id"] or rid in local_ids or rid in removed_ids:
+            continue
+        if len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s\.]+$', name) or len(password) > 128:
+            continue
+        accesses = [clean_access_entry(a) for a in (incoming.get("accesses") or []) if isinstance(a, dict)]
+        state["rigs"].append({
+            "id": rid,
+            "name": name,
+            "host_label": str(incoming.get("host_label", "")).strip()[:80],
+            "is_self": False,
+            "password": password,
+            "accesses": accesses,
+            "updated_at": now,
+            "added_at": now
+        })
+        local_ids.add(rid)
+        added.append(name)
+    if not added:
+        return jsonify({"success": False, "message": "No new rigs to add (already present or invalid data)."})
+    if save_cluster_state(state):
+        logging.info(f"Adopted {len(added)} discovered rig(s) ({', '.join(added)}) by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Added: " + ", ".join(added)})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
 @app.route('/api/cluster/access', methods=['POST'])
 def api_cluster_access_save():
     data = request.get_json()
@@ -2887,6 +3002,52 @@ def api_cluster_jump_delete():
         logging.info(f"Jump server {jump_id} deleted by IP: {request.remote_addr}")
         return jsonify({"success": True, "message": "Jump server removed."})
     return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/jump/test', methods=['POST'])
+def api_cluster_jump_test():
+    """Test connectivity to a jump server (saved by id or an unsaved modal payload)."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    incoming = dict(data.get("jump") or {})
+    jid = str(incoming.get("id", "")).strip()
+    if jid or incoming.get("password") == "********":
+        saved = next((j for j in state.get("jump_hosts", []) if j.get("id") == jid), None)
+        if saved:
+            if incoming.get("password") in ("********", None, ""):
+                incoming["password"] = saved.get("password", "")
+            incoming.setdefault("host", saved.get("host"))
+            incoming.setdefault("port", saved.get("port", 22))
+            incoming.setdefault("user", saved.get("user"))
+            incoming.setdefault("auth", saved.get("auth", "password"))
+            incoming.setdefault("key_path", saved.get("key_path", ""))
+    host = str(incoming.get("host", "")).strip()
+    user = str(incoming.get("user", "")).strip()
+    if not VALID_HOST_RE.match(host):
+        return jsonify({"success": False, "message": "Invalid jump server host."}), 400
+    if not VALID_USER_RE.match(user):
+        return jsonify({"success": False, "message": "Invalid jump server SSH user name."}), 400
+    try:
+        port = int(incoming.get("port", 22))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Invalid jump server SSH port."}), 400
+    access = {
+        "id": "jumptest", "name": "jump-test", "type": "direct",
+        "host": host, "port": port,
+        "user": user, "auth": str(incoming.get("auth", "password")),
+        "password": str(incoming.get("password", "") or ""),
+        "key_path": str(incoming.get("key_path", "") or ""),
+    }
+    ok, out, ssh_err = run_ssh_command(access, "hostname && echo __OK__", timeout=30)
+    if ok and "__OK__" in out:
+        hostname = out.replace("__OK__", "").strip().splitlines()
+        hostname = hostname[0].strip() if hostname else "unknown"
+        return jsonify({"success": True,
+                        "message": "Jump server connection OK. Remote host: %s" % hostname,
+                        "hostname": hostname})
+    return jsonify({"success": False, "message": "Jump server test failed: %s" % (ssh_err or "unknown error")})
 
 @app.route('/api/cluster/access/test', methods=['POST'])
 def api_cluster_access_test():
