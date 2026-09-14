@@ -9,3 +9,6 @@ mock_rig.conf
 venv/
 env/
 hiveos-local.log
+
+# local handoff notes
+HANDOFF.md
