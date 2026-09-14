@@ -120,9 +120,15 @@
                                     <i class="bi bi-diagram-3-fill text-primary"></i> Farm Cluster Overview
                                 </h2>
                                 <div class="d-flex flex-wrap gap-2 align-items-center">
-                                    <button id="syncNowBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Sync cluster state between rigs">
-                                        <i class="bi bi-arrow-repeat"></i> Sync
-                                    </button>
+                                    <div class="btn-group" role="group">
+                                        <button id="syncNowBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Sync cluster state between rigs">
+                                            <i class="bi bi-arrow-repeat"></i> Sync
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-info dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                            <span class="visually-hidden">Auto-refresh interval</span>
+                                        </button>
+                                        <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="cluster"></ul>
+                                    </div>
                                 </div>
                             </div>
                             <div class="row g-3">
@@ -177,7 +183,7 @@
                             <i class="bi bi-arrow-repeat spin-animation d-none" id="clusterSyncSpinner"></i>
                             <span id="clusterSyncStatus" class="text-muted"></span>
                         </span>
-                        <button id="createClusterBtn" class="btn btn-sm btn-primary fw-semibold d-flex align-items-center gap-1" title="Create cluster">
+                        <button id="createClusterBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Create cluster">
                             <i class="bi bi-plus-lg"></i> Add
                         </button>
                     </div>
@@ -205,9 +211,18 @@
                                     <span class="badge bg-secondary-subtle text-secondary-emphasis small">shared library</span>
                                 </h2>
                                 <div class="d-flex gap-2">
-                                    <button id="jumpRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    <button id="jumpCheckAllBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Check connection to all jump servers" onclick="checkAllJumps(this)">
+                                        <i class="bi bi-plug"></i> Check All
                                     </button>
+                                    <div class="btn-group" role="group">
+                                        <button id="jumpRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                            <span class="visually-hidden">Auto-refresh interval</span>
+                                        </button>
+                                        <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="jumps"></ul>
+                                    </div>
                                     <button id="addJumpBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Add jump server">
                                         <i class="bi bi-plus-lg"></i> Add
                                     </button>
@@ -247,10 +262,19 @@
                                 <i class="bi bi-key-fill text-warning"></i> Access Routes
                             </h2>
                             <div class="d-flex gap-2">
-                                <button id="accessRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                <button id="accessCheckAllBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Check connection of all SSH accesses" onclick="checkAllAccesses(this)">
+                                    <i class="bi bi-plug"></i> Check All
                                 </button>
-                                <button id="addAccessBtn" class="btn btn-sm btn-primary fw-semibold d-flex align-items-center gap-1" title="Add SSH access">
+                                <div class="btn-group" role="group">
+                                    <button id="accessRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                        <span class="visually-hidden">Auto-refresh interval</span>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="accesses"></ul>
+                                </div>
+                                <button id="addAccessBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Add SSH access">
                                     <i class="bi bi-plus-lg"></i> Add
                                 </button>
                             </div>
@@ -295,10 +319,21 @@
             <div class="col-md-12">
                 <div class="card glass-card">
                     <div class="card-body">
-                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center flex-wrap gap-2">
                             <i class="bi bi-info-circle text-primary"></i> System Diagnostics
                             <span class="badge bg-accent-glow text-primary fw-semibold d-flex align-items-center gap-1" id="dashboardRigName" title="Currently managed rig">
                                 <i class="bi bi-hdd-rack"></i> <span id="dashboardRigNameText">Local rig</span>
+                            </span>
+                            <span class="ms-auto d-flex flex-wrap gap-2">
+                                <button id="openDiagBtn" class="btn btn-sm btn-outline-info fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                    <i class="bi bi-activity"></i> Diagnostics
+                                </button>
+                                <button id="rigRebootBtn" class="btn btn-sm btn-outline-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                    <i class="bi bi-power"></i> Reboot
+                                </button>
+                                <button id="rigShutdownBtn" class="btn btn-sm btn-outline-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                    <i class="bi bi-slash-circle"></i> Shutdown
+                                </button>
                             </span>
                         </h2>
                         <div class="row g-3">
@@ -326,12 +361,12 @@
                                     <span id="statRam" class="stat-value">Loading...</span>
                                 </div>
                             </div>
-                            <div class="col-6 col-sm-4 col-md-2">
-                                <div class="stat-box">
-                                    <span class="stat-label">Active Miner</span>
-                                    <span id="statMiner" class="stat-value text-warning">Loading...</span>
+                                <div class="col-6 col-sm-4 col-md-2">
+                                    <div class="stat-box">
+                                        <span class="stat-label">Active Miner</span>
+                                        <span id="statMiner" class="stat-value text-cyan-gradient">Loading...</span>
+                                    </div>
                                 </div>
-                            </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
                                     <span class="stat-label">HiveOS Ver</span>
@@ -374,7 +409,7 @@
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
                                     <span class="stat-label">Mined Crypto</span>
-                                    <span id="statCoin" class="stat-value text-warning fw-bold">Loading...</span>
+                                    <span id="statCoin" class="stat-value text-amber-gradient fw-bold">Loading...</span>
                                 </div>
                             </div>
                         </div>
@@ -398,17 +433,7 @@
                                     </button>
                                     <div class="vr bg-secondary opacity-25"></div>
                                     <button id="viewMinerLogBtn" class="btn btn-sm btn-primary fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-terminal-fill"></i> View Miner Log
-                                    </button>
-                                    <button id="openDiagBtn" class="btn btn-sm btn-outline-info fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-activity"></i> Diagnostics
-                                    </button>
-                                    <div class="vr bg-secondary opacity-25"></div>
-                                    <button id="rigRebootBtn" class="btn btn-sm btn-outline-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-power"></i> Reboot
-                                    </button>
-                                    <button id="rigShutdownBtn" class="btn btn-sm btn-outline-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-slash-circle"></i> Shutdown
+                                        <i class="bi bi-terminal-fill"></i> Log
                                     </button>
                                 </div>
                             </div>
@@ -431,9 +456,15 @@
                             <i class="bi bi-motherboard me-1"></i> CPU iGPU
                         </button>
                     </div>
-                    <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                    </button>
+                                <div class="btn-group" role="group">
+                                    <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                        <span class="visually-hidden">Auto-refresh interval</span>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="stats"></ul>
+                                </div>
                 </div>
             </div>
             

@@ -302,8 +302,8 @@ document.addEventListener('DOMContentLoaded', function() {
     loadFans(); // Extra fan detection
     loadClusterData(); // Cluster rigs + jump library
     checkUpdate(); // Initial check for dashboard updates on GitHub
-    const statsInterval = setInterval(fetchStats, 5000); // Poll every 5s
     const updateInterval = setInterval(checkUpdate, 600000); // Check updates every 10m
+    setupAutoRefreshMenus(); // Per-section auto-refresh intervals (dropdowns)
 
     // Manual Refresh button
     const refreshBtn = document.getElementById('refreshStatsBtn');
@@ -828,17 +828,74 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('jumpServerKeyBlock').classList.toggle('d-none', this.value !== 'key');
     });
 
-    // 7. Cluster polling (only while the cluster view is active)
-    setInterval(() => {
-        if (activeView === 'cluster') {
-            loadClusterData(true);
-        }
-    }, 5000);
+    // 7. Auto-refresh interval dropdowns (Off/5s/10s/30s/1m/5m/10m/1h)
 
     // Initial view from URL hash
     const initialView = (location.hash || '').replace('#', '');
     showView(['cluster', 'accesses', 'dashboard'].includes(initialView) ? initialView : 'cluster');
 });
+
+// ---------------- Auto-refresh manager ----------------
+
+const AUTO_REFRESH_ITEMS = [[0, 'Off'], [5, '5s'], [10, '10s'], [30, '30s'],
+    [60, '1m'], [300, '5m'], [600, '10m'], [3600, '1h']];
+const autoRefreshTimers = {};
+const AUTO_REFRESH_LOADERS = {
+    stats: () => fetchStats(),
+    accesses: () => loadAccessList(),
+    jumps: () => loadAccessList(),
+    cluster: () => { if (activeView === 'cluster') loadClusterData(true); }
+};
+
+function autoRefreshDefault(target) {
+    // Preserve the legacy behavior: stats and cluster data used to poll every 5s
+    return (target === 'stats' || target === 'cluster') ? 5 : 0;
+}
+
+function getAutoRefreshInterval(target) {
+    const v = parseInt(localStorage.getItem('autoRefresh_' + target), 10);
+    return (Number.isFinite(v) && AUTO_REFRESH_ITEMS.some(x => x[0] === v)) ? v : autoRefreshDefault(target);
+}
+
+function setAutoRefresh(target, seconds) {
+    localStorage.setItem('autoRefresh_' + target, String(seconds));
+    if (autoRefreshTimers[target]) {
+        clearInterval(autoRefreshTimers[target]);
+        autoRefreshTimers[target] = null;
+    }
+    if (seconds > 0) {
+        autoRefreshTimers[target] = setInterval(AUTO_REFRESH_LOADERS[target] || (() => {}), seconds * 1000);
+    }
+}
+
+function setupAutoRefreshMenus() {
+    document.querySelectorAll('.auto-refresh-menu').forEach(menu => {
+        const target = menu.dataset.target;
+        if (!target || !AUTO_REFRESH_LOADERS[target]) return;
+        menu.innerHTML = AUTO_REFRESH_ITEMS.map(([sec, label]) =>
+            '<li><button class="dropdown-item" data-interval="' + sec + '">' + label + '</button></li>').join('');
+        menu.querySelectorAll('.dropdown-item').forEach(item => {
+            item.addEventListener('click', () => {
+                setAutoRefresh(target, parseInt(item.dataset.interval, 10));
+                paintAutoRefreshMenu(menu, target);
+            });
+        });
+        paintAutoRefreshMenu(menu, target);
+        setAutoRefresh(target, getAutoRefreshInterval(target));
+    });
+}
+
+function paintAutoRefreshMenu(menu, target) {
+    const cur = getAutoRefreshInterval(target);
+    menu.querySelectorAll('.dropdown-item').forEach(item => {
+        item.classList.toggle('active', parseInt(item.dataset.interval, 10) === cur);
+    });
+    // Show the current interval inside the split caret button
+    const group = menu.closest('.btn-group');
+    const caret = group ? group.querySelector('.dropdown-toggle-split') : null;
+    const label = (AUTO_REFRESH_ITEMS.find(x => x[0] === cur) || [0, 'Off'])[1];
+    if (caret) caret.innerHTML = '<span class="ar-label">' + label + '</span><span class="visually-hidden">Auto-refresh interval</span>';
+}
 
 // ---------------- View routing ----------------
 
@@ -1770,11 +1827,17 @@ function buildRigCard(rig) {
     const col = document.createElement('div');
     col.className = 'col-md-6 col-lg-4' + (isOnline ? '' : ' rig-offline');
     col.innerHTML = `
-        <div class="card glass-card h-100">
+        <div class="card glass-card h-100 rig-card-clickable" onclick="openRigCard('${rig.id}')" title="Open rig dashboard">
             <div class="card-body d-flex flex-column">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <h3 class="h6 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <h3 class="h6 fw-bold mb-0 text-truncate">${escapeHtml(rig.name || rig.id)}</h3>
                     ${statusBadge}
+                    <div class="ms-auto d-flex gap-1 flex-shrink-0">
+                        <button class="btn btn-xs btn-outline-secondary" title="Edit rig" onclick="event.stopPropagation(); openRigModal('${rig.id}')">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        ${isSelf ? '' : '<button class="btn btn-xs btn-outline-danger" title="Remove rig" onclick="event.stopPropagation(); deleteRig(\'' + rig.id + '\')"><i class="bi bi-trash"></i></button>'}
+                    </div>
                 </div>
                 <p class="small text-muted mb-2 text-truncate" title="${escapeHtml(rig.host_label || '')}">
                     <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
@@ -1798,26 +1861,27 @@ function buildRigCard(rig) {
                     </div>
                     <div class="col-4">
                         <div class="small text-muted">Coin</div>
-                        <div class="fw-semibold small text-warning text-truncate" title="${coinAlgo}">${coinAlgo}</div>
+                        <div class="fw-semibold small text-amber-gradient text-truncate" title="${coinAlgo}">${coinAlgo}</div>
                     </div>
                     <div class="col-4">
                         <div class="small text-muted">Power</div>
                         <div class="fw-semibold small text-danger-emphasis">${power}</div>
                     </div>
                 </div>
-                <div class="mt-auto pt-3 d-flex gap-2">
-                    <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')" ${isSelf ? '' : (isOnline ? '' : 'disabled')}>
-                        <i class="bi bi-gear-wide-connected"></i> Manage
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary" title="Edit rig" onclick="openRigModal('${rig.id}')">
-                        <i class="bi bi-pencil"></i>
-                    </button>
-                    ${isSelf ? '' : '<button class="btn btn-sm btn-outline-danger" title="Remove rig from cluster" onclick="deleteRig(\'' + rig.id + '\')"><i class="bi bi-trash"></i></button>'}
-                </div>
             </div>
         </div>`;
     return col;
 }
+
+// Open a rig dashboard from a cluster card click (offline remote rigs are blocked)
+window.openRigCard = function(rigId) {
+    const rig = clusterData && clusterData.rigs ? clusterData.rigs.find(r => r.id === rigId) : null;
+    if (rig && !rig.is_self && !rig.online) {
+        showToast('Rig "' + (rig.name || rigId) + '" is offline.', false);
+        return;
+    }
+    openRigDashboard(rigId);
+};
 
 // Open the dashboard view scoped to the selected rig
 window.openRigDashboard = function(rigId) {
@@ -2146,13 +2210,17 @@ function renderAccesses() {
     } else {
         jumpBody.innerHTML = jumps.map(j => {
             const auth = j.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
+            const dotState = jumpTestResults[j.id];
+            const dotCls = dotState === undefined ? '' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail');
+            const dotTitle = dotState === undefined ? 'Not checked yet' : (dotState ? 'Connection OK' : 'Connection failed');
             return '<tr>' +
                 '<td class="small text-muted"><i class="bi bi-router-fill text-info me-1"></i>All rigs</td>' +
                 '<td class="fw-semibold">' + escapeHtml(j.name) + '</td>' +
                 '<td><span class="badge bg-warning-glow text-warning">JUMP</span></td>' +
                 '<td class="font-monospace small">' + escapeHtml(j.user + '@' + j.host + ':' + j.port) + '</td>' +
                 '<td class="small text-muted">' + auth + '</td>' +
-                '<td class="text-end"><div class="btn-group btn-group-sm">' +
+                '<td class="text-end"><div class="btn-group btn-group-sm align-items-center">' +
+                '<span class="conn-dot ' + dotCls + '" id="jump-dot_' + j.id + '" title="' + dotTitle + '"></span>' +
                 '<button class="btn btn-outline-info" title="Test connection" onclick="testJump(\'' + j.id + '\', this)"><i class="bi bi-plug"></i></button>' +
                 '<button class="btn btn-outline-primary" title="Edit" onclick="openJumpModal(\'' + j.id + '\')"><i class="bi bi-pencil"></i></button>' +
                 '<button class="btn btn-outline-danger" title="Delete" onclick="deleteJump(\'' + j.id + '\')"><i class="bi bi-trash"></i></button>' +
@@ -2175,6 +2243,9 @@ function renderAccesses() {
             const route = escapeHtml(a.user + '@' + a.host + ':' + a.port) +
                 (a.type === 'jump' ? ' <i class="bi bi-arrow-right-short"></i> <span class="text-info">' + escapeHtml(jumpName || '?') + '</span>' : '');
             const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
+            const dotState = accessTestResults[a.id];
+            const dotCls = dotState === undefined ? '' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail');
+            const dotTitle = dotState === undefined ? 'Not checked yet' : (dotState ? 'Connection OK' : 'Connection failed');
             rows.push('<tr' + (idx === 0 ? ' class="access-group-start"' : '') + '>' +
                 (idx === 0 ? '<td rowspan="' + rig.accesses.length + '" class="fw-semibold align-middle">' + rigLabel + '</td>' : '') +
                 '<td class="fw-semibold">' + escapeHtml(a.name) + '</td>' +
@@ -2182,7 +2253,8 @@ function renderAccesses() {
                 '<td class="font-monospace small">' + route + '</td>' +
                 '<td class="small text-muted">' + auth + '</td>' +
                 '<td class="text-end">' +
-                '<div class="btn-group btn-group-sm">' +
+                '<div class="btn-group btn-group-sm align-items-center">' +
+                '<span class="conn-dot ' + dotCls + '" id="acc-dot_' + a.id + '" title="' + dotTitle + '"></span>' +
                 '<button class="btn btn-outline-info" title="Test connection" onclick="testAccess(\'' + rig.id + '\', \'' + a.id + '\', this)"><i class="bi bi-plug"></i></button>' +
                 '<button class="btn btn-outline-primary" title="Edit" onclick="openAccessModal(\'' + rig.id + '\', \'' + a.id + '\')"><i class="bi bi-pencil"></i></button>' +
                 '<button class="btn btn-outline-danger" title="Delete" onclick="deleteAccess(\'' + rig.id + '\', \'' + a.id + '\')"><i class="bi bi-trash"></i></button>' +
@@ -2202,6 +2274,78 @@ function jumpNameById(jumpId) {
     return j ? j.name : '';
 }
 
+// Connection status dots (green/red) shown per row on the SSH accesses tab
+let accessTestResults = {};
+let jumpTestResults = {};
+
+function paintConnDot(dotId, ok) {
+    const dot = document.getElementById(dotId);
+    if (!dot) return;
+    dot.className = 'conn-dot ' + (ok ? 'conn-dot-ok' : 'conn-dot-fail');
+    dot.title = ok ? 'Connection OK' : 'Connection failed';
+}
+
+window.checkAllAccesses = async function(btn) {
+    const items = [];
+    (clusterData && clusterData.rigs || []).forEach(r => (r.accesses || []).forEach(a => items.push({ rigId: r.id, access: a })));
+    if (!items.length) { showToast('No SSH accesses to check.', false); return; }
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Checking...';
+    let okCount = 0;
+    for (const item of items) {
+        const dotId = 'acc-dot_' + item.access.id;
+        const dot = document.getElementById(dotId);
+        if (dot) dot.className = 'conn-dot conn-dot-warn';
+        let ok = false;
+        try {
+            const response = await fetch('/api/cluster/access/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ rig_id: item.rigId, access: item.access })
+            });
+            const data = await response.json();
+            ok = !!data.success;
+        } catch (e) { ok = false; }
+        accessTestResults[item.access.id] = ok;
+        if (ok) okCount += 1;
+        paintConnDot(dotId, ok);
+    }
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    showToast('Checked ' + items.length + ' access(es): ' + okCount + ' OK, ' + (items.length - okCount) + ' failed.', okCount === items.length);
+};
+
+window.checkAllJumps = async function(btn) {
+    const jumps = (clusterData && clusterData.jump_hosts) || [];
+    if (!jumps.length) { showToast('No jump servers to check.', false); return; }
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Checking...';
+    let okCount = 0;
+    for (const j of jumps) {
+        const dotId = 'jump-dot_' + j.id;
+        const dot = document.getElementById(dotId);
+        if (dot) dot.className = 'conn-dot conn-dot-warn';
+        let ok = false;
+        try {
+            const response = await fetch('/api/cluster/jump/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ jump: { id: j.id } })
+            });
+            const data = await response.json();
+            ok = !!data.success;
+        } catch (e) { ok = false; }
+        jumpTestResults[j.id] = ok;
+        if (ok) okCount += 1;
+        paintConnDot(dotId, ok);
+    }
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    showToast('Checked ' + jumps.length + ' jump server(s): ' + okCount + ' OK, ' + (jumps.length - okCount) + ' failed.', okCount === jumps.length);
+};
+
 window.testAccess = async function(rigId, accessId, btn) {
     const rig = clusterData.rigs.find(r => r.id === rigId);
     const access = rig ? rig.accesses.find(a => a.id === accessId) : null;
@@ -2214,8 +2358,12 @@ window.testAccess = async function(rigId, accessId, btn) {
             body: JSON.stringify({ rig_id: rigId, access: access })
         });
         const data = await response.json();
+        accessTestResults[accessId] = !!data.success;
+        paintConnDot('acc-dot_' + accessId, !!data.success);
         showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
     } catch (e) {
+        accessTestResults[accessId] = false;
+        paintConnDot('acc-dot_' + accessId, false);
         showToast('Network error testing access.', false);
     } finally {
         if (btn) btn.innerHTML = '<i class="bi bi-plug"></i>';
@@ -2233,8 +2381,12 @@ window.testJump = async function(jumpId, btn) {
             body: JSON.stringify({ jump: { id: jumpId } })
         });
         const data = await response.json();
+        jumpTestResults[jumpId] = !!data.success;
+        paintConnDot('jump-dot_' + jumpId, !!data.success);
         showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
     } catch (e) {
+        jumpTestResults[jumpId] = false;
+        paintConnDot('jump-dot_' + jumpId, false);
         showToast('Network error testing jump server.', false);
     } finally {
         if (btn) btn.innerHTML = '<i class="bi bi-plug"></i>';
