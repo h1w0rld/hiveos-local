@@ -302,6 +302,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadClusterData(); // Cluster rigs + jump library
     checkUpdate(); // Initial check for dashboard updates on GitHub
     const updateInterval = setInterval(checkUpdate, 600000); // Check updates every 10m
+    setInterval(updateLastSyncDisplay, 1000); // Live Last Sync clock (independent of auto-refresh)
     setupAutoRefreshMenus(); // Per-section auto-refresh intervals (dropdowns)
 
     // Manual Refresh button
@@ -1723,23 +1724,27 @@ async function loadClusterData(silent = false) {
     }
 }
 
+// Live "Last Sync" clock — ticks every second regardless of the cluster auto-refresh interval
+function updateLastSyncDisplay() {
+    const el = document.getElementById('clusterLastSync');
+    if (!el || !clusterData || !(clusterData.last_sync > 0)) return;
+    const ago = Math.max(0, Math.round((Date.now() / 1000) - clusterData.last_sync));
+    el.textContent = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
+    el.className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
+}
+
 function renderCluster() {
     if (!clusterData || !clusterData.rigs) return;
     const container = document.getElementById('clusterRigsContainer');
     container.dataset.loaded = '1';
 
     document.getElementById('clusterSyncStatus').textContent = clusterData.last_sync_message || '';
-
     const online = clusterData.rigs.filter(r => r.online).length;
     document.getElementById('clusterOnline').textContent = online + ' / ' + clusterData.rigs.length;
     // Keep the header rig/cluster dropdowns populated with all cluster rigs
     updateRigScopeUi();
 
-    if (clusterData.last_sync > 0) {
-        const ago = Math.max(0, Math.round((Date.now() / 1000) - clusterData.last_sync));
-        document.getElementById('clusterLastSync').textContent = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
-        document.getElementById('clusterLastSync').className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
-    }
+    updateLastSyncDisplay();
 
     // Farm-wide totals: only online rigs count (offline stats are stale)
     let totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0, totalMh = 0;

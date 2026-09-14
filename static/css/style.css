@@ -104,9 +104,11 @@ body {
     transform: none;
 }
 
-/* Interval label inside auto-refresh split carets */
+/* Interval label inside auto-refresh split carets
+   (line-height 1.3125 = 0.875rem * 1.5 keeps the caret button at its original height) */
 .dropdown-toggle-split .ar-label {
     font-size: 1rem;
+    line-height: 1.3125;
     font-weight: 700;
     margin-right: 0.25rem;
     opacity: 1;
@@ -135,9 +137,14 @@ body {
 }
 
 .glass-card:hover {
-    transform: translateY(-4px);
     box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
     border-color: rgba(99, 102, 241, 0.3);
+}
+
+/* Hover lift only for cluster/rig cards on the Cluster tab
+   (forms and tables on other tabs stay still) */
+#view-cluster .glass-card:hover {
+    transform: translateY(-4px);
 }
 
 /* Glowing status colors */
