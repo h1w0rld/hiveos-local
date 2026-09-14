@@ -24,43 +24,44 @@
         <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
     </button>
 
-    <div class="container py-4">
+    <div class="container py-2">
         <!-- Header Section -->
-        <header class="d-flex flex-wrap justify-content-between align-items-center pb-3 mb-4 border-bottom border-secondary-subtle">
-            <div class="d-flex align-items-center gap-3">
-                <div class="logo-container">
-                    <i class="bi bi-cpu-fill fs-1 text-primary-gradient"></i>
+        <header class="d-flex flex-wrap justify-content-between align-items-center py-2 mb-2 border-bottom border-secondary-subtle">
+            <div class="d-flex align-items-center gap-2">
+                <div class="logo-container logo-container-sm">
+                    <i class="bi bi-cpu-fill fs-4 text-primary-gradient"></i>
                 </div>
-                <div>
-                    <h1 class="h3 fw-bold mb-0">HiveOS Local Manager</h1>
-                    <p class="text-muted small mb-0">Local Emergency & Diagnostics Dashboard</p>
+                <div class="d-flex align-items-center gap-2">
+                    <h1 class="h5 fw-bold mb-0">HiveOS Local Manager</h1>
+                    <span class="badge bg-dark-card border border-secondary-subtle text-secondary-emphasis small">v<span id="dashboardVersion">1.0.0</span></span>
                 </div>
             </div>
-            
-            <div class="d-flex flex-wrap gap-2 align-items-center mt-3 mt-md-0">
+
+            <div class="d-flex flex-wrap gap-2 align-items-center mt-2 mt-md-0">
+                <!-- Rig selector (HiveOS-style top bar control) -->
+                <div class="dropdown" id="rigScopeDropdown">
+                    <button class="btn btn-sm btn-dark-card border border-secondary-subtle d-flex align-items-center gap-2 py-2 px-3" data-bs-toggle="dropdown" aria-expanded="false" id="rigScopeBtn" title="Select rig to manage">
+                        <i class="bi bi-hdd-network text-warning"></i>
+                        <span class="fw-semibold" id="rigScopeName">This rig</span>
+                        <span class="badge bg-warning-glow border border-warning text-warning d-none" id="rigScopeBadge">REMOTE</span>
+                        <i class="bi bi-chevron-down small"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow" id="rigScopeMenu"></ul>
+                </div>
                 <button id="revertSettingsBtn" class="btn btn-sm btn-outline-danger d-flex align-items-center gap-1 py-2 px-3 border border-danger-subtle d-none">
-                    <i class="bi bi-arrow-counterclockwise"></i> Revert Settings
+                    <i class="bi bi-arrow-counterclockwise"></i> Revert
                 </button>
                 <button id="emergencyResetClocksBtn" class="btn btn-sm btn-danger d-flex align-items-center gap-1 py-2 px-3 d-none">
-                    <i class="bi bi-exclamation-octagon-fill"></i> Reset Clocks to Stock
+                    <i class="bi bi-exclamation-octagon-fill"></i> Reset Clocks
                 </button>
-                <span class="badge bg-success-glow d-flex align-items-center gap-1 py-2 px-3 border border-success">
-                    <span class="pulse-indicator"></span> Live Monitoring Active
-                </span>
-                <div class="badge bg-dark-card border border-secondary-subtle py-2 px-3 text-secondary-emphasis">
-                    <i class="bi bi-laptop me-1"></i> <span id="localIpAddress">Scanning...</span>
-                </div>
-                <div class="badge bg-dark-card border border-secondary-subtle py-2 px-3 text-secondary-emphasis">
-                    <i class="bi bi-tag-fill me-1"></i> v<span id="dashboardVersion">1.0.0</span>
-                </div>
                 <button id="changePasswordBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1 py-2 px-3" title="Change access password">
-                    <i class="bi bi-key-fill"></i> Password
+                    <i class="bi bi-key-fill"></i>
                 </button>
             </div>
         </header>
 
         <!-- Main Navigation Tabs -->
-        <nav class="mb-4">
+        <nav class="mb-3">
             <ul class="nav main-nav-tabs gap-2 flex-nowrap overflow-auto pb-1" id="mainNavTabs">
                 <li class="nav-item">
                     <a class="nav-link active" href="#cluster" data-view="cluster">
@@ -80,30 +81,18 @@
             </ul>
         </nav>
 
-        <!-- Current rig scope banner (visible in dashboard view when managing a remote rig) -->
-        <div id="rigScopeBanner" class="alert glass-card border-warning-subtle d-none mb-4 d-flex flex-wrap justify-content-between align-items-center gap-2" role="alert">
-            <div class="d-flex align-items-center gap-2">
-                <i class="bi bi-hdd-network fs-5 text-warning"></i>
-                <span class="fw-semibold">Managing remote rig: <span id="rigScopeName" class="text-warning">RIG</span></span>
-                <span class="badge bg-warning-glow border border-warning text-warning fw-semibold">REMOTE</span>
-            </div>
-            <button id="rigScopeBackBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
-                <i class="bi bi-arrow-left"></i> Back to Cluster
-            </button>
-        </div>
-
         <!-- Update Available Banner -->
-        <div id="updateBanner" class="alert alert-warning glass-card d-none mb-4 d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3" role="alert">
+        <div id="updateBanner" class="alert alert-warning glass-card d-none mb-3 d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3" role="alert">
             <div class="d-flex align-items-center gap-2">
                 <i class="bi bi-cloud-arrow-down-fill fs-5 text-warning"></i>
                 <span>
-                    <strong>Dashboard Update Available!</strong> A newer release (<span id="remoteVersionText">v1.1.0</span>) is available on GitHub.
+                    <strong>Update Available!</strong> (<span id="remoteVersionText">v1.1.0</span>)
                 </span>
             </div>
             <div class="d-flex align-items-center gap-2">
-                <input type="password" id="updateVerificationPin" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" placeholder="Password to confirm" style="width: 170px; height: 31px; border: 1px solid rgba(255, 193, 7, 0.4);">
+                <input type="password" id="updateVerificationPin" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" placeholder="Password" style="width: 150px; height: 31px; border: 1px solid rgba(255, 193, 7, 0.4);">
                 <button id="applyUpdateBtn" class="btn btn-warning btn-sm fw-semibold d-flex align-items-center gap-1">
-                    <i class="bi bi-arrow-down-circle-fill"></i> Update Now
+                    <i class="bi bi-arrow-down-circle-fill"></i> Update
                 </button>
             </div>
         </div>
@@ -203,19 +192,46 @@
         <!-- VIEW: SSH ACCESSES (all configured SSH routes)                -->
         <!-- ============================================================= -->
         <div id="view-accesses" class="view-section d-none">
+            <!-- Jump server library -->
+            <section class="mb-3">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                            <h2 class="h6 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-router-fill text-info"></i> Jump Servers
+                                <span class="badge bg-secondary-subtle text-secondary-emphasis small">shared library</span>
+                            </h2>
+                            <button id="addJumpBtn" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1">
+                                <i class="bi bi-plus-lg"></i> Add Jump Server
+                            </button>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.88rem;">
+                                <thead>
+                                    <tr class="text-muted border-bottom border-secondary-subtle">
+                                        <th>Name</th>
+                                        <th>Connection</th>
+                                        <th>Auth</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="jumpTableBody">
+                                    <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Access routes grouped by rig -->
             <section class="mb-4">
                 <div class="card glass-card">
                     <div class="card-body">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-                            <div>
-                                <h2 class="h5 fw-bold mb-1 d-flex align-items-center gap-2">
-                                    <i class="bi bi-key-fill text-warning"></i> SSH Access Configuration
-                                </h2>
-                                <p class="text-muted small mb-0">
-                                    Every rig can be reached by multiple SSH routes: direct connection or via a jump server.
-                                    Accesses sync across the cluster together with their rigs.
-                                </p>
-                            </div>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                            <h2 class="h6 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-key-fill text-warning"></i> Access Routes
+                            </h2>
                             <div class="d-flex gap-2">
                                 <button id="accessRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
                                     <i class="bi bi-arrow-clockwise"></i> Refresh
@@ -226,13 +242,13 @@
                             </div>
                         </div>
                         <div class="table-responsive">
-                            <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.9rem;">
+                            <table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.88rem;">
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
                                         <th>Rig</th>
-                                        <th>Access Name</th>
+                                        <th>Name</th>
                                         <th>Type</th>
-                                        <th>Connection</th>
+                                        <th>Target</th>
                                         <th>Auth</th>
                                         <th class="text-end">Actions</th>
                                     </tr>
@@ -382,9 +398,9 @@
         </section>
 
         <!-- GPU Monitor Grid -->
-        <section class="mb-4">
-            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-                <h2 class="h4 fw-bold mb-0">Graphics Processing Units (GPUs)</h2>
+        <section class="mb-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <h2 class="h5 fw-bold mb-0">GPUs</h2>
                 <div class="d-flex align-items-center gap-2">
                     <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
                         <button id="showGpusBtn" type="button" class="btn btn-primary active">
@@ -400,23 +416,21 @@
                 </div>
             </div>
             
-            <div id="gpuContainer" class="row g-4">
+            <div id="gpuContainer" class="row g-3">
                 <!-- Cards injected dynamically via JS -->
-                <div class="col-12 text-center py-5">
+                <div class="col-12 text-center py-4">
                     <div class="spinner-border text-primary" role="status">
                         <span class="visually-hidden">Loading GPU Stats...</span>
                     </div>
-                    <p class="mt-2 text-muted">Reading local GPU hardware configuration...</p>
                 </div>
             </div>
 
             <!-- Integrated GPU (CPU graphics) tab content -->
-            <div id="igpuContainer" class="row g-4 d-none">
-                <div class="col-12 text-center py-5">
+            <div id="igpuContainer" class="row g-3 d-none">
+                <div class="col-12 text-center py-4">
                     <div class="spinner-border text-info" role="status">
                         <span class="visually-hidden">Loading iGPU Stats...</span>
                     </div>
-                    <p class="mt-2 text-muted">Reading integrated GPU configuration...</p>
                 </div>
             </div>
         </section>
@@ -533,6 +547,19 @@
                             </div>
                         </form>
 
+                        <!-- Extra (non-GPU) fans -->
+                        <div class="mt-4 border-top border-secondary-subtle pt-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h3 class="h6 fw-bold mb-0 text-secondary-emphasis">
+                                    <i class="bi bi-fan text-info"></i> Extra Fans
+                                </h3>
+                                <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary py-0 px-2"><i class="bi bi-arrow-clockwise"></i></button>
+                            </div>
+                            <div id="fansContainer" class="small">
+                                <div class="text-muted small">Detecting controllable fans...</div>
+                            </div>
+                        </div>
+
                         <!-- System Updates section -->
                         <div class="mt-4 border-top border-secondary-subtle pt-3">
                             <h3 class="h6 fw-bold mb-3 text-secondary-emphasis">
@@ -608,46 +635,49 @@
             </div>
             
             <div class="col-lg-6">
-                <!-- Emergency Flight Sheet Configurer -->
+                <!-- Flight Sheets -->
                 <div class="card glass-card mb-4">
                     <div class="card-body">
-                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
-                            <i class="bi bi-wallet2 text-warning"></i> Emergency Flight Sheet Configurer
-                        </h2>
-                        <form id="emergencyFlightSheetForm">
-                            <div class="row g-3">
-                                <div class="col-sm-6">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Active Coin</label>
-                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="fsCoin" placeholder="e.g. BTC" required>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-wallet2 text-warning"></i> Flight Sheets
+                            </h2>
+                            <div class="d-flex gap-2">
+                                <button id="manageWalletsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                    <i class="bi bi-wallet2"></i> Wallets
+                                </button>
+                                <button id="importFsheetsBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1">
+                                    <i class="bi bi-box-arrow-in-down"></i> Import
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- List of saved flight sheets -->
+                        <div class="mb-3" id="fsheetsContainer" style="max-height: 260px; overflow-y: auto;">
+                            <div class="text-center text-muted small py-3">Loading flight sheets...</div>
+                        </div>
+
+                        <!-- Save Flight Sheet Form -->
+                        <form id="saveFsheetForm" class="border-top border-secondary-subtle pt-3">
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="fsName" placeholder="Name" required>
                                 </div>
-                                <div class="col-sm-6">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Active Miner</label>
-                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="fsMiner" required>
-                                        <option value="lolminer">lolMiner</option>
-                                        <option value="xmrig">XMRig</option>
-                                        <option value="gminer">gMiner</option>
-                                        <option value="rigel">Rigel</option>
-                                        <option value="bzminer">bzMiner</option>
-                                        <option value="teamredminer">TeamRedMiner</option>
-                                        <option value="hiveon">HiveonMiner</option>
-                                        <option value="srbminer">SRBMiner</option>
-                                        <option value="wildrig-multi">WildRig-Multi</option>
-                                        <option value="bminer">bMiner</option>
-                                        <option value="ccminer">ccMiner</option>
-                                        <option value="t-rex">T-Rex</option>
-                                        <option value="none">None</option>
-                                    </select>
+                                <div class="col-md-3">
+                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="fsCoin" placeholder="Coin (PRL)" required>
                                 </div>
-                                <div class="col-12">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Wallet Address / Template</label>
-                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="fsWallet" placeholder="Wallet address or pool template" required>
+                                <div class="col-md-5">
+                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="fsWalletSelect"></select>
+                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace mt-1 d-none" id="fsWalletCustom" placeholder="Custom wallet address" autocomplete="off">
                                 </div>
-                                <div class="col-12">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Mining Pool Server Connection</label>
-                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="fsPool" placeholder="stratum+tcp://pool-server:port" required>
+                                <div class="col-md-6">
+                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="fsPool" placeholder="pool:port" required>
                                 </div>
-                                <div class="col-12 text-end">
-                                    <button type="submit" class="btn btn-sm btn-warning px-4 py-2 fw-semibold">Apply Flight Sheet</button>
+                                <div class="col-md-4">
+                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="fsMinerSelect"></select>
+                                </div>
+                                <div class="col-md-2">
+                                    <button type="submit" class="btn btn-sm btn-warning w-100 fw-semibold"><i class="bi bi-save2"></i> Save</button>
                                 </div>
                             </div>
                         </form>
@@ -1093,36 +1123,12 @@
                         </div>
                     </div>
 
-                    <!-- Jump server settings -->
-                    <div id="jumpSettingsBlock" class="d-none mt-3 border border-secondary-subtle rounded p-3 bg-dark-card">
-                        <h6 class="fw-bold mb-2 text-secondary-emphasis"><i class="bi bi-arrow-right-square-fill me-1"></i> Jump Server</h6>
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump Host</label>
-                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpHostInput" placeholder="100.127.0.1">
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump Port</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="jumpPortInput" value="22" min="1" max="65535">
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump User</label>
-                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpUserInput" placeholder="user">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump Auth</label>
-                                <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="jumpAuthSelect">
-                                    <option value="password">Password (sshpass)</option>
-                                    <option value="key">SSH private key</option>
-                                </select>
-                            </div>
-                            <div class="col-md-6" id="jumpPasswordBlock">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump Password</label>
-                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpPasswordInput" placeholder="Jump server SSH password">
-                            </div>
-                            <div class="col-md-6 d-none" id="jumpKeyBlock">
-                                <label class="form-label small fw-semibold text-muted mb-1">Jump Private Key Path (optional)</label>
-                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpKeyPathInput" placeholder="/root/.ssh/id_ed25519">
+                    <!-- Jump server selection (from the shared library) -->
+                    <div id="jumpSettingsBlock" class="d-none mt-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Jump Server (library)</label>
+                            <div class="d-flex gap-2">
+                                <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="accessJumpSelect"></select>
                             </div>
                         </div>
                     </div>
@@ -1139,6 +1145,106 @@
         </div>
     </div>
 
+    <!-- Jump Server Add/Edit Modal -->
+    <div class="modal fade" id="jumpModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold">
+                        <i class="bi bi-router-fill text-info me-2"></i> <span id="jumpModalTitle">Add Jump Server</span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Name</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="jumpNameInput" placeholder="e.g. dell-server" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-semibold text-muted mb-1">Host</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpServerHostInput" placeholder="192.168.1.200" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold text-muted mb-1">Port</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="jumpServerPortInput" value="22" min="1" max="65535">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold text-muted mb-1">User</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpServerUserInput" placeholder="user" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-semibold text-muted mb-1">Auth</label>
+                            <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="jumpServerAuthSelect">
+                                <option value="password">Password</option>
+                                <option value="key">SSH key</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6" id="jumpServerPasswordBlock">
+                            <label class="form-label small fw-semibold text-muted mb-1">Password</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpServerPasswordInput">
+                        </div>
+                        <div class="col-md-6 d-none" id="jumpServerKeyBlock">
+                            <label class="form-label small fw-semibold text-muted mb-1">Private Key Path</label>
+                            <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="jumpServerKeyPathInput">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" id="jumpSaveBtn" class="btn btn-primary fw-semibold">Save Jump Server</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flight Sheet Import Modal -->
+    <div class="modal fade" id="fsheetImportModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold">
+                        <i class="bi bi-box-arrow-in-down text-info me-2"></i> Import Flight Sheets
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="small text-muted mb-2">Paste flight sheet JSON (array or single object) or pick a file.</p>
+                    <input type="file" id="fsheetImportFile" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle mb-2" accept=".json,.txt">
+                    <textarea class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="fsheetImportText" rows="7" placeholder='[{"name":"PRL Kryptex","coin":"PRL","wallet":"...","pool":"pool:port","miner":"srbminer"}]'></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" id="fsheetImportSaveBtn" class="btn btn-primary fw-semibold">Import</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wallets Management Modal -->
+    <div class="modal fade" id="walletModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold">
+                        <i class="bi bi-wallet2 text-warning me-2"></i> Wallets
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="walletsContainer" class="mb-3" style="max-height: 220px; overflow-y: auto;"></div>
+                    <form id="saveWalletForm" class="border-top border-secondary-subtle pt-3">
+                        <div class="row g-2">
+                            <div class="col-4"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="walletNameInput" placeholder="Name" required></div>
+                            <div class="col-6"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace" id="walletAddressInput" placeholder="Wallet address" required></div>
+                            <div class="col-2"><button type="submit" class="btn btn-sm btn-primary w-100 fw-semibold"><i class="bi bi-plus-lg"></i></button></div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Change Password Modal -->
     <div class="modal fade" id="passwordModal" tabindex="-1" aria-labelledby="passwordModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -1150,10 +1256,6 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
-                    <div class="alert alert-info small border-info-subtle" role="alert">
-                        <i class="bi bi-info-circle-fill"></i> The access password protects this rig's dashboard.
-                        After changing it, other cluster rigs adopt the new password automatically on the next sync.
-                    </div>
                     <div class="mb-3">
                         <label for="currentPasswordInput" class="form-label fw-medium">Current Password / PIN</label>
                         <input type="password" class="form-control bg-dark-input font-monospace" id="currentPasswordInput" autocomplete="current-password" required>

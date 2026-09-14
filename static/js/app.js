@@ -11,6 +11,7 @@ let clusterData = null;          // last /api/cluster/rigs payload
 let activeView = 'cluster';      // cluster | accesses | dashboard
 let editingRigId = null;         // rig being edited in rigModal
 let editingAccess = null;        // {rigId, accessId} being edited in accessModal
+let editingJumpId = null;        // jump server being edited in jumpModal
 let clusterPollTimer = null;
 
 // Build the API path for the currently managed rig:
@@ -80,18 +81,33 @@ function updateHardwareStatBoxes(data) {
     const gpuCountEl = document.getElementById('statGpuCount');
     const speedEl = document.getElementById('statTotalHashrate');
     if (!gpuCountEl || !speedEl || !data) return;
-    
+
     if (activeHardwareTab === 'igpus') {
         const igpuCount = (data.igpus || []).length;
         gpuCountEl.textContent = igpuCount + ' iGPU' + (igpuCount === 1 ? '' : 's');
-        
+
         const cpuHash = (data.system.cpu && data.system.cpu.hashrate) || 0;
-        speedEl.textContent = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' KH/s' : cpuHash.toFixed(0) + ' H/s';
+        speedEl.textContent = fmtSpeed(cpuHash / 1000.0);
     } else {
         const totalHashrate = data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
         gpuCountEl.textContent = data.gpus.length + ' GPU';
-        speedEl.textContent = totalHashrate.toFixed(2) + ' MH/s';
+        speedEl.innerHTML = fmtSpeedHtml(totalHashrate, data.miner_algo || '');
     }
+}
+
+// Dynamic hashrate formatting: input in MH/s, output in sensible units
+function fmtSpeed(mh) {
+    const v = Number(mh) || 0;
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' PH/s';
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + ' TH/s';
+    if (v >= 1e3) return (v / 1e3).toFixed(2) + ' GH/s';
+    if (v > 0) return v.toFixed(2) + ' MH/s';
+    return '0 MH/s';
+}
+
+function fmtSpeedHtml(mh, algo) {
+    const base = '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
+    return algo ? base + '<div class="small text-muted">' + escapeHtml(algo) + '</div>' : base;
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -282,6 +298,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // 4. Poll for GPU Stats and Rig Config
     fetchStats(); // Initial load
+    loadFsheets(); // Flight sheets + wallets
+    loadFans(); // Extra fan detection
+    loadClusterData(); // Cluster rigs + jump library
     checkUpdate(); // Initial check for dashboard updates on GitHub
     const statsInterval = setInterval(fetchStats, 5000); // Poll every 5s
     const updateInterval = setInterval(checkUpdate, 600000); // Check updates every 10m
@@ -501,43 +520,66 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
-    // Emergency Flight Sheet Configurer form submit
-    document.getElementById('emergencyFlightSheetForm').addEventListener('submit', async function(e) {
+    // Flight Sheets: wallets select and quick-save form
+    populateFsheetMiners();
+    document.getElementById('saveFsheetForm').addEventListener('submit', async function(e) {
         e.preventDefault();
+        const walletVal = document.getElementById('fsWalletSelect').value;
+        const payload = {
+            fsheet: {
+                id: window._editingFsheetId || '',
+                name: document.getElementById('fsName').value.trim(),
+                coin: document.getElementById('fsCoin').value.trim(),
+                wallet: walletVal === '__custom__' ? document.getElementById('fsWalletCustom').value.trim() : walletVal,
+                pool: document.getElementById('fsPool').value.trim(),
+                miner: document.getElementById('fsMinerSelect').value
+            }
+        };
         const submitBtn = this.querySelector('button[type="submit"]');
         const origHTML = submitBtn.innerHTML;
         submitBtn.disabled = true;
-        submitBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...`;
-
-        const coin = document.getElementById('fsCoin').value.trim();
-        const wallet = document.getElementById('fsWallet').value.trim();
-        const pool = document.getElementById('fsPool').value.trim();
-        const miner = document.getElementById('fsMiner').value;
-
         try {
-            const response = await apiFetch('/api/flightsheet', {
+            const response = await apiFetch('/api/fsheets/save', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': csrfToken
-                },
-                body: JSON.stringify({ coin, wallet, pool, miner })
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify(payload)
             });
             const data = await response.json();
-            if (response.ok && data.success) {
-                showToast(data.message, true);
-                fetchStats();
-            } else {
-                showToast(data.message || "Failed to apply flight sheet.", false);
+            showToast(data.message || (data.success ? 'Flight sheet saved.' : 'Failed to save flight sheet.'), !!data.success);
+            if (data.success) {
+                this.reset();
+                window._editingFsheetId = null;
+                document.getElementById('fsWalletCustom').classList.add('d-none');
+                populateFsheetMiners();
+                loadFsheets();
             }
         } catch (error) {
-            console.error(error);
-            showToast("Network error trying to apply configuration.", false);
+            showToast("Network error saving flight sheet.", false);
         } finally {
             submitBtn.disabled = false;
             submitBtn.innerHTML = origHTML;
         }
     });
+
+    document.getElementById('fsWalletSelect').addEventListener('change', function() {
+        document.getElementById('fsWalletCustom').classList.toggle('d-none', this.value !== '__custom__');
+    });
+
+    document.getElementById('manageWalletsBtn').addEventListener('click', openWalletModal);
+    document.getElementById('saveWalletForm').addEventListener('submit', addWallet);
+    document.getElementById('importFsheetsBtn').addEventListener('click', () => {
+        document.getElementById('fsheetImportText').value = '';
+        new bootstrap.Modal(document.getElementById('fsheetImportModal')).show();
+    });
+    document.getElementById('fsheetImportFile').addEventListener('change', function() {
+        const file = this.files && this.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => { document.getElementById('fsheetImportText').value = reader.result; };
+        reader.readAsText(file);
+    });
+    document.getElementById('fsheetImportSaveBtn').addEventListener('click', importFsheets);
+    document.getElementById('fansRefreshBtn').addEventListener('click', loadFans);
 
     // Diagnostics modal bindings
     const diagModalEl = document.getElementById('diagModal');
@@ -726,11 +768,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    document.getElementById('rigScopeBackBtn').addEventListener('click', () => {
-        switchRig('self');
-        showView('cluster');
-    });
-
     // Change password modal
     document.getElementById('changePasswordBtn').addEventListener('click', () => {
         document.getElementById('currentPasswordInput').value = '';
@@ -748,6 +785,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Access page bindings
     document.getElementById('accessRefreshBtn').addEventListener('click', loadAccessList);
     document.getElementById('addAccessBtn').addEventListener('click', () => openAccessModal(null, null));
+    document.getElementById('addJumpBtn').addEventListener('click', () => openJumpModal(null));
+    document.getElementById('jumpSaveBtn').addEventListener('click', saveJumpModal);
+    document.getElementById('jumpServerAuthSelect').addEventListener('change', function() {
+        document.getElementById('jumpServerPasswordBlock').classList.toggle('d-none', this.value !== 'password');
+        document.getElementById('jumpServerKeyBlock').classList.toggle('d-none', this.value !== 'key');
+    });
 
     // 7. Cluster polling (only while the cluster view is active)
     setInterval(() => {
@@ -786,6 +829,8 @@ function showView(view) {
 
 // Switch the rig being managed in the dashboard view (self = local rig)
 function switchRig(rigId) {
+    // Managing the local rig is always local (no SSH proxy round-trip)
+    if (rigId && clusterData && rigId === clusterData.self_id) rigId = 'self';
     if (rigId === currentRigId) return;
     currentRigId = rigId;
     activeOverclocks = {};
@@ -794,7 +839,8 @@ function switchRig(rigId) {
     fetchStats();
     loadTuningSettings();
     loadPresetsList();
-    loadFlightSheetSettings();
+    loadFsheets();
+    loadFans();
     showToast('Switched to ' + (rigId === 'self' ? 'the local rig' : getRigName(rigId)), true);
 }
 
@@ -807,14 +853,37 @@ function getRigName(rigId) {
 }
 
 function updateRigScopeUi() {
-    const banner = document.getElementById('rigScopeBanner');
-    if (currentRigId === 'self') {
-        banner.classList.add('d-none');
-    } else {
-        document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
-        banner.classList.remove('d-none');
-    }
+    // Top-bar rig selector: shows the managed rig with a REMOTE marker
+    const isSelf = currentRigId === 'self' || !currentRigId;
+    document.getElementById('rigScopeName').textContent = isSelf ? getRigName(currentRigId) : getRigName(currentRigId);
+    document.getElementById('rigScopeBadge').classList.toggle('d-none', isSelf);
+    renderRigScopeMenu();
 }
+
+function renderRigScopeMenu() {
+    const menu = document.getElementById('rigScopeMenu');
+    if (!menu || !clusterData || !clusterData.rigs) return;
+    const items = [];
+    const selfRig = clusterData.rigs.find(r => r.is_self);
+    if (selfRig) {
+        items.push('<li><button class="dropdown-item' + (currentRigId === 'self' ? ' active' : '') + '" onclick="switchRigGlobal(\'self\')">' +
+            '<i class="bi bi-hdd-network me-2"></i>' + escapeHtml(selfRig.name) + ' <span class="small text-muted">(local)</span></button></li>');
+        items.push('<li><hr class="dropdown-divider"></li>');
+    }
+    clusterData.rigs.filter(r => !r.is_self).forEach(rig => {
+        const active = currentRigId === rig.id;
+        const off = !rig.online;
+        items.push('<li><button class="dropdown-item' + (active ? ' active' : '') + '" ' + (off ? 'disabled' : '') +
+            ' onclick="switchRigGlobal(\'' + rig.id + '\')">' +
+            '<i class="bi bi-hdd-rack me-2"></i>' + escapeHtml(rig.name || rig.id) +
+            (off ? ' <span class="badge bg-danger-glow text-danger ms-1">OFFLINE</span>' : '') + '</button></li>');
+    });
+    menu.innerHTML = items.join('') || '<li><span class="dropdown-item text-muted">No rigs</span></li>';
+}
+
+window.switchRigGlobal = function(rigId) {
+    switchRig(rigId);
+};
 
 // Toast notification helper
 function showToast(message, isSuccess = true) {
@@ -876,7 +945,7 @@ async function fetchStats() {
         activeOverclocks = data.overclocks;
         
         // Update header & badges
-        document.getElementById('localIpAddress').textContent = data.system.local_ip + ':1337';
+        document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
         document.getElementById('dashboardVersion').textContent = data.system.dashboard_version;
         document.getElementById('currentVerText').textContent = data.system.dashboard_version;
         
@@ -984,7 +1053,7 @@ function renderGpus(gpus) {
                         <!-- Card Header -->
                         <div class="gpu-header d-flex justify-content-between align-items-center mb-3">
                             <span class="small fw-semibold text-muted">GPU ${gpu.index}</span>
-                            <span class="badge bg-accent-glow text-primary fw-bold font-monospace">${gpu.hashrate} MH/s</span>
+                            <span class="badge bg-accent-glow text-primary fw-bold font-monospace">${fmtSpeed(gpu.hashrate)}</span>
                         </div>
                         
                         <!-- GPU Specs -->
@@ -1311,7 +1380,7 @@ async function loadTuningSettings() {
         }
         
         
-        loadFlightSheetSettings();
+        loadFsheets();
         loadPresetsList();
     } catch (error) {
         console.error("Failed to load tuning configs:", error);
@@ -1417,23 +1486,6 @@ async function deletePreset(name) {
     }
 }
 
-async function loadFlightSheetSettings() {
-    try {
-        const res = await apiFetch('/api/flightsheet');
-        if (res.ok) {
-            const data = await res.json();
-            if (data && data.success) {
-                document.getElementById('fsCoin').value = data.coin;
-                document.getElementById('fsWallet').value = data.wallet;
-                document.getElementById('fsPool').value = data.pool;
-                document.getElementById('fsMiner').value = data.miner;
-            }
-        }
-    } catch (e) {
-        console.error("Failed to load flight sheet settings:", e);
-    }
-}
-
 async function runDiagnostics() {
     const runBtn = document.getElementById('runDiagBtn');
     const origHTML = runBtn.innerHTML;
@@ -1532,13 +1584,15 @@ function renderCluster() {
         document.getElementById('clusterLastSync').className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
     }
 
-    // Farm-wide totals (GPUs only; skip offline rigs with no cached stats)
-    let totalHashrate = 0, totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0;
+    // Farm-wide totals: only online rigs count (offline stats are stale)
+    let totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0;
+    const speedByAlgo = {};
     clusterData.rigs.forEach(rig => {
         const stats = rig.stats;
-        if (!stats) return;
+        if (!stats || !rig.online) return;
         const mh = (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
-        totalHashrate += mh;
+        const key = stats.miner_algo || (stats.system && stats.system.coin) || '';
+        speedByAlgo[key] = (speedByAlgo[key] || 0) + mh;
         (stats.gpus || []).forEach(g => {
             totalPower += g.power || 0;
             tempSum += g.temp || 0;
@@ -1546,7 +1600,17 @@ function renderCluster() {
         });
         totalGpus += (stats.gpus || []).length;
     });
-    document.getElementById('clusterTotalHashrate').textContent = totalHashrate.toFixed(2) + ' MH/s';
+    const algoKeys = Object.keys(speedByAlgo).filter(k => speedByAlgo[k] > 0);
+    let speedHtml;
+    if (algoKeys.length === 0) {
+        speedHtml = '0 MH/s';
+    } else if (algoKeys.length === 1) {
+        speedHtml = fmtSpeedHtml(speedByAlgo[algoKeys[0]], algoKeys[0] !== '' ? algoKeys[0] : '');
+    } else {
+        speedHtml = '<div class="small text-primary-gradient fw-bold">' + algoKeys.map(k =>
+            fmtSpeed(speedByAlgo[k]) + ' <span class="text-muted fw-normal">' + escapeHtml(k) + '</span>').join('<br>') + '</div>';
+    }
+    document.getElementById('clusterTotalHashrate').innerHTML = speedHtml;
     document.getElementById('clusterTotalPower').textContent = totalPower.toFixed(1) + ' W';
     document.getElementById('clusterTotalGpus').textContent = totalGpus;
     document.getElementById('clusterAvgTemp').textContent = (tempCount ? (tempSum / tempCount).toFixed(1) : 0) + ' °C';
@@ -1559,46 +1623,41 @@ function renderCluster() {
     clusterData.rigs.forEach(rig => {
         const stats = rig.stats;
         const system = stats && stats.system ? stats.system : {};
+        const isOnline = !!rig.online;
         const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
-        const totalHash = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)).toFixed(2) + ' MH/s' : 'n/a';
-        const power = stats ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : 'n/a';
+        const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)) : 0;
+        const totalHash = !stats ? 'n/a' : (isOnline ? fmtSpeed(totalHashMh) : '—');
+        const power = stats ? (isOnline ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
         const temps = stats && stats.gpus && stats.gpus.length
-            ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : 'n/a';
+            ? (isOnline ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : '—') : 'n/a';
         const isSelf = !!rig.is_self;
 
         const statusBadge = isSelf
             ? '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>'
-            : (rig.online
+            : (isOnline
                 ? '<span class="badge bg-success-glow border border-success text-success"><span class="pulse-indicator"></span>ONLINE</span>'
-                : '<span class="badge bg-danger-glow border border-danger text-danger">OFFLINE</span>');
-
-        const lastSeen = rig.last_sync ? new Date(rig.last_sync * 1000).toLocaleTimeString() : 'never';
-        const errLine = (!rig.online && rig.last_error)
-            ? '<p class="small text-danger mb-2"><i class="bi bi-exclamation-triangle-fill"></i> ' + escapeHtml(rig.last_error) + '</p>'
-            : '';
+                : '<span class="badge bg-danger-glow border border-danger text-danger" title="' + escapeHtml(rig.last_error || '') + '">OFFLINE</span>');
 
         const col = document.createElement('div');
-        col.className = 'col-md-6 col-lg-4';
+        col.className = 'col-md-6 col-lg-4' + (isOnline ? '' : ' rig-offline');
         col.innerHTML = `
             <div class="card glass-card h-100">
                 <div class="card-body d-flex flex-column">
                     <div class="d-flex justify-content-between align-items-center mb-2">
-                        <h3 class="h5 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
+                        <h3 class="h6 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
                         ${statusBadge}
                     </div>
-                    <p class="small text-muted mb-2">
-                        <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || 'no label')}
-                        ${isSelf ? '' : ' • ' + rig.accesses.length + ' SSH access' + (rig.accesses.length === 1 ? '' : 'es')}
+                    <p class="small text-muted mb-2 text-truncate" title="${escapeHtml(rig.host_label || '')}">
+                        <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
                     </p>
-                    ${errLine}
-                    <div class="row g-2 mt-1 pt-2 border-top border-secondary-subtle text-center">
+                    <div class="row g-2 mt-0 pt-2 border-top border-secondary-subtle text-center">
                         <div class="col-4">
                             <div class="small text-muted">GPUs</div>
-                            <div class="fw-semibold small">${gpuCount === null ? 'n/a' : gpuCount}</div>
+                            <div class="fw-semibold small">${isOnline ? (gpuCount === null ? 'n/a' : gpuCount) : '—'}</div>
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Speed</div>
-                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}</div>
+                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}${isOnline && stats && stats.miner_algo ? '<div class="small text-muted fw-normal">' + escapeHtml(stats.miner_algo) + '</div>' : ''}</div>
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Temp</div>
@@ -1606,21 +1665,20 @@ function renderCluster() {
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Miner</div>
-                            <div class="fw-semibold small">${escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)'))}</div>
+                            <div class="fw-semibold small">${isOnline ? escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)')) : '—'}</div>
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Coin</div>
-                            <div class="fw-semibold small text-warning">${escapeHtml(system.coin || 'None')}</div>
+                            <div class="fw-semibold small text-warning">${isOnline ? escapeHtml(system.coin || 'None') : '—'}</div>
                         </div>
                         <div class="col-4">
                             <div class="small text-muted">Power</div>
                             <div class="fw-semibold small text-danger-emphasis">${power}</div>
                         </div>
                     </div>
-                    <div class="small text-muted mt-2">Uptime: ${escapeHtml(system.uptime || 'unknown')} • Dashboard v${escapeHtml(system.dashboard_version || '?')} • seen ${lastSeen}</div>
-                    <div class="mt-3 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')">
-                            <i class="bi bi-box-arrow-in-right"></i> ${isSelf ? 'Open Dashboard' : 'Manage Rig'}
+                    <div class="mt-2 d-flex gap-2">
+                        <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')" ${isSelf ? '' : (isOnline ? '' : 'disabled')}>
+                            <i class="bi bi-gear-wide-connected"></i> Manage Rig
                         </button>
                         <button class="btn btn-sm btn-outline-secondary" title="Edit rig" onclick="openRigModal('${rig.id}')">
                             <i class="bi bi-pencil"></i>
@@ -1714,7 +1772,7 @@ function renderRigModalAccesses(rig) {
     let html = '<div class="list-group list-group-flush">';
     accesses.forEach(a => {
         const route = a.type === 'jump'
-            ? escapeHtml(a.user + '@' + a.host + ':' + a.port) + ' <i class="bi bi-arrow-right"></i> jump ' + escapeHtml(a.jump_user + '@' + a.jump_host)
+            ? escapeHtml(a.user + '@' + a.host + ':' + a.port) + ' <i class="bi bi-arrow-right"></i> jump ' + escapeHtml(jumpNameById(a.jump_id) || a.jump_host || '?')
             : escapeHtml(a.user + '@' + a.host + ':' + a.port);
         const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
         html += `
@@ -1870,21 +1928,43 @@ async function loadAccessList() {
 
 function renderAccesses() {
     const body = document.getElementById('accessesTableBody');
+    const jumpBody = document.getElementById('jumpTableBody');
     if (!clusterData || !clusterData.rigs) return;
 
+    // Jump server library table
+    const jumps = clusterData.jump_hosts || [];
+    if (!jumps.length) {
+        jumpBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">No jump servers yet. Add one and reuse it for any rig.</td></tr>';
+    } else {
+        jumpBody.innerHTML = jumps.map(j => {
+            const auth = j.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
+            return '<tr>' +
+                '<td class="fw-semibold">' + escapeHtml(j.name) + '</td>' +
+                '<td class="font-monospace small">' + escapeHtml(j.user + '@' + j.host + ':' + j.port) + '</td>' +
+                '<td class="small text-muted">' + auth + '</td>' +
+                '<td class="text-end"><div class="btn-group btn-group-sm">' +
+                '<button class="btn btn-outline-primary" title="Edit" onclick="openJumpModal(\'' + j.id + '\')"><i class="bi bi-pencil"></i></button>' +
+                '<button class="btn btn-outline-danger" title="Delete" onclick="deleteJump(\'' + j.id + '\')"><i class="bi bi-trash"></i></button>' +
+                '</div></td></tr>';
+        }).join('');
+    }
+
+    // Access routes, grouped by rig
     const rows = [];
     clusterData.rigs.forEach(rig => {
-        const rigLabel = escapeHtml(rig.name) + (rig.is_self ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">this rig</span>' : '');
+        const rigLabel = escapeHtml(rig.name || rig.id) +
+            (rig.is_self ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1 small">this rig</span>' : '');
         if (!rig.accesses.length) {
-            rows.push('<tr><td>' + rigLabel + '</td><td colspan="5" class="text-muted small">No SSH accesses configured yet</td></tr>');
+            rows.push('<tr class="access-group-start"><td class="fw-semibold align-middle">' + rigLabel + '</td>' +
+                '<td colspan="5" class="text-muted small">No accesses</td></tr>');
             return;
         }
         rig.accesses.forEach((a, idx) => {
-            const route = a.type === 'jump'
-                ? escapeHtml(a.user + '@' + a.host + ':' + a.port) + ' <i class="bi bi-arrow-right-short"></i> <span class="text-info">via ' + escapeHtml(a.jump_user + '@' + a.jump_host + ':' + a.jump_port) + '</span>'
-                : escapeHtml(a.user + '@' + a.host + ':' + a.port);
+            const jumpName = a.jump_id ? jumpNameById(a.jump_id) : (a.jump_host || '');
+            const route = escapeHtml(a.user + '@' + a.host + ':' + a.port) +
+                (a.type === 'jump' ? ' <i class="bi bi-arrow-right-short"></i> <span class="text-info">' + escapeHtml(jumpName || '?') + '</span>' : '');
             const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
-            rows.push('<tr>' +
+            rows.push('<tr' + (idx === 0 ? ' class="access-group-start"' : '') + '>' +
                 (idx === 0 ? '<td rowspan="' + rig.accesses.length + '" class="fw-semibold align-middle">' + rigLabel + '</td>' : '') +
                 '<td class="fw-semibold">' + escapeHtml(a.name) + '</td>' +
                 '<td><span class="badge ' + (a.type === 'jump' ? 'bg-warning-glow text-warning' : 'bg-accent-glow text-primary') + '">' + (a.type === 'jump' ? 'JUMP' : 'DIRECT') + '</span></td>' +
@@ -1904,6 +1984,11 @@ function renderAccesses() {
     } else {
         body.innerHTML = rows.join('');
     }
+}
+
+function jumpNameById(jumpId) {
+    const j = (clusterData && clusterData.jump_hosts || []).find(x => x.id === jumpId);
+    return j ? j.name : '';
 }
 
 window.testAccess = async function(rigId, accessId, btn) {
@@ -1947,12 +2032,14 @@ function openAccessModal(rigId, accessId) {
     document.getElementById('accessAuthSelect').value = access ? access.auth : 'password';
     document.getElementById('accessPasswordInput').value = access && access.auth === 'password' ? (access.password || '********') : '';
     document.getElementById('accessKeyPathInput').value = access && access.key_path ? access.key_path : '';
-    document.getElementById('jumpHostInput').value = access && access.jump_host ? access.jump_host : '';
-    document.getElementById('jumpPortInput').value = access && access.jump_port ? access.jump_port : 22;
-    document.getElementById('jumpUserInput').value = access && access.jump_user ? access.jump_user : '';
-    document.getElementById('jumpAuthSelect').value = access && access.jump_auth ? access.jump_auth : 'password';
-    document.getElementById('jumpPasswordInput').value = access && access.jump_auth === 'password' ? (access.jump_password || '********') : '';
-    document.getElementById('jumpKeyPathInput').value = access && access.jump_key_path ? access.jump_key_path : '';
+
+    // Jump server dropdown from the shared library
+    const jumpSelect = document.getElementById('accessJumpSelect');
+    const jumps = clusterData && clusterData.jump_hosts ? clusterData.jump_hosts : [];
+    jumpSelect.innerHTML = jumps.length
+        ? jumps.map(j => '<option value="' + j.id + '">' + escapeHtml(j.name + ' (' + j.host + ')') + '</option>').join('')
+        : '<option value="">No jump servers - add one first</option>';
+    if (access && access.jump_id) jumpSelect.value = access.jump_id;
 
     if (rigId && access) rigSelect.value = rigId;
     toggleAccessModalFields();
@@ -1965,17 +2052,13 @@ window.openAccessModal = openAccessModal;
 function toggleAccessModalFields() {
     const type = document.getElementById('accessTypeSelect').value;
     const auth = document.getElementById('accessAuthSelect').value;
-    const jauth = document.getElementById('jumpAuthSelect').value;
     document.getElementById('jumpSettingsBlock').classList.toggle('d-none', type !== 'jump');
     document.getElementById('accessPasswordBlock').classList.toggle('d-none', auth !== 'password');
     document.getElementById('accessKeyBlock').classList.toggle('d-none', auth !== 'key');
-    document.getElementById('jumpPasswordBlock').classList.toggle('d-none', jauth !== 'password');
-    document.getElementById('jumpKeyBlock').classList.toggle('d-none', jauth !== 'key');
 }
 
 document.getElementById('accessTypeSelect').addEventListener('change', toggleAccessModalFields);
 document.getElementById('accessAuthSelect').addEventListener('change', toggleAccessModalFields);
-document.getElementById('jumpAuthSelect').addEventListener('change', toggleAccessModalFields);
 
 function collectAccessPayload() {
     const type = document.getElementById('accessTypeSelect').value;
@@ -1991,12 +2074,7 @@ function collectAccessPayload() {
         key_path: document.getElementById('accessKeyPathInput').value.trim()
     };
     if (type === 'jump') {
-        payload.jump_host = document.getElementById('jumpHostInput').value.trim();
-        payload.jump_port = parseInt(document.getElementById('jumpPortInput').value, 10) || 22;
-        payload.jump_user = document.getElementById('jumpUserInput').value.trim();
-        payload.jump_auth = document.getElementById('jumpAuthSelect').value;
-        payload.jump_password = document.getElementById('jumpPasswordInput').value;
-        payload.jump_key_path = document.getElementById('jumpKeyPathInput').value.trim();
+        payload.jump_id = document.getElementById('accessJumpSelect').value;
     }
     return payload;
 }
@@ -2070,6 +2148,396 @@ window.deleteAccess = async function(rigId, accessId) {
         showToast('Network error deleting access.', false);
     }
 };
+
+// ---------------- Jump server modal ----------------
+
+function openJumpModal(jumpId) {
+    editingJumpId = jumpId || null;
+    const jump = jumpId && clusterData && clusterData.jump_hosts
+        ? clusterData.jump_hosts.find(j => j.id === jumpId) : null;
+    document.getElementById('jumpModalTitle').textContent = jump ? 'Edit Jump Server' : 'Add Jump Server';
+    document.getElementById('jumpNameInput').value = jump ? jump.name : '';
+    document.getElementById('jumpServerHostInput').value = jump ? jump.host : '';
+    document.getElementById('jumpServerPortInput').value = jump ? jump.port : 22;
+    document.getElementById('jumpServerUserInput').value = jump ? jump.user : '';
+    document.getElementById('jumpServerAuthSelect').value = jump ? jump.auth : 'password';
+    document.getElementById('jumpServerPasswordInput').value = jump && jump.auth === 'password' ? (jump.password || '********') : '';
+    document.getElementById('jumpServerKeyPathInput').value = jump && jump.key_path ? jump.key_path : '';
+    document.getElementById('jumpServerPasswordBlock').classList.toggle('d-none', document.getElementById('jumpServerAuthSelect').value !== 'password');
+    document.getElementById('jumpServerKeyBlock').classList.toggle('d-none', document.getElementById('jumpServerAuthSelect').value !== 'key');
+    new bootstrap.Modal(document.getElementById('jumpModal')).show();
+}
+window.openJumpModal = openJumpModal;
+
+async function saveJumpModal() {
+    const payload = {
+        jump: {
+            id: editingJumpId || '',
+            name: document.getElementById('jumpNameInput').value.trim(),
+            host: document.getElementById('jumpServerHostInput').value.trim(),
+            port: parseInt(document.getElementById('jumpServerPortInput').value, 10) || 22,
+            user: document.getElementById('jumpServerUserInput').value.trim(),
+            auth: document.getElementById('jumpServerAuthSelect').value,
+            password: document.getElementById('jumpServerPasswordInput').value,
+            key_path: document.getElementById('jumpServerKeyPathInput').value.trim()
+        }
+    };
+    try {
+        const response = await fetch('/api/cluster/jump', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToast(data.message, true);
+            bootstrap.Modal.getInstance(document.getElementById('jumpModal')).hide();
+            loadClusterData(true);
+            loadAccessList();
+        } else {
+            showToast(data.message || 'Failed to save jump server.', false);
+        }
+    } catch (e) {
+        showToast('Network error saving jump server.', false);
+    }
+}
+
+window.deleteJump = async function(jumpId) {
+    if (!confirm('Delete this jump server? Accesses referencing it will fall back to stored settings.')) return;
+    try {
+        const response = await fetch('/api/cluster/jump/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ jump_id: jumpId })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Deleted.' : 'Failed to delete jump server.'), !!data.success);
+        if (data.success) {
+            loadClusterData(true);
+            loadAccessList();
+        }
+    } catch (e) {
+        showToast('Network error deleting jump server.', false);
+    }
+};
+
+// ---------------- Flight sheets & wallets ----------------
+
+const MINER_OPTIONS = ["lolminer", "xmrig", "gminer", "rigel", "bzminer", "teamredminer",
+    "hiveon", "srbminer", "wildrig-multi", "bminer", "ccminer", "t-rex", "none"];
+
+function populateFsheetMiners() {
+    const sel = document.getElementById('fsMinerSelect');
+    const current = sel.value;
+    sel.innerHTML = MINER_OPTIONS.map(m => '<option value="' + m + '">' + m + '</option>').join('');
+    if (current) sel.value = current;
+}
+
+function populateWalletSelect(wallets) {
+    const sel = document.getElementById('fsWalletSelect');
+    const current = sel.value;
+    let options = wallets.map(w => '<option value="' + w.id + '">' + escapeHtml(w.name) + '</option>');
+    options.push('<option value="__custom__">Custom address...</option>');
+    sel.innerHTML = options.join('') || '<option value="__custom__">Custom address...</option>';
+    if (current) sel.value = current;
+}
+
+async function loadFsheets() {
+    try {
+        const response = await apiFetch('/api/fsheets');
+        const data = await response.json();
+        if (!data.success) return;
+        renderFsheets(data.fsheets || [], data.wallets || [], data.active || {});
+    } catch (e) {
+        console.error('Failed to load flight sheets:', e);
+    }
+}
+
+function renderFsheets(fsheets, wallets, active) {
+    populateWalletSelect(wallets);
+    window._fsWallets = wallets;
+    // Prefill the quick-save form once with the active mining config
+    if (!window._fsFormPrefilled) {
+        window._fsFormPrefilled = true;
+        document.getElementById('fsCoin').value = active.coin || '';
+        document.getElementById('fsPool').value = active.pool || '';
+        const sel = document.getElementById('fsWalletSelect');
+        const w = wallets.find(x => x.address === active.wallet);
+        if (w) { sel.value = w.id; }
+        else {
+            sel.value = '__custom__';
+            const custom = document.getElementById('fsWalletCustom');
+            custom.classList.remove('d-none');
+            custom.value = active.wallet || '';
+        }
+        populateFsheetMiners();
+        document.getElementById('fsMinerSelect').value = active.miner || 'none';
+    }
+    const container = document.getElementById('fsheetsContainer');
+    if (!fsheets.length) {
+        container.innerHTML = '<div class="text-center text-muted small py-3">No flight sheets saved yet. Save one below or import.</div>';
+        return;
+    }
+    const walletLabel = (ref) => {
+        const w = wallets.find(x => x.id === ref);
+        if (w) return w.name;
+        return ref ? ref.slice(0, 14) + (ref.length > 14 ? '…' : '') : '—';
+    };
+    container.innerHTML = fsheets.map(f => {
+        const isWalletRef = wallets.some(x => x.id === f.wallet);
+        const isActive = active.coin === f.coin && (isWalletRef || (active.wallet === f.wallet));
+        return '<div class="d-flex justify-content-between align-items-center border border-secondary-subtle rounded px-2 py-1 mb-1 fsheet-row' + (isActive ? ' border-warning-subtle' : '') + '">' +
+            '<div class="min-w-0">' +
+                '<span class="fw-semibold small">' + escapeHtml(f.name) + '</span>' +
+                (isActive ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
+                '<div class="small text-muted text-truncate">' + escapeHtml(f.coin || '?') + ' • ' + escapeHtml(walletLabel(f.wallet)) + ' • ' + escapeHtml(f.pool || '—') + ' • ' + escapeHtml(f.miner) + '</div>' +
+            '</div>' +
+            '<div class="d-flex gap-1 flex-shrink-0">' +
+                '<button class="btn btn-xs btn-outline-warning py-0 px-2" title="Apply" onclick="applyFsheet(\'' + f.id + '\', this)"><i class="bi bi-lightning-charge-fill"></i></button>' +
+                '<button class="btn btn-xs btn-outline-primary py-0 px-2" title="Edit" onclick="editFsheet(\'' + f.id + '\')"><i class="bi bi-pencil"></i></button>' +
+                '<button class="btn btn-xs btn-outline-danger py-0 px-2" title="Delete" onclick="deleteFsheet(\'' + f.id + '\')"><i class="bi bi-trash"></i></button>' +
+            '</div>' +
+        '</div>';
+    }).join('');
+}
+
+window.applyFsheet = async function(fid, btn) {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    try {
+        const response = await apiFetch('/api/fsheets/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: fid })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Applied.' : 'Failed to apply.'), !!data.success);
+        if (data.success) setTimeout(() => { fetchStats(); loadFsheets(); }, 2500);
+    } catch (e) {
+        showToast('Network error applying flight sheet.', false);
+    } finally {
+        setTimeout(() => { btn.innerHTML = orig; }, 800);
+    }
+};
+
+window.editFsheet = function(fid) {
+    apiFetch('/api/fsheets').then(r => r.json()).then(data => {
+        const f = (data.fsheets || []).find(x => x.id === fid);
+        if (!f) return;
+        populateWalletSelect(data.wallets || []);
+        document.getElementById('fsName').value = f.name;
+        document.getElementById('fsCoin').value = f.coin;
+        const sel = document.getElementById('fsWalletSelect');
+        const isRef = (data.wallets || []).some(w => w.id === f.wallet);
+        if (isRef) {
+            sel.value = f.wallet;
+            document.getElementById('fsWalletCustom').classList.add('d-none');
+        } else {
+            sel.value = '__custom__';
+            const custom = document.getElementById('fsWalletCustom');
+            custom.classList.remove('d-none');
+            custom.value = f.wallet;
+        }
+        document.getElementById('fsPool').value = f.pool;
+        populateFsheetMiners();
+        document.getElementById('fsMinerSelect').value = f.miner;
+        // Reuse the save form; saving updates by name+id when editing flag set
+        window._editingFsheetId = fid;
+        const form = document.getElementById('saveFsheetForm');
+        form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        document.getElementById('fsName').focus();
+        showToast('Editing "' + f.name + '" - press Save to update.', true);
+    });
+};
+
+window.deleteFsheet = async function(fid) {
+    if (!confirm('Delete this flight sheet?')) return;
+    try {
+        const response = await apiFetch('/api/fsheets/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: fid })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Deleted.' : 'Failed to delete.'), !!data.success);
+        if (data.success) loadFsheets();
+    } catch (e) {
+        showToast('Network error deleting flight sheet.', false);
+    }
+};
+
+async function importFsheets() {
+    const text = document.getElementById('fsheetImportText').value.trim();
+    if (!text) { showToast('Nothing to import.', false); return; }
+    let items;
+    try {
+        const parsed = JSON.parse(text);
+        items = Array.isArray(parsed) ? parsed : [parsed];
+    } catch (e) {
+        showToast('Invalid JSON.', false);
+        return;
+    }
+    let ok = 0;
+    for (const item of items) {
+        try {
+            const response = await apiFetch('/api/fsheets/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ fsheet: item })
+            });
+            const data = await response.json();
+            if (data.success) ok += 1; else showToast(data.message || 'Import failed for one entry.', false);
+        } catch (e) { /* keep going */ }
+    }
+    if (ok) showToast('Imported ' + ok + ' flight sheet' + (ok === 1 ? '' : 's') + '.', true);
+    bootstrap.Modal.getInstance(document.getElementById('fsheetImportModal')).hide();
+    loadFsheets();
+}
+
+function openWalletModal() {
+    renderWallets();
+    new bootstrap.Modal(document.getElementById('walletModal')).show();
+}
+
+async function renderWallets() {
+    try {
+        const response = await apiFetch('/api/wallets');
+        const data = await response.json();
+        const list = data.wallets || [];
+        window._fsWallets = list;
+        populateWalletSelect(list);
+        const container = document.getElementById('walletsContainer');
+        if (!list.length) {
+            container.innerHTML = '<div class="text-center text-muted small py-3">No wallets saved yet.</div>';
+            return;
+        }
+        container.innerHTML = list.map(w =>
+            '<div class="d-flex justify-content-between align-items-center border border-secondary-subtle rounded px-2 py-1 mb-1">' +
+                '<div class="min-w-0">' +
+                    '<span class="fw-semibold small">' + escapeHtml(w.name) + '</span>' +
+                    '<div class="small text-muted font-monospace text-truncate">' + escapeHtml(w.address) + '</div>' +
+                '</div>' +
+                '<button class="btn btn-xs btn-outline-danger py-0 px-2 flex-shrink-0" title="Delete" onclick="deleteWallet(\'' + w.id + '\')"><i class="bi bi-trash"></i></button>' +
+            '</div>').join('');
+    } catch (e) {
+        showToast('Failed to load wallets.', false);
+    }
+}
+
+async function addWallet(e) {
+    e.preventDefault();
+    const payload = {
+        wallet: {
+            name: document.getElementById('walletNameInput').value.trim(),
+            address: document.getElementById('walletAddressInput').value.trim()
+        }
+    };
+    try {
+        const response = await apiFetch('/api/wallets/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Wallet saved.' : 'Failed to save wallet.'), !!data.success);
+        if (data.success) {
+            document.getElementById('walletNameInput').value = '';
+            document.getElementById('walletAddressInput').value = '';
+            renderWallets();
+            loadFsheets();
+        }
+    } catch (err) {
+        showToast('Network error saving wallet.', false);
+    }
+}
+
+window.deleteWallet = async function(wid) {
+    if (!confirm('Delete this wallet?')) return;
+    try {
+        const response = await apiFetch('/api/wallets/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: wid })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Wallet removed.' : 'Failed to delete wallet.'), !!data.success);
+        if (data.success) { renderWallets(); loadFsheets(); }
+    } catch (e) {
+        showToast('Network error deleting wallet.', false);
+    }
+};
+
+// ---------------- Extra fans control ----------------
+
+async function loadFans() {
+    const container = document.getElementById('fansContainer');
+    if (!container) return;
+    try {
+        const response = await apiFetch('/api/fans');
+        const data = await response.json();
+        const fans = (data && data.fans) || [];
+        if (!fans.length) {
+            container.innerHTML = '<div class="text-muted small">No controllable fans detected on this rig (motherboard fan headers via hwmon).</div>';
+            return;
+        }
+        container.innerHTML = fans.map(f => {
+            const id = f.hwmon + '_' + f.pwm;
+            return '<div class="d-flex align-items-center gap-2 border border-secondary-subtle rounded px-2 py-1 mb-1">' +
+                '<span class="fw-semibold small" style="width: 130px;" title="' + escapeHtml(f.chip) + ' pwm' + f.pwm + '">' + escapeHtml(f.label) + '</span>' +
+                '<span class="small text-muted font-monospace" style="width: 80px;">' + (f.rpm !== null ? f.rpm + ' rpm' : '—') + '</span>' +
+                '<input type="range" class="form-range fan-slider" min="0" max="100" value="' + f.duty + '" id="fan_' + id + '"' + (f.mode === 'auto' ? ' disabled' : '') + '>' +
+                '<span class="small font-monospace" style="width: 42px;" id="fanval_' + id + '">' + f.duty + '%</span>' +
+                '<div class="btn-group btn-group-sm" role="group">' +
+                    '<button class="btn btn-xs ' + (f.mode === 'manual' ? 'btn-warning' : 'btn-outline-secondary') + ' py-0 px-2" onclick="setFanMode(\'' + f.hwmon + '\',' + f.pwm + ',\'manual\')" title="Manual control">M</button>' +
+                    '<button class="btn btn-xs ' + (f.mode === 'auto' ? 'btn-success' : 'btn-outline-secondary') + ' py-0 px-2" onclick="setFanMode(\'' + f.hwmon + '\',' + f.pwm + ',\'auto\')" title="Automatic">A</button>' +
+                '</div>' +
+            '</div>';
+        }).join('');
+        container.querySelectorAll('.fan-slider').forEach(sl => {
+            sl.addEventListener('input', function() {
+                document.getElementById(this.id.replace('fan_', 'fanval_')).textContent = this.value + '%';
+            });
+            sl.addEventListener('change', function() {
+                const parts = this.id.replace('fan_', '').split('_');
+                setFanDuty(parts[0], parts[1], parseInt(this.value, 10));
+            });
+        });
+    } catch (e) {
+        container.innerHTML = '<div class="text-muted small">Fan control not available.</div>';
+    }
+}
+
+async function setFanMode(hwmon, pwm, mode) {
+    try {
+        const response = await apiFetch('/api/fans', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ hwmon, pwm, mode })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Fan updated.' : 'Failed to update fan.'), !!data.success);
+        loadFans();
+    } catch (e) {
+        showToast('Network error controlling fan.', false);
+    }
+}
+
+async function setFanDuty(hwmon, pwm, duty) {
+    try {
+        const response = await apiFetch('/api/fans', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ hwmon, pwm, mode: 'manual', duty })
+        });
+        const data = await response.json();
+        if (!data.success) {
+            showToast(data.message || 'Failed to set fan speed.', false);
+            loadFans();
+        }
+    } catch (e) {
+        showToast('Network error setting fan speed.', false);
+    }
+}
 
 // ---------------- Password change ----------------
 

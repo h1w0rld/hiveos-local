@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import glob
 import hmac
 import uuid
 import signal
@@ -117,14 +118,15 @@ def load_cluster_state():
         "self_id": "",
         "sync_interval": DEFAULT_SYNC_INTERVAL,
         "rigs": [],
-        "removed": []
+        "removed": [],
+        "jump_hosts": []
     }
     try:
         if os.path.exists(CLUSTER_CONF):
             with open(CLUSTER_CONF, 'r') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed"):
+                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts"):
                     if k in data:
                         state[k] = data[k]
     except Exception as e:
@@ -139,6 +141,9 @@ def load_cluster_state():
     # Deletion tombstones: entries removed on any node, kept so deletes propagate
     state["removed"] = [t for t in state.get("removed", [])
                         if isinstance(t, dict) and t.get("id")]
+    # Shared jump server library (referenced by SSH accesses via jump_id)
+    state["jump_hosts"] = [j for j in state.get("jump_hosts", [])
+                           if isinstance(j, dict) and j.get("id")]
     if not os.path.exists(CLUSTER_CONF):
         save_cluster_state(state)
     try:
@@ -167,6 +172,55 @@ def save_cluster_state(state):
 
 def clean_access_entry(access):
     return {k: access[k] for k in ACCESS_ENTRY_FIELDS if k in access}
+
+JUMP_ENTRY_FIELDS = ["id", "name", "host", "port", "user", "auth", "password", "key_path", "updated_at"]
+
+def clean_jump_entry(entry):
+    return {k: entry[k] for k in JUMP_ENTRY_FIELDS if k in entry}
+
+def merge_jump_hosts(base_jumps, incoming_jumps):
+    """Merge the jump server library by id; the entry with the newer updated_at wins."""
+    by_id = {}
+    for j in base_jumps or []:
+        if isinstance(j, dict) and j.get("id"):
+            by_id[j["id"]] = j
+    for inc in incoming_jumps or []:
+        if not isinstance(inc, dict) or not inc.get("id"):
+            continue
+        clean = clean_jump_entry(inc)
+        existing = by_id.get(clean["id"])
+        if existing is None:
+            clean.setdefault("updated_at", 0)
+            by_id[clean["id"]] = clean
+        else:
+            try:
+                inc_ts = int(clean.get("updated_at") or 0)
+                cur_ts = int(existing.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                inc_ts, cur_ts = 0, 0
+            if inc_ts > cur_ts:
+                by_id[clean["id"]] = clean
+    return list(by_id.values())
+
+def resolve_jump_host(access):
+    """Resolve an access' jump reference (jump_id) against the shared jump server
+    library; falls back to inline jump_* fields stored on the access itself."""
+    jump_id = str(access.get("jump_id") or "").strip()
+    if jump_id:
+        try:
+            for j in load_cluster_state().get("jump_hosts", []):
+                if j.get("id") == jump_id:
+                    resolved = dict(access)
+                    resolved["jump_host"] = j.get("host")
+                    resolved["jump_port"] = j.get("port", 22)
+                    resolved["jump_user"] = j.get("user")
+                    resolved["jump_auth"] = j.get("auth", "password")
+                    resolved["jump_password"] = j.get("password", "")
+                    resolved["jump_key_path"] = j.get("key_path", "")
+                    return resolved
+        except Exception as e:
+            logging.error(f"Failed to resolve jump host '{jump_id}': {e}")
+    return access
 
 def clean_rig_entry(entry):
     """Keep only known rig fields; normalize is_self relative to the local self id."""
@@ -339,36 +393,42 @@ def validate_access_payload(access):
                 return None, "Invalid SSH private key path."
             clean["key_path"] = key_path
     if a_type == "jump":
+        jid = str(access.get("jump_id", "")).strip()
+        if jid:
+            clean["jump_id"] = jid
         jhost = str(access.get("jump_host", "")).strip()
-        if not VALID_HOST_RE.match(jhost):
-            return None, "Invalid jump server host (use IP address or hostname)."
-        juser = str(access.get("jump_user", "")).strip()
-        if not VALID_USER_RE.match(juser):
-            return None, "Invalid jump server SSH user name."
-        try:
-            jport = int(access.get("jump_port", 22))
-        except (TypeError, ValueError):
-            return None, "Jump server SSH port must be an integer."
-        if not (1 <= jport <= 65535):
-            return None, "Jump server SSH port must be between 1 and 65535."
-        jauth = str(access.get("jump_auth", "password")).strip().lower()
-        if jauth not in ("password", "key"):
-            return None, "Jump server auth must be 'password' or 'key'."
-        clean["jump_host"] = jhost
-        clean["jump_port"] = jport
-        clean["jump_user"] = juser
-        clean["jump_auth"] = jauth
-        if jauth == "password":
-            jpassword = str(access.get("jump_password", ""))
-            if len(jpassword) > 128:
-                return None, "Jump server password is too long."
-            clean["jump_password"] = jpassword
-        else:
-            jkey = str(access.get("jump_key_path", "")).strip()
-            if jkey:
-                if not VALID_KEYPATH_RE.match(jkey):
-                    return None, "Invalid jump server SSH key path."
-                clean["jump_key_path"] = jkey
+        if jhost:
+            if not VALID_HOST_RE.match(jhost):
+                return None, "Invalid jump server host (use IP address or hostname)."
+            juser = str(access.get("jump_user", "")).strip()
+            if not VALID_USER_RE.match(juser):
+                return None, "Invalid jump server SSH user name."
+            try:
+                jport = int(access.get("jump_port", 22))
+            except (TypeError, ValueError):
+                return None, "Jump server SSH port must be an integer."
+            if not (1 <= jport <= 65535):
+                return None, "Jump server SSH port must be between 1 and 65535."
+            jauth = str(access.get("jump_auth", "password")).strip().lower()
+            if jauth not in ("password", "key"):
+                return None, "Jump server auth must be 'password' or 'key'."
+            clean["jump_host"] = jhost
+            clean["jump_port"] = jport
+            clean["jump_user"] = juser
+            clean["jump_auth"] = jauth
+            if jauth == "password":
+                jpassword = str(access.get("jump_password", ""))
+                if len(jpassword) > 128:
+                    return None, "Jump server password is too long."
+                clean["jump_password"] = jpassword
+            else:
+                jkey = str(access.get("jump_key_path", "")).strip()
+                if jkey:
+                    if not VALID_KEYPATH_RE.match(jkey):
+                        return None, "Invalid jump server SSH key path."
+                    clean["jump_key_path"] = jkey
+        elif not jid:
+            return None, "Jump access requires a jump server (pick one from the library)."
     return clean, ""
 
 def _write_temp_password(password, tmp_files):
@@ -444,7 +504,7 @@ def run_ssh_command(access, remote_cmd, timeout=35, stdin_data=None):
     tmp_files = []
     proc = None
     try:
-        args, err = build_ssh_command(access, remote_cmd, tmp_files)
+        args, err = build_ssh_command(resolve_jump_host(access), remote_cmd, tmp_files)
         if err:
             return False, "", err
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -570,7 +630,7 @@ def write_cluster_cache(cache):
 def collect_stats_payload():
     """Full stats payload shared between /api/stats and the cluster cache."""
     hw = get_gpu_stats()
-    total_mh, per_gpu = get_miner_hashrate()
+    total_mh, per_gpu, algo = get_miner_hashrate()
     for g in hw["gpus"]:
         g["hashrate"] = round(per_gpu.get(g["index"], 0.0), 2)
     return {
@@ -578,6 +638,7 @@ def collect_stats_payload():
         "gpus": hw["gpus"],
         "igpus": hw["igpus"],
         "total_hashrate_mh": round(total_mh, 2),
+        "miner_algo": algo,
         "overclocks": get_overclocks_formatted(),
         # csrf_token only makes sense inside a request context (worker threads have none)
         "csrf_token": session.get('csrf_token', '') if has_request_context() else ''
@@ -619,6 +680,8 @@ def run_sync_cycle(triggered_by="auto"):
                 state["rigs"], state["removed"] = merge_rig_lists(
                     state["rigs"], data["rigs"],
                     base_removed=state.get("removed"), incoming_removed=data.get("removed"))
+                state["jump_hosts"] = merge_jump_hosts(
+                    state.get("jump_hosts", []), data.get("jump_hosts"))
                 if data.get("cluster_name") and not state.get("cluster_name"):
                     state["cluster_name"] = data["cluster_name"]
                 entry["online"] = True
@@ -632,6 +695,7 @@ def run_sync_cycle(triggered_by="auto"):
                 rig, "POST", "api/cluster/sync",
                 body={"cluster_name": state.get("cluster_name", ""),
                       "rigs": state["rigs"], "removed": state.get("removed", []),
+                      "jump_hosts": state.get("jump_hosts", []),
                       "from_id": state["self_id"]},
                 timeout=45)
             if not push_ok and not entry.get("online"):
@@ -718,7 +782,7 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 
 RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at"]
 ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
-                       "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
+                       "jump_id", "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
 
 # Helper carrying self id for entry cleaning (avoids passing it through call stacks)
 _CURRENT_SELF_ID = {"value": ""}
@@ -1233,10 +1297,10 @@ def get_gpu_stats():
     return {"gpus": gpus, "igpus": igpus}
 
 # ---- Miner hashrate resolution (fills GPU cards + Total Speed) ----
-_HASHRATE_UNITS = {"KH": 1e-3, "MH": 1.0, "GH": 1e3}
+_HASHRATE_UNITS = {"H": 1e-6, "KH": 1e-3, "MH": 1.0, "GH": 1e3, "TH": 1e6, "PH": 1e9}
 
 def _parse_hashrate_str(text):
-    match = re.search(r'([0-9.]+)\s*(KH|MH|GH)', str(text))
+    match = re.search(r'([0-9.]+)\s*(PH|TH|GH|MH|KH|H)/s', str(text))
     if match:
         return float(match.group(1)) * _HASHRATE_UNITS[match.group(2)]
     return 0.0
@@ -1252,23 +1316,52 @@ def _to_mh(value):
     return v
 
 def _extract_api_hashrate(data):
-    """Supports rigel / t-rex / gminer local JSON stats formats."""
+    """Supports srbminer / rigel / t-rex / gminer local JSON stats formats.
+
+    Returns (total_mh, per_gpu dict, algo_name)."""
     total = 0.0
     per_gpu = {}
+    algo = ""
     if not isinstance(data, dict):
-        return total, per_gpu
+        return total, per_gpu, algo
+
+    # SRBMiner-Multi: {"algorithms":[{"name":"pearlhash","hashrate":{"1min":H/s,
+    #   "gpu":{"gpu0":H/s,...,"total":H/s}}}], "gpu_devices":[{"id":0,...}]}
+    algorithms = data.get("algorithms")
+    if isinstance(algorithms, list) and algorithms:
+        totals, gpu_sums = [], {}
+        for a in algorithms:
+            if not isinstance(a, dict):
+                continue
+            hr = a.get("hashrate")
+            if not isinstance(hr, dict):
+                continue
+            gpu_block = hr.get("gpu") if isinstance(hr.get("gpu"), dict) else {}
+            algo_total = _to_mh(gpu_block.get("total")) or _to_mh(hr.get("1min"))
+            totals.append(algo_total)
+            if not algo:
+                algo = str(a.get("name") or "")
+            for key, val in gpu_block.items():
+                m = re.match(r'gpu(\d+)$', str(key))
+                if m:
+                    idx = int(m.group(1))
+                    gpu_sums[idx] = gpu_sums.get(idx, 0.0) + _to_mh(val)
+        total = sum(totals)
+        per_gpu = gpu_sums
+        return total, per_gpu, algo
 
     # rigel: {"name":"Rigel","hashrate":{"algo":H/s},"devices":[{"id":0,"hashrate":{"algo":H/s}}]}
     devices = data.get("devices")
     if isinstance(devices, list) and devices and isinstance(data.get("hashrate"), dict):
         total = max((_to_mh(v) for v in data["hashrate"].values()), default=0.0)
+        algo = next(iter(data["hashrate"]), "")
         for g in devices:
             if isinstance(g, dict):
                 idx = safe_int(g.get("id", -1), -1)
                 hr = g.get("hashrate")
                 if idx >= 0 and isinstance(hr, dict) and hr:
                     per_gpu[idx] = max((_to_mh(v) for v in hr.values()), default=0.0)
-        return total, per_gpu
+        return total, per_gpu, algo
 
     # rigel (older): {"miners":[{"hashrate": H/s, "gpus":[{"id":0,"hashrate":H/s}]}]}
     miners = data.get("miners")
@@ -1280,7 +1373,7 @@ def _extract_api_hashrate(data):
                 idx = safe_int(g.get("id", g.get("gpu_id", -1)), -1)
                 if idx >= 0:
                     per_gpu[idx] = _to_mh(g.get("hashrate"))
-        return total, per_gpu
+        return total, per_gpu, algo
 
     # t-rex: {"hashrate": H/s, "gpus":[{"gpu_id":0,"hashrate":H/s}]}
     if "hashrate" in data and "gpus" in data:
@@ -1290,7 +1383,7 @@ def _extract_api_hashrate(data):
                 idx = safe_int(g.get("gpu_id", g.get("id", -1)), -1)
                 if idx >= 0:
                     per_gpu[idx] = _to_mh(g.get("hashrate"))
-        return total, per_gpu
+        return total, per_gpu, algo
 
     # gminer: {"miner":{"total_speed":["44.5 MH"]},"per_device":["11.1 MH",...]}
     miner_block = data.get("miner")
@@ -1300,7 +1393,7 @@ def _extract_api_hashrate(data):
             total = _parse_hashrate_str(ts[0])
         for idx, val in enumerate(data.get("per_device") or []):
             per_gpu[idx] = _parse_hashrate_str(val)
-    return total, per_gpu
+    return total, per_gpu, algo
 
 def is_miner_screen_running():
     """True when a HiveOS miner screen session (N.miner) is alive."""
@@ -1308,26 +1401,28 @@ def is_miner_screen_running():
     return code == 0
 
 def get_miner_hashrate():
-    """Returns (total_mh, per_gpu dict) from local miner stats API, log fallback."""
+    """Returns (total_mh, per_gpu dict, algo) from local miner stats API, log fallback."""
     total_mh = 0.0
     per_gpu = {}
+    algo = ""
 
-    # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068, lolminer 4028)
-    for port in (5000, 4067, 4068, 4028):
+    # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068,
+    #    lolminer 4028, srbminer 21373/21473)
+    for port in (5000, 4067, 4068, 4028, 21373, 21473):
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 data = json.loads(resp.read().decode(errors="ignore"))
-            total_mh, per_gpu = _extract_api_hashrate(data)
+            total_mh, per_gpu, algo = _extract_api_hashrate(data)
             if total_mh > 0 or per_gpu:
-                return total_mh, per_gpu
+                return total_mh, per_gpu, algo
         except Exception:
             continue
 
     # 2. Fallback: parse rigel-style miner log. Only valid while the miner screen is alive,
     #    otherwise stale log entries keep reporting hashrate after the miner stops.
     if not is_miner_screen_running():
-        return 0.0, {}
+        return 0.0, {}, algo
 
     miner_name = parse_shell_config(RIG_CONF_PATH).get("MINER", "").strip().lower()
     if miner_name and miner_name != "none":
@@ -1340,18 +1435,22 @@ def get_miner_hashrate():
                 with open(path, 'r', errors='ignore') as f:
                     tail = f.readlines()[-60:]
                 for line in reversed(tail):
+                    if not algo:
+                        a = re.search(r'\[([a-z0-9_\-]+)\]', line)
+                        if a:
+                            algo = a.group(1)
                     # rigel: "|  Total: 245.8 MH/s|..." or legacy "Total speed: 245.8 MH/s"
-                    m = re.search(r'Total(?: speed)?:\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    m = re.search(r'Total(?: speed)?:\s*([0-9.]+)\s*(PH|TH|GH|MH|KH|H)/s', line)
                     if m and total_mh <= 0:
                         total_mh = float(m.group(1)) * _HASHRATE_UNITS[m.group(2)]
                     # rigel table row: "|6|RTX 3070 Laptop GPU|30.43 MH/s|22.50 MH/s|..."
-                    g = re.search(r'\|\s*(\d+)\s*\|[^|]*\|\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    g = re.search(r'\|\s*(\d+)\s*\|[^|]*\|\s*([0-9.]+)\s*(PH|TH|GH|MH|KH|H)/s', line)
                     if g:
                         idx = int(g.group(1))
                         if idx not in per_gpu:
                             per_gpu[idx] = float(g.group(2)) * _HASHRATE_UNITS[g.group(3)]
                     # legacy plain: "GPU0: 55.00 MH/s"
-                    g2 = re.search(r'GPU(\d+):\s*([0-9.]+)\s*(KH|MH|GH)/s', line)
+                    g2 = re.search(r'GPU(\d+):\s*([0-9.]+)\s*(PH|TH|GH|MH|KH|H)/s', line)
                     if g2:
                         idx = int(g2.group(1))
                         if idx not in per_gpu:
@@ -1361,7 +1460,7 @@ def get_miner_hashrate():
             except Exception:
                 continue
 
-    return total_mh, per_gpu
+    return total_mh, per_gpu, algo
 
 # Read configs formatted
 def get_overclocks_formatted():
@@ -2023,6 +2122,211 @@ def get_diagnostics():
         "gpu_logs": gpu_logs
     })
 
+def _apply_flight_sheet(coin, wallet, pool, miner):
+    """Write COIN/WAL/POOL_URL into wallet.conf and MINER into rig.conf, restart miner."""
+    coin = str(coin or "").strip()
+    wallet = str(wallet or "").strip()
+    pool = str(pool or "").strip()
+    miner = str(miner or "none").strip().lower()
+
+    if not re.match(r'^[A-Za-z0-9_\-\s]+$', coin):
+        return False, "Invalid Coin parameter. Use alphanumeric characters only."
+    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@]+$', wallet):
+        return False, "Invalid Wallet format."
+    if not re.match(r'^[a-zA-Z0-9\.\-\:\/]+$', pool):
+        return False, "Invalid Pool URL format."
+
+    whitelisted_miners = [
+        "lolminer", "xmrig", "gminer", "rigel", "bzminer",
+        "teamredminer", "hiveon", "srbminer", "wildrig-multi",
+        "bminer", "ccminer", "t-rex", "none"
+    ]
+    if miner not in whitelisted_miners:
+        return False, "Unsupported miner program choice."
+
+    # Backup files first
+    try:
+        if os.path.exists(WALLET_CONF_PATH):
+            shutil.copy2(WALLET_CONF_PATH, WALLET_CONF_PATH + ".bak")
+        if os.path.exists(RIG_CONF_PATH):
+            shutil.copy2(RIG_CONF_PATH, RIG_CONF_PATH + ".bak")
+    except Exception as e:
+        logging.error(f"Backup configurations failed: {e}")
+
+    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+    wallet_conf["COIN"] = coin
+    wallet_conf["WAL"] = wallet
+    wallet_conf["POOL_URL"] = pool
+    if not write_shell_config(WALLET_CONF_PATH, wallet_conf):
+        return False, "Failed to write wallet.conf"
+
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    rig_conf["MINER"] = miner
+    if not write_shell_config(RIG_CONF_PATH, rig_conf):
+        return False, "Failed to write rig.conf"
+
+    logging.info(f"Flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
+    run_command(MINER_RESTART_CMD)
+    return True, "Flight sheet applied successfully! Miner daemon restarting..."
+
+def _load_json_store(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict)]
+    except Exception as e:
+        logging.error(f"Failed to read {path}: {e}")
+    return list(default)
+
+def _save_json_store(path, data):
+    try:
+        with config_lock:
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.chmod(path, 0o600)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to write {path}: {e}")
+        return False
+
+WALLETS_PATH = os.path.join(HIVE_CONFIG_DIR, "wallets.json")
+FSHEETS_PATH = os.path.join(HIVE_CONFIG_DIR, "flightsheets.json")
+
+def _validate_wallet_entry(entry):
+    name = str(entry.get("name", "")).strip()
+    address = str(entry.get("address", "")).strip()
+    if not name or len(name) > 60:
+        return None, "Wallet name must be 1-60 characters."
+    if not address or len(address) > 200:
+        return None, "Wallet address must be 1-200 characters."
+    if not re.match(r'^[A-Za-z0-9_\-\.\:\@\/]+$', address):
+        return None, "Invalid wallet address format."
+    clean = {
+        "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "name": name, "address": address,
+    }
+    return clean, ""
+
+def _validate_fsheet_entry(entry):
+    name = str(entry.get("name", "")).strip()
+    if not name or len(name) > 60:
+        return None, "Flight sheet name must be 1-60 characters."
+    coin = str(entry.get("coin", "")).strip()
+    wallet = str(entry.get("wallet", "")).strip()
+    pool = str(entry.get("pool", "")).strip()
+    miner = str(entry.get("miner", "none")).strip().lower()
+    if not re.match(r'^[A-Za-z0-9_\-\s]*$', coin):
+        return None, "Invalid coin symbol."
+    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@]*$', wallet):
+        return None, "Invalid wallet address."
+    if not re.match(r'^[a-zA-Z0-9\.\-\:\/]*$', pool):
+        return None, "Invalid pool URL format."
+    clean = {
+        "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "name": name, "coin": coin, "wallet": wallet, "pool": pool, "miner": miner,
+    }
+    return clean, ""
+
+@app.route('/api/wallets', methods=['GET'])
+def list_wallets():
+    return jsonify({"success": True, "wallets": _load_json_store(WALLETS_PATH, [])})
+
+@app.route('/api/wallets/save', methods=['POST'])
+def save_wallet():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    clean, err = _validate_wallet_entry(data.get("wallet") or {})
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+    wallets = _load_json_store(WALLETS_PATH, [])
+    wallets = [w for w in wallets if w.get("id") != clean["id"]]
+    wallets.append(clean)
+    if _save_json_store(WALLETS_PATH, wallets):
+        return jsonify({"success": True, "message": "Wallet saved."})
+    return jsonify({"success": False, "message": "Failed to save wallet."}), 500
+
+@app.route('/api/wallets/delete', methods=['POST'])
+def delete_wallet():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    wid = str(data.get("id", "")).strip()
+    wallets = _load_json_store(WALLETS_PATH, [])
+    before = len(wallets)
+    wallets = [w for w in wallets if w.get("id") != wid]
+    if len(wallets) == before:
+        return jsonify({"success": False, "message": "Wallet not found."}), 404
+    if _save_json_store(WALLETS_PATH, wallets):
+        return jsonify({"success": True, "message": "Wallet removed."})
+    return jsonify({"success": False, "message": "Failed to remove wallet."}), 500
+
+@app.route('/api/fsheets', methods=['GET'])
+def list_fsheets():
+    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    return jsonify({
+        "success": True,
+        "fsheets": _load_json_store(FSHEETS_PATH, []),
+        "wallets": _load_json_store(WALLETS_PATH, []),
+        "active": {
+            "coin": wallet_conf.get("COIN", ""),
+            "wallet": wallet_conf.get("WAL", ""),
+            "pool": wallet_conf.get("POOL_URL", ""),
+            "miner": rig_conf.get("MINER", "none")
+        }
+    })
+
+@app.route('/api/fsheets/save', methods=['POST'])
+def save_fsheet():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    clean, err = _validate_fsheet_entry(data.get("fsheet") or {})
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+    fsheets = _load_json_store(FSHEETS_PATH, [])
+    fsheets = [f for f in fsheets if f.get("id") != clean["id"]]
+    fsheets.append(clean)
+    if _save_json_store(FSHEETS_PATH, fsheets):
+        return jsonify({"success": True, "message": "Flight sheet saved."})
+    return jsonify({"success": False, "message": "Failed to save flight sheet."}), 500
+
+@app.route('/api/fsheets/delete', methods=['POST'])
+def delete_fsheet():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    fid = str(data.get("id", "")).strip()
+    fsheets = _load_json_store(FSHEETS_PATH, [])
+    before = len(fsheets)
+    fsheets = [f for f in fsheets if f.get("id") != fid]
+    if len(fsheets) == before:
+        return jsonify({"success": False, "message": "Flight sheet not found."}), 404
+    if _save_json_store(FSHEETS_PATH, fsheets):
+        return jsonify({"success": True, "message": "Flight sheet removed."})
+    return jsonify({"success": False, "message": "Failed to remove flight sheet."}), 500
+
+@app.route('/api/fsheets/apply', methods=['POST'])
+def apply_fsheet():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    fid = str(data.get("id", "")).strip()
+    fsheet = next((f for f in _load_json_store(FSHEETS_PATH, []) if f.get("id") == fid), None)
+    if fsheet is None:
+        return jsonify({"success": False, "message": "Flight sheet not found."}), 404
+    # Resolve wallet reference (either stored address or wallet library id)
+    wallet = str(fsheet.get("wallet", "")).strip()
+    wallets = _load_json_store(WALLETS_PATH, [])
+    w = next((x for x in wallets if x.get("id") == wallet), None)
+    if w:
+        wallet = w.get("address", "")
+    ok, msg = _apply_flight_sheet(fsheet.get("coin"), wallet, fsheet.get("pool"), fsheet.get("miner"))
+    return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
+
 @app.route('/api/flightsheet', methods=['GET', 'POST'])
 def handle_flightsheet():
     if request.method == 'GET':
@@ -2040,56 +2344,10 @@ def handle_flightsheet():
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "Invalid JSON payload"}), 400
-        
-    coin = str(data.get("coin", "")).strip()
-    wallet = str(data.get("wallet", "")).strip()
-    pool = str(data.get("pool", "")).strip()
-    miner = str(data.get("miner", "none")).strip().lower()
-    
-    # Parameter inputs validation
-    if not re.match(r'^[A-Za-z0-9_\-\s]+$', coin):
-        return jsonify({"success": False, "message": "Invalid Coin parameter. Use alphanumeric characters only."}), 400
-    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@]+$', wallet):
-        return jsonify({"success": False, "message": "Invalid Wallet format."}), 400
-    if not re.match(r'^[a-zA-Z0-9\.\-\:\/]+$', pool):
-        return jsonify({"success": False, "message": "Invalid Pool URL format."}), 400
-        
-    whitelisted_miners = [
-        "lolminer", "xmrig", "gminer", "rigel", "bzminer", 
-        "teamredminer", "hiveon", "srbminer", "wildrig-multi",
-        "bminer", "ccminer", "t-rex", "none"
-    ]
-    if miner not in whitelisted_miners:
-        return jsonify({"success": False, "message": "Unsupported miner program choice."}), 400
 
-    # Backup files first
-    try:
-        if os.path.exists(WALLET_CONF_PATH):
-            shutil.copy2(WALLET_CONF_PATH, WALLET_CONF_PATH + ".bak")
-        if os.path.exists(RIG_CONF_PATH):
-            shutil.copy2(RIG_CONF_PATH, RIG_CONF_PATH + ".bak")
-    except Exception as e:
-        logging.error(f"Backup configurations failed: {e}")
-        
-    # Update configurations
-    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
-    wallet_conf["COIN"] = coin
-    wallet_conf["WAL"] = wallet
-    wallet_conf["POOL_URL"] = pool
-    # Write back
-    if not write_shell_config(WALLET_CONF_PATH, wallet_conf):
-        return jsonify({"success": False, "message": "Failed to write wallet.conf"}), 500
-        
-    rig_conf = parse_shell_config(RIG_CONF_PATH)
-    rig_conf["MINER"] = miner
-    if not write_shell_config(RIG_CONF_PATH, rig_conf):
-        return jsonify({"success": False, "message": "Failed to write rig.conf"}), 500
-        
-    logging.info(f"Emergency Local Flight Sheet updated by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
-    
-    # Restart miner to apply settings on the fly
-    run_command(MINER_RESTART_CMD)
-    return jsonify({"success": True, "message": "Flight sheet saved successfully! Miner daemon restarting..."})
+    ok, msg = _apply_flight_sheet(data.get("coin"), data.get("wallet"),
+                                  data.get("pool"), data.get("miner"))
+    return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/overclock/reset', methods=['POST'])
 def reset_overclock():
@@ -2169,6 +2427,84 @@ def service_control():
     else:
         logging.error(f"Service control execution failed on {service}: {stderr}")
         return jsonify({"success": False, "message": "Service command execution failed. Check system logs."}), 500
+
+# ---------------- Extra (non-GPU) fan control via hwmon sysfs ----------------
+
+def _iter_hwmon_pwm():
+    """Yield (hwmon_dir, name, pwm_index) for every controllable PWM output."""
+    for hw in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            chip = open(os.path.join(hw, "name"), 'r').read().strip()
+        except Exception:
+            continue
+        for p in sorted(glob.glob(os.path.join(hw, "pwm[0-9]"))):
+            idx = p[-1]
+            yield hw, chip, idx
+
+def _read_fan_entry(hw, chip, idx):
+    base = os.path.join(hw, "")
+    def _rd(fname, default=None):
+        try:
+            with open(base + fname, 'r') as f:
+                return f.read().strip()
+        except Exception:
+            return default
+    try:
+        duty = int(_rd("pwm" + idx, "0"))
+    except (TypeError, ValueError):
+        duty = 0
+    rpm = _rd("fan" + idx + "_input")
+    enable = _rd("pwm" + idx + "_enable")
+    label = _rd("pwm" + idx + "_label") or _rd("fan" + idx + "_label") or ("fan" + idx)
+    return {
+        "hwmon": os.path.basename(hw), "chip": chip, "pwm": idx,
+        "label": label,
+        "duty": round(duty * 100 / 255.0),
+        "rpm": int(rpm) if rpm and rpm.isdigit() else None,
+        "mode": ("auto" if enable == "2" else ("full" if enable == "0" else "manual")),
+        "writable": os.access(base + "pwm" + idx, os.W_OK) and os.access(base + "pwm" + idx + "_enable", os.W_OK),
+    }
+
+@app.route('/api/fans', methods=['GET'])
+def list_fans():
+    fans = [_read_fan_entry(hw, chip, idx) for hw, chip, idx in _iter_hwmon_pwm()]
+    return jsonify({"success": True, "fans": fans})
+
+@app.route('/api/fans', methods=['POST'])
+def set_fan():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    hwmon = str(data.get("hwmon", "")).strip()
+    idx = str(data.get("pwm", "")).strip()
+    mode = str(data.get("mode", "")).strip()
+    if not re.match(r'^hwmon[0-9]+$', hwmon) or not re.match(r'^[0-9]$', idx):
+        return jsonify({"success": False, "message": "Invalid fan identifier."}), 400
+    if mode not in ("manual", "auto"):
+        return jsonify({"success": False, "message": "Fan mode must be 'manual' or 'auto'."}), 400
+    base = os.path.join("/sys/class/hwmon", hwmon, "")
+    pwm_path, enable_path = base + "pwm" + idx, base + "pwm" + idx + "_enable"
+    if not os.path.exists(pwm_path):
+        return jsonify({"success": False, "message": "Fan not found."}), 404
+    try:
+        if mode == "auto":
+            with open(enable_path, 'w') as f:
+                f.write("2")
+        else:
+            duty = int(data.get("duty", 0))
+            if not (0 <= duty <= 100):
+                return jsonify({"success": False, "message": "Duty cycle must be 0-100%."}), 400
+            with open(enable_path, 'w') as f:
+                f.write("1")
+            with open(pwm_path, 'w') as f:
+                f.write(str(round(duty * 255 / 100.0)))
+        logging.info(f"Fan {hwmon}/pwm{idx} set to {mode}" +
+                     (f" at {duty}%" if mode == "manual" else "") +
+                     f" by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Fan updated."})
+    except Exception as e:
+        logging.error(f"Fan control failed on {hwmon}/pwm{idx}: {e}")
+        return jsonify({"success": False, "message": "Failed to write fan control (root perms required)."}), 500
 
 @app.route('/api/update/check', methods=['GET'])
 def check_update():
@@ -2285,6 +2621,12 @@ def api_cluster_rigs():
         else:
             entry = cache.get("rigs", {}).get(r["id"], {})
         rigs.append(_rig_view(r, state, {"rigs": {r["id"]: entry}}))
+    masked_jumps = []
+    for j in state.get("jump_hosts", []):
+        m = dict(j)
+        if "password" in m:
+            m["password"] = "********" if m["password"] else ""
+        masked_jumps.append(m)
     return jsonify({
         "success": True,
         "cluster_name": state.get("cluster_name", ""),
@@ -2294,7 +2636,8 @@ def api_cluster_rigs():
         "last_sync_ok": _cluster_last_sync["ok"],
         "last_sync_message": _cluster_last_sync["message"],
         "sshpass_available": bool(shutil.which("sshpass")),
-        "rigs": rigs
+        "rigs": rigs,
+        "jump_hosts": masked_jumps
     })
 
 @app.route('/api/cluster/settings', methods=['POST'])
@@ -2467,6 +2810,84 @@ def api_cluster_access_delete():
         return jsonify({"success": True, "message": "SSH access removed."})
     return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
 
+@app.route('/api/cluster/jump', methods=['POST'])
+def api_cluster_jump_save():
+    """Save (add or update) a jump server in the shared library."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    incoming = dict(data.get("jump") or {})
+    for secret_field in ("password",):
+        if incoming.get(secret_field) == "********":
+            existing = next((j for j in state.get("jump_hosts", [])
+                             if j.get("id") == str(incoming.get("id", "")).strip()), None)
+            if existing and existing.get(secret_field):
+                incoming[secret_field] = existing.get(secret_field)
+            else:
+                incoming.pop(secret_field, None)
+
+    name = str(incoming.get("name", "")).strip()
+    host = str(incoming.get("host", "")).strip()
+    user = str(incoming.get("user", "")).strip()
+    if not name or len(name) > 60:
+        return jsonify({"success": False, "message": "Jump server name must be 1-60 characters."}), 400
+    if not VALID_HOST_RE.match(host):
+        return jsonify({"success": False, "message": "Invalid jump server host."}), 400
+    if not VALID_USER_RE.match(user):
+        return jsonify({"success": False, "message": "Invalid jump server SSH user name."}), 400
+    try:
+        port = int(incoming.get("port", 22))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Jump server SSH port must be an integer."}), 400
+    if not (1 <= port <= 65535):
+        return jsonify({"success": False, "message": "Jump server SSH port must be between 1 and 65535."}), 400
+    auth = str(incoming.get("auth", "password")).strip().lower()
+    if auth not in ("password", "key"):
+        return jsonify({"success": False, "message": "Jump server auth must be 'password' or 'key'."}), 400
+
+    clean = {
+        "id": str(incoming.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "name": name, "host": host, "port": port, "user": user, "auth": auth,
+        "updated_at": int(time.time()),
+    }
+    if auth == "password":
+        password = str(incoming.get("password", ""))
+        if len(password) > 128:
+            return jsonify({"success": False, "message": "Jump server password is too long."}), 400
+        clean["password"] = password
+    else:
+        key_path = str(incoming.get("key_path", "")).strip()
+        if key_path:
+            if not VALID_KEYPATH_RE.match(key_path):
+                return jsonify({"success": False, "message": "Invalid jump server SSH key path."}), 400
+            clean["key_path"] = key_path
+
+    state["jump_hosts"] = [j for j in state.get("jump_hosts", []) if j.get("id") != clean["id"]]
+    state["jump_hosts"].append(clean)
+    if save_cluster_state(state):
+        logging.info(f"Jump server '{name}' saved by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Jump server saved.", "jump_id": clean["id"]})
+    return jsonify({"success": False, "message": "Failed to save jump server."}), 500
+
+@app.route('/api/cluster/jump/delete', methods=['POST'])
+def api_cluster_jump_delete():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    jump_id = str(data.get("jump_id", "")).strip()
+    before = len(state.get("jump_hosts", []))
+    state["jump_hosts"] = [j for j in state.get("jump_hosts", []) if j.get("id") != jump_id]
+    if len(state.get("jump_hosts", [])) == before:
+        return jsonify({"success": False, "message": "Jump server not found."}), 404
+    if save_cluster_state(state):
+        logging.info(f"Jump server {jump_id} deleted by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Jump server removed."})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
 @app.route('/api/cluster/access/test', methods=['POST'])
 def api_cluster_access_test():
     """Test an SSH access (unsaved payload allowed) by running hostname over SSH."""
@@ -2486,6 +2907,17 @@ def api_cluster_access_test():
             for secret_field in ("password", "jump_password"):
                 if incoming.get(secret_field) in ("********", None, ""):
                     incoming[secret_field] = saved.get(secret_field, "")
+    # Resolve a jump_id reference against the shared jump server library
+    jid = str(incoming.get("jump_id") or "").strip()
+    if jid:
+        j = next((x for x in state.get("jump_hosts", []) if x.get("id") == jid), None)
+        if j:
+            incoming.setdefault("jump_host", j.get("host"))
+            incoming.setdefault("jump_port", j.get("port", 22))
+            incoming.setdefault("jump_user", j.get("user"))
+            incoming.setdefault("jump_auth", j.get("auth", "password"))
+            if incoming.get("jump_password") in ("********", None, ""):
+                incoming["jump_password"] = j.get("password", "")
     clean, err = validate_access_payload(incoming)
     if err:
         return jsonify({"success": False, "message": err}), 400
@@ -2549,7 +2981,8 @@ def api_cluster_state():
         "self_id": state["self_id"],
         "sync_interval": state.get("sync_interval", DEFAULT_SYNC_INTERVAL),
         "rigs": state["rigs"],
-        "removed": state.get("removed", [])
+        "removed": state.get("removed", []),
+        "jump_hosts": state.get("jump_hosts", [])
     })
 
 @app.route('/api/cluster/sync', methods=['POST'])
@@ -2563,6 +2996,7 @@ def api_cluster_sync_push():
         state["rigs"], data["rigs"],
         base_removed=state.get("removed"),
         incoming_removed=data.get("removed"))
+    state["jump_hosts"] = merge_jump_hosts(state.get("jump_hosts", []), data.get("jump_hosts"))
     if data.get("cluster_name") and not state.get("cluster_name"):
         state["cluster_name"] = str(data["cluster_name"])
     saved = save_cluster_state(state)
@@ -2570,14 +3004,46 @@ def api_cluster_sync_push():
 
 # ---------------- Remote rig proxy (full dashboard over SSH) ----------------
 
+def _serve_local_api(subpath, method, body):
+    """Dispatch an API call to the local Flask routes (used when proxying self)."""
+    from werkzeug.test import EnvironBuilder
+    headers = {}
+    cookie = request.headers.get("Cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    csrf = request.headers.get("X-CSRF-Token")
+    if csrf:
+        headers["X-CSRF-Token"] = csrf
+    if request.headers.get("Authorization"):
+        headers["Authorization"] = request.headers.get("Authorization")
+    ctype = request.headers.get("Content-Type")
+    if ctype:
+        headers["Content-Type"] = ctype
+    builder = EnvironBuilder(path="/" + subpath, method=method, headers=headers,
+                             data=body if body is not None else b"")
+    env = builder.get_environ()
+    with app.request_context(env):
+        app.preprocess_request()
+        rv = app.dispatch_request()
+        if not isinstance(rv, Response):
+            rv = app.make_response(rv)
+    return rv
+
 @app.route('/api/remote/<rig_id>/<path:subpath>', methods=['GET', 'POST'])
 def api_remote_proxy(rig_id, subpath):
     if not subpath.startswith("api/"):
         return jsonify({"success": False, "message": "Invalid remote path."}), 404
     state = load_cluster_state()
     _CURRENT_SELF_ID["value"] = state["self_id"]
-    rig = next((r for r in state["rigs"]
-                if r.get("id") == rig_id and r["id"] != state["self_id"]), None)
+    if rig_id == state["self_id"]:
+        # Managing the local rig - serve the request directly instead of going through SSH
+        try:
+            body = request.get_data(cache=True) if request.method == "POST" else None
+            return _serve_local_api(subpath, request.method, body)
+        except Exception as e:
+            logging.error(f"Local dispatch of proxied API '{subpath}' failed: {e}")
+            return jsonify({"success": False, "message": "Failed to serve local API call."}), 500
+    rig = next((r for r in state["rigs"] if r.get("id") == rig_id), None)
     if rig is None:
         return jsonify({"success": False, "message": "Rig not found in cluster."}), 404
 

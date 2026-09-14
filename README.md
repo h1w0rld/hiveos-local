@@ -131,8 +131,10 @@ The dashboard offers advanced local command options inside the dashboard:
 
 Since v1.2.0 every rig ships with a built-in cluster, no extra Docker container needed:
 
-- **Cluster page**: lists all rigs of the farm with live/cached stats (hashrate, temps, power, miner, coin). One rig is enough to see the whole farm.
-- **SSH Accesses page**: configure any number of SSH routes per rig — direct connection (e.g. over NetBird/WireGuard) or via a jump server (ProxyCommand). Supports password auth (`sshpass`, installed automatically) and SSH keys.
+- **Cluster page**: lists all rigs of the farm with live/cached stats (hashrate with per-algorithm breakdown, temps, power, miner, coin). Offline rigs are dimmed and excluded from farm totals.
+- **SSH Accesses page**: any number of SSH routes per rig — direct connection or through a jump server. Jump servers live in a shared library: define one once, reuse it for any rig. Supports password auth (`sshpass`, installed automatically) and SSH keys.
+- **Flight sheets**: build a local wallet library, save named flight sheets (coin/wallet/pool/miner), apply them with one click, edit or import/export via JSON (file or clipboard).
+- **Extra fans**: control motherboard fan headers (hwmon PWM) where available — manual duty or automatic mode.
 - **Full remote management**: open any rig from the cluster page and get the exact same dashboard UI, proxied over SSH. Overclocking, miner control, flight sheets, presets, diagnostics and logs all work on the remote rig.
 - **Automatic sync**: rig list, SSH accesses and passwords replicate between all rigs (config stored in `/hive-config/cluster.json`, default sync interval 60 s — configurable in the UI).
 

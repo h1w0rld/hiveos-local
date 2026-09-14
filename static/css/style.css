@@ -329,3 +329,56 @@ body {
     --bs-btn-padding-x: 0.45rem;
     --bs-btn-font-size: 0.75rem;
 }
+
+/* ---- v1.3.0 compactness & cluster states ---- */
+
+.logo-container-sm {
+    width: 42px;
+    height: 42px;
+}
+
+/* Offline rig cards: dimmed, clearly not live data */
+.rig-offline .card {
+    opacity: 0.55;
+    filter: grayscale(0.6);
+    transition: opacity 0.3s ease;
+}
+
+.rig-offline .card:hover {
+    opacity: 0.8;
+}
+
+/* Access routes grouped by rig */
+.access-group-start td {
+    border-top: 1px solid var(--border-color);
+}
+
+.access-group-start:first-child td {
+    border-top: none;
+}
+
+.min-w-0 {
+    min-width: 0;
+}
+
+.fsheet-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+/* Fan slider rows */
+.fan-slider {
+    height: 1rem;
+}
+
+/* Tighter overall rhythm */
+.view-section section {
+    margin-bottom: 1rem !important;
+}
+
+.card .card-body {
+    padding: 1rem 1.1rem;
+}
+
+hr {
+    opacity: 0.15;
+}
