@@ -57,12 +57,6 @@
                     </button>
                     <ul class="dropdown-menu dropdown-menu-end shadow" id="rigScopeMenu"></ul>
                 </div>
-                <button id="revertSettingsBtn" class="btn btn-sm btn-outline-danger d-flex align-items-center gap-1 py-2 px-3 border border-danger-subtle d-none">
-                    <i class="bi bi-arrow-counterclockwise"></i> Revert
-                </button>
-                <button id="emergencyResetClocksBtn" class="btn btn-sm btn-danger d-flex align-items-center gap-1 py-2 px-3 d-none">
-                    <i class="bi bi-exclamation-octagon-fill"></i> Reset Clocks
-                </button>
                 <button id="changePasswordBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1 py-2 px-3" title="Change access password">
                     <i class="bi bi-key-fill"></i>
                 </button>
@@ -208,7 +202,6 @@
                             <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
                                 <h2 class="h6 fw-bold mb-0 d-flex align-items-center gap-2">
                                     <i class="bi bi-router-fill text-info"></i> Jump Servers
-                                    <span class="badge bg-secondary-subtle text-secondary-emphasis small">shared library</span>
                                 </h2>
                                 <div class="d-flex gap-2">
                                     <button id="jumpCheckAllBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Check connection to all jump servers" onclick="checkAllJumps(this)">
@@ -324,17 +317,22 @@
                             <span class="badge bg-accent-glow text-primary fw-semibold d-flex align-items-center gap-1" id="dashboardRigName" title="Currently managed rig">
                                 <i class="bi bi-hdd-rack"></i> <span id="dashboardRigNameText">Local rig</span>
                             </span>
-                            <span class="ms-auto d-flex flex-wrap gap-2">
-                                <button id="openDiagBtn" class="btn btn-sm btn-outline-info fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                    <i class="bi bi-activity"></i> Diagnostics
-                                </button>
-                                <button id="rigRebootBtn" class="btn btn-sm btn-outline-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                    <i class="bi bi-power"></i> Reboot
-                                </button>
-                                <button id="rigShutdownBtn" class="btn btn-sm btn-outline-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                    <i class="bi bi-slash-circle"></i> Shutdown
-                                </button>
-                            </span>
+                            <button id="openDiagBtn" class="btn btn-sm btn-outline-info fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-activity"></i> Diagnostics
+                            </button>
+                            <button id="rigRebootBtn" class="btn btn-sm btn-outline-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-power"></i> Reboot
+                            </button>
+                            <button id="rigShutdownBtn" class="btn btn-sm btn-outline-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-slash-circle"></i> Shutdown
+                            </button>
+                            <div class="vr bg-secondary opacity-25"></div>
+                            <button id="revertSettingsBtn" class="btn btn-sm btn-outline-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1" title="Restore GPU overclock settings from the last saved backup">
+                                <i class="bi bi-arrow-counterclockwise"></i> Revert
+                            </button>
+                            <button id="emergencyResetClocksBtn" class="btn btn-sm btn-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1" title="Reset all GPU clocks/voltages/fans to factory defaults">
+                                <i class="bi bi-exclamation-octagon-fill"></i> Reset Clocks
+                            </button>
                         </h2>
                         <div class="row g-3">
                             <div class="col-6 col-sm-4 col-md-2">
@@ -414,29 +412,21 @@
                             </div>
                         </div>
                         <hr class="my-3 border-secondary-subtle">
-                        <div class="row g-3 align-items-center">
-                            <div class="col-lg-3">
-                                <div class="d-flex align-items-center gap-2">
-                                    <span class="small fw-semibold text-muted text-uppercase letter-spacing-0.05em">Miner Operations:</span>
-                                </div>
-                            </div>
-                            <div class="col-lg-9 text-lg-end">
-                                <div class="d-flex flex-wrap gap-2 justify-content-lg-end">
-                                    <button id="minerStartBtn" class="btn btn-sm btn-success fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-play-fill"></i> Start Miner
-                                    </button>
-                                    <button id="minerStopBtn" class="btn btn-sm btn-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-stop-fill"></i> Stop Miner
-                                    </button>
-                                    <button id="minerRestartBtn" class="btn btn-sm btn-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-arrow-clockwise"></i> Restart Miner
-                                    </button>
-                                    <div class="vr bg-secondary opacity-25"></div>
-                                    <button id="viewMinerLogBtn" class="btn btn-sm btn-primary fw-semibold px-2 py-1 d-flex align-items-center gap-1">
-                                        <i class="bi bi-terminal-fill"></i> Log
-                                    </button>
-                                </div>
-                            </div>
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <span class="small fw-semibold text-muted text-uppercase letter-spacing-0.05em">Miner Operations:</span>
+                            <button id="minerStartBtn" class="btn btn-sm btn-success fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-play-fill"></i> Start Miner
+                            </button>
+                            <button id="minerStopBtn" class="btn btn-sm btn-danger fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-stop-fill"></i> Stop Miner
+                            </button>
+                            <button id="minerRestartBtn" class="btn btn-sm btn-warning fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-arrow-clockwise"></i> Restart Miner
+                            </button>
+                            <div class="vr bg-secondary opacity-25"></div>
+                            <button id="viewMinerLogBtn" class="btn btn-sm btn-primary fw-semibold px-2 py-1 d-flex align-items-center gap-1">
+                                <i class="bi bi-terminal-fill"></i> Miner log
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -798,12 +788,6 @@
             </div>
         </section>
         </div><!-- /view-dashboard -->
-
-        <!-- Footer -->
-        <footer class="text-center text-muted small py-4 mt-5 border-top border-secondary-subtle">
-            <p class="mb-1">HiveOS Local emergency interface dashboard running on port 1337.</p>
-            <p class="mb-0">Created to support GPU stability when central servers are offline. Use overclocks responsibly.</p>
-        </footer>
     </div>
 
     <!-- Miner Log Modal -->

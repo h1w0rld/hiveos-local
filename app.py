@@ -766,8 +766,8 @@ def run_sync_cycle(triggered_by="auto"):
                    if r.get("id") != state["self_id"]
                    and not cache["rigs"].get(r["id"], {}).get("online")]
         _cluster_last_sync["ok"] = not offline
-        _cluster_last_sync["message"] = ("All peers reachable" if not offline
-                                         else "Offline: " + ", ".join(str(x) for x in offline))
+        # Stay silent when everything is fine; surface only problems
+        _cluster_last_sync["message"] = ("Offline: " + ", ".join(str(x) for x in offline)) if offline else ""
         if triggered_by != "auto":
             logging.info(f"Cluster sync cycle completed (triggered by {triggered_by})")
         return True, "Sync cycle finished"
@@ -782,7 +782,7 @@ def _cluster_sync_worker():
         try:
             state = load_cluster_state()
             try:
-                interval = max(15, int(state.get("sync_interval", DEFAULT_SYNC_INTERVAL)))
+                interval = max(5, int(state.get("sync_interval", DEFAULT_SYNC_INTERVAL)))
             except (TypeError, ValueError):
                 interval = DEFAULT_SYNC_INTERVAL
             run_sync_cycle(triggered_by="auto")
@@ -2742,8 +2742,8 @@ def api_cluster_settings():
             interval = int(data.get("sync_interval"))
         except (TypeError, ValueError):
             return jsonify({"success": False, "message": "Sync interval must be an integer."}), 400
-        if not (15 <= interval <= 3600):
-            return jsonify({"success": False, "message": "Sync interval must be between 15 and 3600 seconds."}), 400
+        if not (5 <= interval <= 3600):
+            return jsonify({"success": False, "message": "Sync interval must be between 5 and 3600 seconds."}), 400
         state["sync_interval"] = interval
     if save_cluster_state(state):
         return jsonify({"success": True, "message": "Cluster settings saved."})

@@ -169,7 +169,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 csrfToken = data.csrf_token;
                 loginOverlay.classList.add('d-none');
                 loginError.classList.add('d-none');
-                revertBtn.classList.remove('d-none');
                 showToast("Authorized successfully!", true);
                 fetchStats();
                 loadClusterData();
@@ -430,15 +429,15 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 1000);
     });
 
-    // Reboot / Shutdown bindings
+    // Reboot / Shutdown bindings (act on the rig selected in the header dropdown)
     document.getElementById('rigRebootBtn').addEventListener('click', async () => {
-        if (confirm("Are you sure you want to REBOOT this rig? Mining operations will be suspended during reboot.")) {
+        if (confirm("Are you sure you want to REBOOT " + getRigName(currentRigId) + "? Mining operations will be suspended during reboot.")) {
             sendSystemPowerAction('/api/system/reboot', 'rigRebootBtn');
         }
     });
     
     document.getElementById('rigShutdownBtn').addEventListener('click', async () => {
-        if (confirm("Are you sure you want to SHUTDOWN this rig? Power will be cut from the hardware.")) {
+        if (confirm("Are you sure you want to SHUTDOWN " + getRigName(currentRigId) + "? Power will be cut from the hardware.")) {
             sendSystemPowerAction('/api/system/shutdown', 'rigShutdownBtn');
         }
     });
@@ -599,13 +598,14 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Sending...`;
         
         try {
-            const response = await fetch(endpoint, {
+            // apiFetch routes to the selected rig (local or via SSH proxy)
+            const response = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'X-CSRF-Token': csrfToken }
             });
             const data = await response.json();
             if (response.ok && data.success) {
-                showToast(data.message, true);
+                showToast(getRigName(currentRigId) + ': ' + data.message, true);
             } else {
                 showToast(data.message || "Power command failed.", false);
             }
@@ -828,7 +828,7 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('jumpServerKeyBlock').classList.toggle('d-none', this.value !== 'key');
     });
 
-    // 7. Auto-refresh interval dropdowns (Off/5s/10s/30s/1m/5m/10m/1h)
+    // 7. Auto-refresh interval dropdowns (Off/5s/10s/30s/1m)
 
     // Initial view from URL hash
     const initialView = (location.hash || '').replace('#', '');
@@ -837,8 +837,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ---------------- Auto-refresh manager ----------------
 
-const AUTO_REFRESH_ITEMS = [[0, 'Off'], [5, '5s'], [10, '10s'], [30, '30s'],
-    [60, '1m'], [300, '5m'], [600, '10m'], [3600, '1h']];
+const AUTO_REFRESH_ITEMS = [[0, 'Off'], [5, '5s'], [10, '10s'], [30, '30s'], [60, '1m']];
 const autoRefreshTimers = {};
 const AUTO_REFRESH_LOADERS = {
     stats: () => fetchStats(),
@@ -857,6 +856,15 @@ function getAutoRefreshInterval(target) {
     return (Number.isFinite(v) && AUTO_REFRESH_ITEMS.some(x => x[0] === v)) ? v : autoRefreshDefault(target);
 }
 
+// Keep the backend sync worker in step with the Sync dropdown interval
+function pushSyncInterval(seconds) {
+    fetch('/api/cluster/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ sync_interval: seconds })
+    }).catch(() => {});
+}
+
 function setAutoRefresh(target, seconds) {
     localStorage.setItem('autoRefresh_' + target, String(seconds));
     if (autoRefreshTimers[target]) {
@@ -866,6 +874,9 @@ function setAutoRefresh(target, seconds) {
     if (seconds > 0) {
         autoRefreshTimers[target] = setInterval(AUTO_REFRESH_LOADERS[target] || (() => {}), seconds * 1000);
     }
+    // The Sync dropdown also defines how often the rig actually syncs with peers
+    // (Off only disables UI polling; the background worker keeps its last interval)
+    if (target === 'cluster' && seconds >= 5) pushSyncInterval(seconds);
 }
 
 function setupAutoRefreshMenus() {
@@ -896,6 +907,21 @@ function paintAutoRefreshMenu(menu, target) {
     const label = (AUTO_REFRESH_ITEMS.find(x => x[0] === cur) || [0, 'Off'])[1];
     if (caret) caret.innerHTML = '<span class="ar-label">' + label + '</span><span class="visually-hidden">Auto-refresh interval</span>';
 }
+
+// Keep open dropdowns above neighboring glass cards (backdrop-filter creates
+// stacking contexts, so a menu would otherwise render under the next card)
+document.addEventListener('show.bs.dropdown', (e) => {
+    const group = e.target.closest('.btn-group');
+    if (group) group.classList.add('dd-open');
+    const card = e.target.closest('.glass-card');
+    if (card) card.classList.add('dd-open');
+});
+document.addEventListener('hidden.bs.dropdown', (e) => {
+    const group = e.target.closest('.btn-group');
+    if (group) group.classList.remove('dd-open');
+    const card = e.target.closest('.glass-card');
+    if (card) card.classList.remove('dd-open');
+});
 
 // ---------------- View routing ----------------
 
@@ -1047,8 +1073,6 @@ async function fetchStats() {
         // Handle 401 Unauthorized status
         if (response.status === 401) {
             document.getElementById('loginOverlay').classList.remove('d-none');
-            document.getElementById('revertSettingsBtn').classList.add('d-none');
-            document.getElementById('emergencyResetClocksBtn').classList.add('d-none');
             return;
         }
         
@@ -1059,11 +1083,9 @@ async function fetchStats() {
         
         const data = await response.json();
         
-        // Hide login if active
+        // Hide login if active (restored session on page reload)
         if (!document.getElementById('loginOverlay').classList.contains('d-none')) {
             document.getElementById('loginOverlay').classList.add('d-none');
-            document.getElementById('revertSettingsBtn').classList.remove('d-none');
-            document.getElementById('emergencyResetClocksBtn').classList.remove('d-none');
             loadTuningSettings();
             loadClusterData();
             loadAccessList();
@@ -1684,6 +1706,11 @@ async function loadClusterData(silent = false) {
         const data = await response.json();
         if (response.ok && data.success) {
             clusterData = data;
+            // Heal drift: make the backend sync worker honor the interval chosen in the Sync dropdown
+            const uiInterval = getAutoRefreshInterval('cluster');
+            if (data.sync_interval && uiInterval >= 5 && data.sync_interval !== uiInterval) {
+                pushSyncInterval(uiInterval);
+            }
             renderCluster();
             // Keep sshpass availability warning on the accesses page up to date
             document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);

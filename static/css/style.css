@@ -106,10 +106,10 @@ body {
 
 /* Interval label inside auto-refresh split carets */
 .dropdown-toggle-split .ar-label {
-    font-size: 0.7rem;
-    font-weight: 600;
-    margin-right: 0.2rem;
-    opacity: 0.85;
+    font-size: 1rem;
+    font-weight: 700;
+    margin-right: 0.25rem;
+    opacity: 1;
 }
 
 /* Glassmorphism Cards */
@@ -121,6 +121,17 @@ body {
     border-radius: 16px;
     box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.3);
     transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+    position: relative;
+}
+
+/* While a dropdown inside the card is open, lift the card above its siblings
+   (JS toggles .dd-open on show/hidden of any Bootstrap dropdown) */
+.glass-card.dd-open {
+    z-index: 1035;
+}
+
+.btn-group.dd-open {
+    z-index: 1035;
 }
 
 .glass-card:hover {
