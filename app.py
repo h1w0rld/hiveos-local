@@ -119,14 +119,15 @@ def load_cluster_state():
         "sync_interval": DEFAULT_SYNC_INTERVAL,
         "rigs": [],
         "removed": [],
-        "jump_hosts": []
+        "jump_hosts": [],
+        "clusters": []
     }
     try:
         if os.path.exists(CLUSTER_CONF):
             with open(CLUSTER_CONF, 'r') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts"):
+                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts", "clusters"):
                     if k in data:
                         state[k] = data[k]
     except Exception as e:
@@ -144,6 +145,9 @@ def load_cluster_state():
     # Shared jump server library (referenced by SSH accesses via jump_id)
     state["jump_hosts"] = [j for j in state.get("jump_hosts", [])
                            if isinstance(j, dict) and j.get("id")]
+    # Named clusters: groups of rig ids ({id, name, rig_ids, updated_at})
+    state["clusters"] = [c for c in state.get("clusters", [])
+                         if isinstance(c, dict) and c.get("id")]
     if not os.path.exists(CLUSTER_CONF):
         save_cluster_state(state)
     try:
@@ -202,6 +206,41 @@ def merge_jump_hosts(base_jumps, incoming_jumps):
                 by_id[clean["id"]] = clean
     return list(by_id.values())
 
+CLUSTER_ENTRY_FIELDS = ["id", "name", "rig_ids", "updated_at"]
+
+def clean_cluster_entry(entry):
+    clean = {k: entry[k] for k in CLUSTER_ENTRY_FIELDS if k in entry}
+    clean["rig_ids"] = [str(x) for x in (clean.get("rig_ids") or []) if isinstance(x, (str, int))]
+    return clean
+
+def merge_clusters(base_clusters, incoming_clusters, removed):
+    """Merge named clusters by id; the entry with the newer updated_at wins.
+    Cluster tombstones (removed entries with type 'cluster') suppress deletions."""
+    removed_ids = {t.get("id") for t in (removed or []) if t.get("type") == "cluster"}
+    by_id = {}
+    for c in base_clusters or []:
+        if isinstance(c, dict) and c.get("id"):
+            by_id[c["id"]] = c
+    for inc in incoming_clusters or []:
+        if not isinstance(inc, dict) or not inc.get("id"):
+            continue
+        clean = clean_cluster_entry(inc)
+        clean.setdefault("updated_at", 0)
+        existing = by_id.get(clean["id"])
+        if existing is None:
+            if clean["id"] in removed_ids:
+                continue
+            by_id[clean["id"]] = clean
+        else:
+            try:
+                inc_ts = int(clean.get("updated_at") or 0)
+                cur_ts = int(existing.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                inc_ts = cur_ts = 0
+            if inc_ts > cur_ts:
+                by_id[clean["id"]] = clean
+    return [c for cid, c in by_id.items() if cid not in removed_ids]
+
 def resolve_jump_host(access):
     """Resolve an access' jump reference (jump_id) against the shared jump server
     library; falls back to inline jump_* fields stored on the access itself."""
@@ -245,7 +284,10 @@ def _norm_tombstone(t):
         ts = int(t.get("updated_at") or 0)
     except (TypeError, ValueError):
         ts = 0
-    return {"id": str(t["id"]), "updated_at": ts}
+    norm = {"id": str(t["id"]), "updated_at": ts}
+    # Optional entity type: 'rig' (default) or 'cluster'
+    norm["type"] = str(t.get("type") or "rig")
+    return norm
 
 def _merge_tombstones(base_removed, incoming_removed):
     by_id = {}
@@ -275,7 +317,7 @@ def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_remove
     entries deleted on any node, so removals propagate instead of resurrecting.
     Returns (rigs, removed)."""
     removed = _merge_tombstones(base_removed, incoming_removed)
-    tomb = {t["id"]: t["updated_at"] for t in removed}
+    tomb = {t["id"]: t["updated_at"] for t in removed if t.get("type", "rig") == "rig"}
 
     def _ts(entry):
         try:
@@ -316,7 +358,7 @@ def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_remove
             del by_id[rid]
         elif rid in tomb:
             # Rig was edited/re-added after the deletion - the tombstone loses
-            removed = [t for t in removed if t["id"] != rid]
+            removed = [t for t in removed if not (t["id"] == rid and t.get("type", "rig") == "rig")]
     return list(by_id.values()), _prune_tombstones(removed)
 
 # ---------------- SSH transport for cluster communication ----------------
@@ -682,6 +724,8 @@ def run_sync_cycle(triggered_by="auto"):
                     base_removed=state.get("removed"), incoming_removed=data.get("removed"))
                 state["jump_hosts"] = merge_jump_hosts(
                     state.get("jump_hosts", []), data.get("jump_hosts"))
+                state["clusters"] = merge_clusters(
+                    state.get("clusters", []), data.get("clusters", []), state.get("removed", []))
                 if data.get("cluster_name") and not state.get("cluster_name"):
                     state["cluster_name"] = data["cluster_name"]
                 entry["online"] = True
@@ -696,6 +740,7 @@ def run_sync_cycle(triggered_by="auto"):
                 body={"cluster_name": state.get("cluster_name", ""),
                       "rigs": state["rigs"], "removed": state.get("removed", []),
                       "jump_hosts": state.get("jump_hosts", []),
+                      "clusters": state.get("clusters", []),
                       "from_id": state["self_id"]},
                 timeout=45)
             if not push_ok and not entry.get("online"):
@@ -2676,7 +2721,8 @@ def api_cluster_rigs():
         "last_sync_message": _cluster_last_sync["message"],
         "sshpass_available": bool(shutil.which("sshpass")),
         "rigs": rigs,
-        "jump_hosts": masked_jumps
+        "jump_hosts": masked_jumps,
+        "clusters": state.get("clusters", [])
     })
 
 @app.route('/api/cluster/settings', methods=['POST'])
@@ -2791,80 +2837,102 @@ def api_cluster_rig_delete():
         return jsonify({"success": True, "message": "Rig removed from the cluster."})
     return jsonify({"success": False, "message": "Failed to update cluster configuration."}), 500
 
-@app.route('/api/cluster/rig/candidates', methods=['GET'])
-def api_cluster_rig_candidates():
-    """Rigs that already exist on peers' cluster states but are missing locally."""
-    state = load_cluster_state()
-    _CURRENT_SELF_ID["value"] = state["self_id"]
-    local_ids = {r.get("id") for r in state["rigs"]}
-    removed_ids = {t.get("id") for t in state.get("removed", [])}
-    candidates = {}
-    for rig in state["rigs"]:
-        if rig.get("id") == state["self_id"]:
-            continue
-        ok, peer_state, _, _, _ = cluster_remote_api(rig, "GET", "api/cluster/state", timeout=20)
-        if not ok or not isinstance(peer_state, dict):
-            continue
-        for r in peer_state.get("rigs", []):
-            if not isinstance(r, dict):
-                continue
-            rid = str(r.get("id", "")).strip()
-            if not rid or rid in local_ids or rid in removed_ids or rid in candidates:
-                continue
-            if not r.get("name") or not r.get("password"):
-                continue
-            candidates[rid] = {
-                "id": rid,
-                "name": r.get("name"),
-                "host_label": r.get("host_label", ""),
-                "password": r.get("password", ""),
-                "accesses": [clean_access_entry(a) for a in (r.get("accesses") or []) if isinstance(a, dict)],
-                "source": rig.get("name", rig.get("id", "?"))
-            }
-    return jsonify({"success": True, "candidates": list(candidates.values())})
+def _validate_cluster_name(name):
+    if not name or len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s]+$', name):
+        return "Invalid cluster name (1-60 chars, letters/digits/space/-_)."
+    return None
 
-@app.route('/api/cluster/rig/adopt', methods=['POST'])
-def api_cluster_rig_adopt():
-    """Add rigs discovered on peers (id/name/password/accesses) to the local cluster."""
+@app.route('/api/cluster/create', methods=['POST'])
+def api_cluster_create():
+    """Create a named cluster (a group of rig ids)."""
     data = request.get_json()
-    if not data or not isinstance(data.get("rigs"), list):
+    if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
+    name = str(data.get("name", "")).strip()
+    err = _validate_cluster_name(name)
+    if err:
+        return jsonify({"success": False, "message": err}), 400
     state = load_cluster_state()
     _CURRENT_SELF_ID["value"] = state["self_id"]
-    local_ids = {r.get("id") for r in state["rigs"]}
-    removed_ids = {t.get("id") for t in state.get("removed", [])}
+    if any(c.get("name", "").lower() == name.lower() for c in state.get("clusters", [])):
+        return jsonify({"success": False, "message": "A cluster with this name already exists."}), 400
     now = int(time.time())
-    added = []
-    for incoming in data["rigs"]:
-        if not isinstance(incoming, dict):
-            continue
-        rid = str(incoming.get("id", "")).strip()
-        name = str(incoming.get("name", "")).strip()
-        password = str(incoming.get("password", ""))
-        if not rid or not name or not password:
-            continue
-        if rid == state["self_id"] or rid in local_ids or rid in removed_ids:
-            continue
-        if len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s\.]+$', name) or len(password) > 128:
-            continue
-        accesses = [clean_access_entry(a) for a in (incoming.get("accesses") or []) if isinstance(a, dict)]
-        state["rigs"].append({
-            "id": rid,
-            "name": name,
-            "host_label": str(incoming.get("host_label", "")).strip()[:80],
-            "is_self": False,
-            "password": password,
-            "accesses": accesses,
-            "updated_at": now,
-            "added_at": now
-        })
-        local_ids.add(rid)
-        added.append(name)
-    if not added:
-        return jsonify({"success": False, "message": "No new rigs to add (already present or invalid data)."})
+    cluster = {"id": uuid.uuid4().hex, "name": name, "rig_ids": [], "updated_at": now}
+    state.setdefault("clusters", []).append(cluster)
     if save_cluster_state(state):
-        logging.info(f"Adopted {len(added)} discovered rig(s) ({', '.join(added)}) by IP: {request.remote_addr}")
-        return jsonify({"success": True, "message": "Added: " + ", ".join(added)})
+        logging.info(f"Cluster '{name}' created by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": f"Cluster '{name}' created.", "cluster_id": cluster["id"]})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/update', methods=['POST'])
+def api_cluster_update():
+    """Rename a cluster."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    cluster_id = str(data.get("id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    err = _validate_cluster_name(name)
+    if err:
+        return jsonify({"success": False, "message": err}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    cluster = next((c for c in state.get("clusters", []) if c.get("id") == cluster_id), None)
+    if cluster is None:
+        return jsonify({"success": False, "message": "Cluster not found."}), 404
+    cluster["name"] = name
+    cluster["updated_at"] = int(time.time())
+    if save_cluster_state(state):
+        logging.info(f"Cluster renamed to '{name}' by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Cluster renamed."})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/delete', methods=['POST'])
+def api_cluster_delete():
+    """Delete a cluster (rigs themselves stay untouched)."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    cluster_id = str(data.get("id", "")).strip()
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    cluster = next((c for c in state.get("clusters", []) if c.get("id") == cluster_id), None)
+    if cluster is None:
+        return jsonify({"success": False, "message": "Cluster not found."}), 404
+    state["clusters"] = [c for c in state.get("clusters", []) if c.get("id") != cluster_id]
+    # Tombstone the deletion so peers drop the cluster on the next sync
+    removed = [t for t in state.get("removed", []) if t.get("id") != cluster_id]
+    removed.append({"id": cluster_id, "type": "cluster", "name": cluster.get("name", cluster_id),
+                    "updated_at": int(time.time())})
+    state["removed"] = removed
+    if save_cluster_state(state):
+        logging.info(f"Cluster '{cluster.get('name', cluster_id)}' deleted by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Cluster deleted."})
+    return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
+
+@app.route('/api/cluster/members', methods=['POST'])
+def api_cluster_members():
+    """Set the rig membership of a cluster (full rig_ids list from the checkbox UI)."""
+    data = request.get_json()
+    if not data or not isinstance(data.get("rig_ids"), list):
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    cluster_id = str(data.get("id", "")).strip()
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    cluster = next((c for c in state.get("clusters", []) if c.get("id") == cluster_id), None)
+    if cluster is None:
+        return jsonify({"success": False, "message": "Cluster not found."}), 404
+    rig_ids = {r.get("id") for r in state["rigs"]}
+    clean_ids = []
+    for rid in data["rig_ids"]:
+        rid = str(rid).strip()
+        if rid in rig_ids and rid not in clean_ids:
+            clean_ids.append(rid)
+    cluster["rig_ids"] = clean_ids
+    cluster["updated_at"] = int(time.time())
+    if save_cluster_state(state):
+        logging.info(f"Cluster '{cluster.get('name')}' membership set to {len(clean_ids)} rig(s) by IP: {request.remote_addr}")
+        return jsonify({"success": True, "message": "Cluster membership updated."})
     return jsonify({"success": False, "message": "Failed to save cluster configuration."}), 500
 
 @app.route('/api/cluster/access', methods=['POST'])
@@ -3143,7 +3211,8 @@ def api_cluster_state():
         "sync_interval": state.get("sync_interval", DEFAULT_SYNC_INTERVAL),
         "rigs": state["rigs"],
         "removed": state.get("removed", []),
-        "jump_hosts": state.get("jump_hosts", [])
+        "jump_hosts": state.get("jump_hosts", []),
+        "clusters": state.get("clusters", [])
     })
 
 @app.route('/api/cluster/sync', methods=['POST'])
@@ -3158,6 +3227,7 @@ def api_cluster_sync_push():
         base_removed=state.get("removed"),
         incoming_removed=data.get("removed"))
     state["jump_hosts"] = merge_jump_hosts(state.get("jump_hosts", []), data.get("jump_hosts"))
+    state["clusters"] = merge_clusters(state.get("clusters", []), data.get("clusters", []), state.get("removed", []))
     if data.get("cluster_name") and not state.get("cluster_name"):
         state["cluster_name"] = str(data["cluster_name"])
     saved = save_cluster_state(state)

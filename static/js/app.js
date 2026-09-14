@@ -7,6 +7,7 @@ let lastHugepagesEnabled = false;
 
 // ---- Cluster / remote rig state ----
 let currentRigId = 'self';
+let currentClusterId = null;     // selected cluster in the header dropdown (null = all rigs)
 let clusterData = null;          // last /api/cluster/rigs payload
 let activeView = 'cluster';      // cluster | accesses | dashboard
 let editingRigId = null;         // rig being edited in rigModal
@@ -91,7 +92,7 @@ function updateHardwareStatBoxes(data) {
     } else {
         const totalHashrate = data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
         gpuCountEl.textContent = data.gpus.length + ' GPU';
-        speedEl.innerHTML = fmtSpeedHtml(totalHashrate, data.miner_algo || '');
+        speedEl.innerHTML = fmtSpeedHtml(totalHashrate);
     }
 }
 
@@ -105,10 +106,8 @@ function fmtSpeed(mh) {
     return '0 MH/s';
 }
 
-function fmtSpeedHtml(mh, algo) {
-    const base = '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
-    // Algo line is always rendered (with a reserved height) so the stat boxes keep a stable height
-    return base + '<div class="small text-muted algo-line">' + (algo ? escapeHtml(algo) : '&nbsp;') + '</div>';
+function fmtSpeedHtml(mh) {
+    return '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -781,8 +780,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Cluster page bindings
     document.getElementById('syncNowBtn').addEventListener('click', syncNow);
-    document.getElementById('clusterNameSaveBtn').addEventListener('click', saveClusterSettings);
-    document.getElementById('addRigBtn').addEventListener('click', () => openRigModal(null));
+    document.getElementById('createClusterBtn').addEventListener('click', () => openClusterModal(null));
+    document.getElementById('clusterModalSaveBtn').addEventListener('click', saveClusterModal);
+    document.getElementById('clusterRigsSaveBtn').addEventListener('click', saveClusterRigs);
 
     // Access page bindings
     document.getElementById('accessRefreshBtn').addEventListener('click', loadAccessList);
@@ -901,14 +901,19 @@ function updateRigScopeUi() {
 function renderRigScopeMenu() {
     const menu = document.getElementById('rigScopeMenu');
     if (!menu || !clusterData || !clusterData.rigs) return;
+    // When a cluster is selected in the header, show only its rigs
+    const filter = (currentClusterId && currentClusterId !== 'all' && clusterData.clusters)
+        ? new Set(((clusterData.clusters.find(c => c.id === currentClusterId) || {}).rig_ids) || [])
+        : null;
     const items = [];
     const selfRig = clusterData.rigs.find(r => r.is_self);
-    if (selfRig) {
+    if (selfRig && (!filter || filter.has(selfRig.id))) {
         items.push('<li><button class="dropdown-item' + (currentRigId === 'self' ? ' active' : '') + '" onclick="switchRigGlobal(\'self\')">' +
             '<i class="bi bi-hdd-network me-2"></i>' + escapeHtml(selfRig.name) + ' <span class="small text-muted">(local)</span></button></li>');
         items.push('<li><hr class="dropdown-divider"></li>');
     }
     clusterData.rigs.filter(r => !r.is_self).forEach(rig => {
+        if (filter && !filter.has(rig.id)) return;
         const active = currentRigId === rig.id;
         const off = !rig.online;
         items.push('<li><button class="dropdown-item' + (active ? ' active' : '') + '" ' + (off ? 'disabled' : '') +
@@ -923,7 +928,7 @@ window.switchRigGlobal = function(rigId) {
     switchRig(rigId);
 };
 
-// Cluster dropdown: lists the cluster and its rigs (selecting a rig switches scope)
+// Cluster dropdown: lists the created clusters (All rigs + each named cluster)
 function renderClusterScopeMenu() {
     const menu = document.getElementById('clusterScopeMenu');
     const btnName = document.getElementById('clusterScopeName');
@@ -932,22 +937,29 @@ function renderClusterScopeMenu() {
         menu.innerHTML = '<li><span class="dropdown-item text-muted">Loading...</span></li>';
         return;
     }
-    const cname = clusterData.cluster_name || 'Unnamed cluster';
-    btnName.textContent = cname;
-    const online = clusterData.rigs.filter(r => r.online).length;
-    const items = ['<li><h6 class="dropdown-header"><i class="bi bi-diagram-3-fill text-info me-1"></i>' +
-        escapeHtml(cname) + ' (' + online + '/' + clusterData.rigs.length + ' online)</h6></li>'];
-    clusterData.rigs.forEach(rig => {
-        const active = currentRigId === rig.id || (rig.is_self && (currentRigId === 'self' || !currentRigId));
-        const off = !rig.online;
-        items.push('<li><button class="dropdown-item' + (active ? ' active' : '') + '"' + (off ? ' disabled' : '') +
-            ' onclick="switchRigGlobal(\'' + (rig.is_self ? 'self' : rig.id) + '\')">' +
-            '<i class="bi bi-hdd-rack me-2"></i>' + escapeHtml(rig.name || rig.id) +
-            (rig.is_self ? ' <span class="small text-muted">(local)</span>' : '') +
-            (off ? ' <span class="badge bg-danger-glow text-danger ms-1">OFFLINE</span>' : '') + '</button></li>');
+    const clusters = clusterData.clusters || [];
+    const activeCl = (currentClusterId && currentClusterId !== 'all')
+        ? clusters.find(c => c.id === currentClusterId) : null;
+    btnName.textContent = activeCl ? activeCl.name : 'All rigs';
+    const items = ['<li><h6 class="dropdown-header"><i class="bi bi-diagram-3-fill text-info me-1"></i>Clusters</h6></li>'];
+    items.push('<li><button class="dropdown-item' + (!activeCl ? ' active' : '') + '" onclick="selectClusterGlobal(\'all\')">' +
+        '<i class="bi bi-collection me-2"></i>All rigs <span class="small text-muted">(' + clusterData.rigs.length + ')</span></button></li>');
+    clusters.forEach(cl => {
+        const n = (cl.rig_ids || []).filter(id => clusterData.rigs.some(r => r.id === id)).length;
+        items.push('<li><button class="dropdown-item' + (activeCl && activeCl.id === cl.id ? ' active' : '') + '" onclick="selectClusterGlobal(\'' + cl.id + '\')">' +
+            '<i class="bi bi-diagram-3-fill me-2"></i>' + escapeHtml(cl.name) +
+            ' <span class="small text-muted">(' + n + ')</span></button></li>');
     });
+    if (!clusters.length) {
+        items.push('<li><span class="dropdown-item text-muted small">No clusters yet - create one on the Cluster tab</span></li>');
+    }
     menu.innerHTML = items.join('');
 }
+
+window.selectClusterGlobal = function(cid) {
+    currentClusterId = (!cid || cid === 'all') ? null : cid;
+    updateRigScopeUi();
+};
 
 // Toast notification helper
 function showToast(message, isSuccess = true) {
@@ -1040,7 +1052,8 @@ async function fetchStats() {
         document.getElementById('statAvgTemp').textContent = avgTemp + ' °C';
         document.getElementById('statAvgFan').textContent = avgFan + ' %';
         document.getElementById('statTotalPower').textContent = totalPower.toFixed(1) + ' W';
-        document.getElementById('statCoin').textContent = data.system.coin || 'Unknown';
+        const coinAlgo = (data.system.coin || 'Unknown') + (data.miner_algo ? ' (' + data.miner_algo + ')' : '');
+        document.getElementById('statCoin').textContent = coinAlgo;
         
         // Total GPUs / Total Speed reflect the active hardware tab
         updateHardwareStatBoxes(data);
@@ -1603,7 +1616,7 @@ async function runDiagnostics() {
 async function loadClusterData(silent = false) {
     if (!silent && !document.getElementById('clusterRigsContainer').dataset.loaded) {
         document.getElementById('clusterRigsContainer').innerHTML =
-            '<div class="col-12 text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Loading cluster rigs...</p></div>';
+            '<div class="col-12 text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Loading clusters...</p></div>';
     }
     try {
         const response = await fetch('/api/cluster/rigs');
@@ -1631,15 +1644,6 @@ function renderCluster() {
     const container = document.getElementById('clusterRigsContainer');
     container.dataset.loaded = '1';
 
-    // Cluster settings
-    document.getElementById('clusterNameBadge').textContent = clusterData.cluster_name || '';
-    document.getElementById('clusterNameBadge').classList.toggle('d-none', !clusterData.cluster_name);
-    const nameInput = document.getElementById('clusterNameInput');
-    // Keep the input empty (no prefilled value) - the current name is shown in the badge
-    if (document.activeElement !== nameInput && nameInput.dataset.touched !== '1') {
-        nameInput.value = '';
-        nameInput.placeholder = clusterData.cluster_name || 'Cluster name';
-    }
     document.getElementById('clusterSyncStatus').textContent = clusterData.last_sync_message || '';
 
     const online = clusterData.rigs.filter(r => r.online).length;
@@ -1654,14 +1658,11 @@ function renderCluster() {
     }
 
     // Farm-wide totals: only online rigs count (offline stats are stale)
-    let totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0;
-    const speedByAlgo = {};
+    let totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0, totalMh = 0;
     clusterData.rigs.forEach(rig => {
         const stats = rig.stats;
         if (!stats || !rig.online) return;
-        const mh = (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
-        const key = stats.miner_algo || (stats.system && stats.system.coin) || '';
-        speedByAlgo[key] = (speedByAlgo[key] || 0) + mh;
+        totalMh += (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
         (stats.gpus || []).forEach(g => {
             totalPower += g.power || 0;
             tempSum += g.temp || 0;
@@ -1669,95 +1670,153 @@ function renderCluster() {
         });
         totalGpus += (stats.gpus || []).length;
     });
-    const algoKeys = Object.keys(speedByAlgo).filter(k => speedByAlgo[k] > 0);
-    let speedHtml;
-    if (algoKeys.length === 0) {
-        speedHtml = '0 MH/s';
-    } else if (algoKeys.length === 1) {
-        speedHtml = fmtSpeedHtml(speedByAlgo[algoKeys[0]], algoKeys[0] !== '' ? algoKeys[0] : '');
-    } else {
-        speedHtml = '<div class="small text-primary-gradient fw-bold">' + algoKeys.map(k =>
-            fmtSpeed(speedByAlgo[k]) + ' <span class="text-muted fw-normal">' + escapeHtml(k) + '</span>').join('<br>') + '</div>';
-    }
-    document.getElementById('clusterTotalHashrate').innerHTML = speedHtml;
+    document.getElementById('clusterTotalHashrate').innerHTML = fmtSpeedHtml(totalMh);
     document.getElementById('clusterTotalPower').textContent = totalPower.toFixed(1) + ' W';
     document.getElementById('clusterTotalGpus').textContent = totalGpus;
     document.getElementById('clusterAvgTemp').textContent = (tempCount ? (tempSum / tempCount).toFixed(1) : 0) + ' °C';
 
-    // Rig cards
+    // Cluster sections (rig groups) + unassigned rigs
+    const clusters = clusterData.clusters || [];
+    const rigById = {};
+    clusterData.rigs.forEach(r => { rigById[r.id] = r; });
+    const assigned = new Set();
     container.innerHTML = '';
-    if (clusterData.rigs.length === 0) {
-        container.innerHTML = '<div class="col-12 text-center py-4"><p class="text-muted">No rigs in the cluster yet. Add the first rig with the button above.</p></div>';
-    }
-    clusterData.rigs.forEach(rig => {
-        const stats = rig.stats;
-        const system = stats && stats.system ? stats.system : {};
-        const isOnline = !!rig.online;
-        const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
-        const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)) : 0;
-        const totalHash = !stats ? 'n/a' : (isOnline ? fmtSpeed(totalHashMh) : '—');
-        const power = stats ? (isOnline ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
-        const temps = stats && stats.gpus && stats.gpus.length
-            ? (isOnline ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : '—') : 'n/a';
-        const isSelf = !!rig.is_self;
 
-        const statusBadge = isSelf
-            ? '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>'
-            : (isOnline
-                ? '<span class="badge bg-success-glow border border-success text-success"><span class="pulse-indicator"></span>ONLINE</span>'
-                : '<span class="badge bg-danger-glow border border-danger text-danger" title="' + escapeHtml(rig.last_error || '') + '">OFFLINE</span>');
-
-        const col = document.createElement('div');
-        col.className = 'col-md-6 col-lg-4' + (isOnline ? '' : ' rig-offline');
-        col.innerHTML = `
-            <div class="card glass-card h-100">
-                <div class="card-body d-flex flex-column">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <h3 class="h6 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
-                        ${statusBadge}
-                    </div>
-                    <p class="small text-muted mb-2 text-truncate" title="${escapeHtml(rig.host_label || '')}">
-                        <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
-                    </p>
-                    <div class="row g-2 mt-0 pt-2 border-top border-secondary-subtle text-center">
-                        <div class="col-4">
-                            <div class="small text-muted">GPUs</div>
-                            <div class="fw-semibold small">${isOnline ? (gpuCount === null ? 'n/a' : gpuCount) : '—'}</div>
-                        </div>
-                        <div class="col-4">
-                            <div class="small text-muted">Speed</div>
-                            <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}<div class="small text-muted fw-normal algo-line">${isOnline && stats && stats.miner_algo ? escapeHtml(stats.miner_algo) : '&nbsp;'}</div></div>
-                        </div>
-                        <div class="col-4">
-                            <div class="small text-muted">Temp</div>
-                            <div class="fw-semibold small">${temps}</div>
-                        </div>
-                        <div class="col-4">
-                            <div class="small text-muted">Miner</div>
-                            <div class="fw-semibold small">${isOnline ? escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)')) : '—'}</div>
-                        </div>
-                        <div class="col-4">
-                            <div class="small text-muted">Coin</div>
-                            <div class="fw-semibold small text-warning">${isOnline ? escapeHtml(system.coin || 'None') : '—'}</div>
-                        </div>
-                        <div class="col-4">
-                            <div class="small text-muted">Power</div>
-                            <div class="fw-semibold small text-danger-emphasis">${power}</div>
+    clusters.forEach(cl => {
+        const members = (cl.rig_ids || []).map(id => rigById[id]).filter(Boolean);
+        members.forEach(m => assigned.add(m.id));
+        const section = document.createElement('div');
+        section.className = 'col-12';
+        section.innerHTML = `
+            <div class="card glass-card">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                        <h3 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                            <i class="bi bi-diagram-3-fill text-primary"></i> ${escapeHtml(cl.name)}
+                            <span class="badge bg-secondary-subtle text-secondary-emphasis small">${members.length} rig${members.length === 1 ? '' : 's'}</span>
+                        </h3>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Add rigs to this cluster" onclick="openClusterRigsModal('${cl.id}')">
+                                <i class="bi bi-plus-lg"></i> Add
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" title="Rename cluster" onclick="openClusterModal('${cl.id}')">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger" title="Delete cluster (rigs stay untouched)" onclick="deleteCluster('${cl.id}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
                         </div>
                     </div>
-                    <div class="mt-auto pt-3 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')" ${isSelf ? '' : (isOnline ? '' : 'disabled')}>
-                            <i class="bi bi-gear-wide-connected"></i> Manage Rig
-                        </button>
-                        <button class="btn btn-sm btn-outline-secondary" title="Edit rig" onclick="openRigModal('${rig.id}')">
-                            <i class="bi bi-pencil"></i>
-                        </button>
-                        ${isSelf ? '' : '<button class="btn btn-sm btn-outline-danger" title="Remove rig from cluster" onclick="deleteRig(\'' + rig.id + '\')"><i class="bi bi-trash"></i></button>'}
-                    </div>
+                    <div class="row g-4">${members.length ? '' :
+                        '<div class="col-12"><p class="text-muted small mb-0">No rigs in this cluster yet. Click Add to select rigs.</p></div>'}</div>
                 </div>
             </div>`;
-        container.appendChild(col);
+        const grid = section.querySelector('.row.g-4');
+        members.forEach(m => grid.appendChild(buildRigCard(m)));
+        container.appendChild(section);
     });
+
+    const unassigned = clusterData.rigs.filter(r => !assigned.has(r.id));
+    if (unassigned.length) {
+        const section = document.createElement('div');
+        section.className = 'col-12';
+        section.innerHTML = `
+            <div class="card glass-card">
+                <div class="card-body">
+                    <h3 class="h6 fw-bold mb-3 d-flex align-items-center gap-2">
+                        <i class="bi bi-collection text-secondary"></i> Unassigned Rigs
+                        <span class="badge bg-secondary-subtle text-secondary-emphasis small">${unassigned.length}</span>
+                    </h3>
+                    <div class="row g-4"></div>
+                </div>
+            </div>`;
+        const grid = section.querySelector('.row.g-4');
+        unassigned.forEach(m => grid.appendChild(buildRigCard(m)));
+        container.appendChild(section);
+    }
+
+    if (!clusters.length) {
+        const hint = document.createElement('div');
+        hint.className = 'col-12';
+        hint.innerHTML = '<div class="alert alert-info small border-info-subtle mb-0"><i class="bi bi-info-circle-fill"></i> ' +
+            'Create a cluster with the Add button above, then tick the rigs (added on the SSH Accesses tab) to include.</div>';
+        container.appendChild(hint);
+    }
+}
+
+// Build a rig card column (used inside cluster sections and the unassigned group)
+function buildRigCard(rig) {
+    const stats = rig.stats;
+    const system = stats && stats.system ? stats.system : {};
+    const isOnline = !!rig.online;
+    const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
+    const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)) : 0;
+    const totalHash = !stats ? 'n/a' : (isOnline ? fmtSpeed(totalHashMh) : '—');
+    const power = stats ? (isOnline ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
+    const temps = stats && stats.gpus && stats.gpus.length
+        ? (isOnline ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : '—') : 'n/a';
+    const isSelf = !!rig.is_self;
+    // Coin with the mining algorithm in parentheses
+    const coinAlgo = isOnline
+        ? escapeHtml((system.coin || 'None') + (stats && stats.miner_algo ? ' (' + stats.miner_algo + ')' : ''))
+        : '—';
+
+    const statusBadge = isSelf
+        ? '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>'
+        : (isOnline
+            ? '<span class="badge bg-success-glow border border-success text-success"><span class="pulse-indicator"></span>ONLINE</span>'
+            : '<span class="badge bg-danger-glow border border-danger text-danger" title="' + escapeHtml(rig.last_error || '') + '">OFFLINE</span>');
+
+    const col = document.createElement('div');
+    col.className = 'col-md-6 col-lg-4' + (isOnline ? '' : ' rig-offline');
+    col.innerHTML = `
+        <div class="card glass-card h-100">
+            <div class="card-body d-flex flex-column">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h3 class="h6 fw-bold mb-0">${escapeHtml(rig.name || rig.id)}</h3>
+                    ${statusBadge}
+                </div>
+                <p class="small text-muted mb-2 text-truncate" title="${escapeHtml(rig.host_label || '')}">
+                    <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
+                </p>
+                <div class="row g-2 mt-0 pt-2 border-top border-secondary-subtle text-center">
+                    <div class="col-4">
+                        <div class="small text-muted">GPUs</div>
+                        <div class="fw-semibold small">${isOnline ? (gpuCount === null ? 'n/a' : gpuCount) : '—'}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-muted">Speed</div>
+                        <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-muted">Temp</div>
+                        <div class="fw-semibold small">${temps}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-muted">Miner</div>
+                        <div class="fw-semibold small">${isOnline ? escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)')) : '—'}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-muted">Coin</div>
+                        <div class="fw-semibold small text-warning text-truncate" title="${coinAlgo}">${coinAlgo}</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="small text-muted">Power</div>
+                        <div class="fw-semibold small text-danger-emphasis">${power}</div>
+                    </div>
+                </div>
+                <div class="mt-auto pt-3 d-flex gap-2">
+                    <button class="btn btn-sm btn-primary flex-grow-1 fw-semibold py-2 d-flex align-items-center justify-content-center gap-1" onclick="openRigDashboard('${rig.id}')" ${isSelf ? '' : (isOnline ? '' : 'disabled')}>
+                        <i class="bi bi-gear-wide-connected"></i> Manage
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" title="Edit rig" onclick="openRigModal('${rig.id}')">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    ${isSelf ? '' : '<button class="btn btn-sm btn-outline-danger" title="Remove rig from cluster" onclick="deleteRig(\'' + rig.id + '\')"><i class="bi bi-trash"></i></button>'}
+                </div>
+            </div>
+        </div>`;
+    return col;
 }
 
 // Open the dashboard view scoped to the selected rig
@@ -1780,28 +1839,104 @@ window.syncNow = async function() {
     setTimeout(() => loadClusterData(true), 2500);
 };
 
-function saveClusterSettings() {
-    const nameInput = document.getElementById('clusterNameInput');
-    const name = nameInput.value.trim();
-    fetch('/api/cluster/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-        body: JSON.stringify({ cluster_name: name })
-    })
-    .then(r => r.json())
-    .then(data => {
-        if (data.success) {
-            nameInput.dataset.touched = '1';
-            nameInput.value = '';
-            nameInput.placeholder = name || 'Cluster name';
-            showToast(data.message, true);
-            loadClusterData(true);
-        } else {
-            showToast(data.message || 'Failed to save cluster settings.', false);
-        }
-    })
-    .catch(() => showToast('Network error saving cluster settings.', false));
+// ---------------- Cluster create/rename/delete + membership ----------------
+
+let editingClusterId = null;
+let membershipClusterId = null;
+
+function openClusterModal(clusterId) {
+    editingClusterId = clusterId || null;
+    const cl = clusterId && clusterData ? (clusterData.clusters || []).find(c => c.id === clusterId) : null;
+    document.getElementById('clusterModalTitle').textContent = cl ? 'Edit Cluster' : 'Create Cluster';
+    document.getElementById('clusterNameModalInput').value = cl ? cl.name : '';
+    new bootstrap.Modal(document.getElementById('clusterModal')).show();
 }
+window.openClusterModal = openClusterModal;
+
+async function saveClusterModal() {
+    const name = document.getElementById('clusterNameModalInput').value.trim();
+    if (!name) { showToast('Enter a cluster name.', false); return; }
+    const url = editingClusterId ? '/api/cluster/update' : '/api/cluster/create';
+    const payload = editingClusterId ? { id: editingClusterId, name: name } : { name: name };
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Cluster saved.' : 'Failed to save cluster.'), !!data.success);
+        if (data.success) {
+            bootstrap.Modal.getInstance(document.getElementById('clusterModal')).hide();
+            loadClusterData(true);
+        }
+    } catch (e) {
+        showToast('Network error saving cluster.', false);
+    }
+}
+
+window.openClusterRigsModal = function(clusterId) {
+    if (!clusterData || !clusterData.rigs) return;
+    membershipClusterId = clusterId;
+    const cl = (clusterData.clusters || []).find(c => c.id === clusterId);
+    document.getElementById('clusterRigsModalName').textContent = cl ? cl.name : 'cluster';
+    const memberSet = new Set((cl && cl.rig_ids) || []);
+    const list = document.getElementById('clusterRigsCheckList');
+    if (!clusterData.rigs.length) {
+        list.innerHTML = '<div class="text-muted small py-2">No rigs yet. Add them on the SSH Accesses tab first.</div>';
+    } else {
+        list.innerHTML = clusterData.rigs.map(r => {
+            const checked = memberSet.has(r.id) ? ' checked' : '';
+            return '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0">' +
+                '<input class="form-check-input cluster-rig-check" type="checkbox" value="' + escapeHtml(r.id) + '" id="memb_' + escapeHtml(r.id) + '"' + checked + '>' +
+                '<label class="form-check-label small flex-grow-1" for="memb_' + escapeHtml(r.id) + '">' +
+                    '<span class="fw-semibold">' + escapeHtml(r.name || r.id) + '</span>' +
+                    (r.is_self ? ' <span class="text-muted">(local)</span>' : '') +
+                    (r.online ? '' : ' <span class="badge bg-danger-glow text-danger">OFFLINE</span>') +
+                '</label></div>';
+        }).join('');
+    }
+    new bootstrap.Modal(document.getElementById('clusterRigsModal')).show();
+};
+
+async function saveClusterRigs() {
+    const ids = Array.from(document.querySelectorAll('.cluster-rig-check:checked')).map(cb => cb.value);
+    try {
+        const response = await fetch('/api/cluster/members', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: membershipClusterId, rig_ids: ids })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Membership updated.' : 'Failed to update membership.'), !!data.success);
+        if (data.success) {
+            bootstrap.Modal.getInstance(document.getElementById('clusterRigsModal')).hide();
+            loadClusterData(true);
+        }
+    } catch (e) {
+        showToast('Network error saving cluster membership.', false);
+    }
+}
+
+window.deleteCluster = async function(clusterId) {
+    const cl = (clusterData.clusters || []).find(c => c.id === clusterId);
+    if (!confirm('Delete cluster "' + (cl ? cl.name : clusterId) + '"? The rigs themselves stay untouched.')) return;
+    try {
+        const response = await fetch('/api/cluster/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ id: clusterId })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Cluster deleted.' : 'Failed to delete cluster.'), !!data.success);
+        if (data.success) {
+            if (currentClusterId === clusterId) currentClusterId = null;
+            loadClusterData(true);
+        }
+    } catch (e) {
+        showToast('Network error deleting cluster.', false);
+    }
+};
 
 // ---------------- Rig modal ----------------
 
@@ -1832,82 +1967,8 @@ function openRigModal(rigId) {
     document.getElementById('rigModalDeleteBtn').classList.toggle('d-none', !rig || !!rig.is_self);
     document.getElementById('rigModalTestResults').innerHTML = '';
     renderRigModalAccesses(rig);
-    // When adding a new rig, offer rigs already added on other cluster rigs (checkbox list)
-    const candidatesBlock = document.getElementById('rigCandidatesBlock');
-    candidatesBlock.classList.toggle('d-none', !!rigId);
-    if (!rigId) loadRigCandidates();
     new bootstrap.Modal(document.getElementById('rigModal')).show();
 }
-
-// ---------------- Discovered rig candidates (checkbox adoption) ----------------
-
-let rigCandidates = [];
-
-async function loadRigCandidates() {
-    const block = document.getElementById('rigCandidatesBlock');
-    const listEl = document.getElementById('rigCandidatesList');
-    block.classList.remove('d-none');
-    listEl.innerHTML = '<div class="text-muted small py-2"><i class="bi bi-arrow-repeat spin-animation"></i> Scanning cluster rigs...</div>';
-    document.getElementById('rigCandidatesAddBtn').disabled = true;
-    try {
-        const response = await fetch('/api/cluster/rig/candidates');
-        const data = await response.json();
-        rigCandidates = (data.success && data.candidates) || [];
-    } catch (e) {
-        rigCandidates = [];
-    }
-    renderRigCandidates();
-}
-
-function renderRigCandidates() {
-    const listEl = document.getElementById('rigCandidatesList');
-    const addBtn = document.getElementById('rigCandidatesAddBtn');
-    if (!rigCandidates.length) {
-        listEl.innerHTML = '<div class="text-muted small py-2">No new rigs discovered on cluster peers. Add one manually below.</div>';
-        addBtn.disabled = true;
-        return;
-    }
-    listEl.innerHTML = rigCandidates.map(c =>
-        '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0">' +
-            '<input class="form-check-input rig-candidate-check" type="checkbox" value="' + escapeHtml(c.id) + '" id="cand_' + escapeHtml(c.id) + '">' +
-            '<label class="form-check-label flex-grow-1 small text-truncate" for="cand_' + escapeHtml(c.id) + '">' +
-                '<span class="fw-semibold">' + escapeHtml(c.name) + '</span>' +
-                (c.host_label ? ' <span class="text-muted font-monospace">' + escapeHtml(c.host_label) + '</span>' : '') +
-                ' <span class="text-muted"><i class="bi bi-arrow-left-right ms-1"></i> via ' + escapeHtml(c.source || '?') + '</span>' +
-            '</label>' +
-        '</div>').join('');
-    addBtn.disabled = false;
-}
-
-window.addSelectedRigCandidates = async function() {
-    const selected = Array.from(document.querySelectorAll('.rig-candidate-check:checked')).map(cb => cb.value);
-    if (!selected.length) {
-        showToast('Select at least one rig to add.', false);
-        return;
-    }
-    const rigs = rigCandidates.filter(c => selected.includes(c.id));
-    const btn = document.getElementById('rigCandidatesAddBtn');
-    btn.disabled = true;
-    try {
-        const response = await fetch('/api/cluster/rig/adopt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-            body: JSON.stringify({ rigs: rigs })
-        });
-        const data = await response.json();
-        showToast(data.message || (data.success ? 'Rigs added.' : 'Failed to add rigs.'), !!data.success);
-        if (data.success) {
-            rigCandidates = rigCandidates.filter(c => !selected.includes(c.id));
-            renderRigCandidates();
-            loadClusterData(true);
-            loadAccessList();
-        }
-    } catch (e) {
-        showToast('Network error adding rigs.', false);
-    } finally {
-        btn.disabled = false;
-    }
-};
 
 function renderRigModalAccesses(rig) {
     const list = document.getElementById('rigModalAccessList');
@@ -1982,8 +2043,6 @@ window.saveRigModal = async function() {
 };
 document.getElementById('rigModalSaveBtn').addEventListener('click', saveRigModal);
 document.getElementById('rigModalAddAccessBtn').addEventListener('click', () => openAccessModal(editingRigId, null));
-document.getElementById('rigCandidatesRefreshBtn').addEventListener('click', loadRigCandidates);
-document.getElementById('rigCandidatesAddBtn').addEventListener('click', () => addSelectedRigCandidates());
 
 document.getElementById('rigModalDeleteBtn').addEventListener('click', function() {
     if (!editingRigId) return;
@@ -2187,8 +2246,10 @@ window.testJump = async function(jumpId, btn) {
 function openAccessModal(rigId, accessId) {
     editingAccess = { rigId: rigId, accessId: accessId };
     const rigSelect = document.getElementById('accessRigSelect');
-    rigSelect.innerHTML = (clusterData && clusterData.rigs ? clusterData.rigs : [])
+    // When creating a new access, allow creating a brand-new rig inline
+    const rigOptions = (clusterData && clusterData.rigs ? clusterData.rigs : [])
         .map(r => '<option value="' + r.id + '">' + escapeHtml(r.name || r.id) + '</option>').join('');
+    rigSelect.innerHTML = (accessId ? '' : '<option value="__new__">+ New rig</option>') + rigOptions;
 
     const access = (rigId && accessId && clusterData)
         ? (clusterData.rigs.find(r => r.id === rigId) || { accesses: [] }).accesses.find(a => a.id === accessId)
@@ -2213,6 +2274,9 @@ function openAccessModal(rigId, accessId) {
     if (access && access.jump_id) jumpSelect.value = access.jump_id;
 
     if (rigId && access) rigSelect.value = rigId;
+    else if (!accessId) rigSelect.value = (clusterData && clusterData.rigs && clusterData.rigs.length) ? clusterData.rigs[0].id : '__new__';
+    document.getElementById('accessNewRigName').value = '';
+    document.getElementById('accessNewRigPassword').value = '';
     toggleAccessModalFields();
     document.getElementById('accessTestResult').textContent = '';
     new bootstrap.Modal(document.getElementById('accessModal')).show();
@@ -2223,13 +2287,16 @@ window.openAccessModal = openAccessModal;
 function toggleAccessModalFields() {
     const type = document.getElementById('accessTypeSelect').value;
     const auth = document.getElementById('accessAuthSelect').value;
+    const isNewRig = document.getElementById('accessRigSelect').value === '__new__';
     document.getElementById('jumpSettingsBlock').classList.toggle('d-none', type !== 'jump');
     document.getElementById('accessPasswordBlock').classList.toggle('d-none', auth !== 'password');
     document.getElementById('accessKeyBlock').classList.toggle('d-none', auth !== 'key');
+    document.getElementById('accessNewRigBlock').classList.toggle('d-none', !isNewRig);
 }
 
 document.getElementById('accessTypeSelect').addEventListener('change', toggleAccessModalFields);
 document.getElementById('accessAuthSelect').addEventListener('change', toggleAccessModalFields);
+document.getElementById('accessRigSelect').addEventListener('change', toggleAccessModalFields);
 
 function collectAccessPayload() {
     const type = document.getElementById('accessTypeSelect').value;
@@ -2251,7 +2318,31 @@ function collectAccessPayload() {
 }
 
 window.saveAccessModal = async function() {
-    const rigId = document.getElementById('accessRigSelect').value;
+    let rigId = document.getElementById('accessRigSelect').value;
+    // Create a brand-new rig first when "+ New rig" is selected
+    if (rigId === '__new__') {
+        const newName = document.getElementById('accessNewRigName').value.trim();
+        const newPw = document.getElementById('accessNewRigPassword').value.trim();
+        if (!newName) { showToast('Enter the new rig name.', false); return; }
+        if (newPw.length < 4) { showToast('New rig dashboard password must be at least 4 characters.', false); return; }
+        try {
+            const rigRes = await fetch('/api/cluster/rig', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ name: newName, password: newPw, host_label: '' })
+            });
+            const rigData = await rigRes.json();
+            if (!(rigRes.ok && rigData.success)) {
+                showToast(rigData.message || 'Failed to create the rig.', false);
+                return;
+            }
+            rigId = rigData.rig_id;
+            showToast('Rig "' + newName + '" created.', true);
+        } catch (e) {
+            showToast('Network error creating the rig.', false);
+            return;
+        }
+    }
     const payload = collectAccessPayload();
     try {
         const response = await fetch('/api/cluster/access', {
