@@ -3657,8 +3657,8 @@ function renderGpuFanTable() {
         const ph = { min: 'e.g. ' + g_global.min_fan, max: 'e.g. ' + g_global.max_fan,
                      core: 'e.g. ' + g_global.target_temp, mem: 'e.g. ' + g_global.target_mem_temp,
                      crit: 'e.g. ' + g_global.critical_temp };
-        const numInput = (cls, val, phKey) =>
-            '<input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-' + cls + '" value="' + (val === null || val === undefined ? '' : val) + '" placeholder="' + ph[phKey] + '" style="width: 74px;">';
+        const numInput = (cls, val, ph) =>
+            '<input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-' + cls + '" value="' + (val === null || val === undefined ? '' : val) + '" placeholder="' + ph + '" style="width: 74px;">';
         return '<tr>' +
             '<td class="fw-semibold font-monospace">#' + i + '</td>' +
             '<td class="small" style="min-width: 150px;">' + escapeHtml(lv.model || '') + '</td>' +
@@ -3669,11 +3669,11 @@ function renderGpuFanTable() {
                 '<option value="static"' + (isStatic ? ' selected' : '') + '>Static</option>' +
             '</select></td>' +
             '<td>' + numInput('static', isStatic ? g.static : '', 'e.g. 60') + '</td>' +
-            '<td>' + numInput('min', g.min, 'min') + '</td>' +
-            '<td>' + numInput('max', g.max, 'max') + '</td>' +
-            '<td>' + numInput('core', g.target_core, 'core') + '</td>' +
-            '<td>' + numInput('mem', g.target_mem, 'mem') + '</td>' +
-            '<td>' + numInput('crit', g.critical, 'crit') + '</td>' +
+            '<td>' + numInput('min', g.min, ph.min) + '</td>' +
+            '<td>' + numInput('max', g.max, ph.max) + '</td>' +
+            '<td>' + numInput('core', g.target_core, ph.core) + '</td>' +
+            '<td>' + numInput('mem', g.target_mem, ph.mem) + '</td>' +
+            '<td>' + numInput('crit', g.critical, ph.crit) + '</td>' +
             '<td class="text-end"><button class="btn btn-sm btn-outline-warning" onclick="applyGpuFan(' + i + ', this)" title="Apply fan settings to this GPU">Apply</button></td>' +
         '</tr>';
     }).join('');
