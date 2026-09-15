@@ -141,10 +141,12 @@ body {
     border-color: rgba(99, 102, 241, 0.3);
 }
 
-/* Hover lift only for cluster/rig cards on the Cluster tab
-   (forms and tables on other tabs stay still) */
+/* No hover animation on Cluster tab cards (removed per customer request):
+   reset the generic .glass-card:hover shadow/border so cards stay still */
 #view-cluster .glass-card:hover {
-    transform: translateY(-4px);
+    transform: none;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.3);
+    border-color: var(--border-color);
 }
 
 /* Glowing status colors */

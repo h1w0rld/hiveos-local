@@ -2220,6 +2220,9 @@ async function loadAccessList() {
         const data = await response.json();
         if (response.ok && data.success) {
             clusterData = data;
+            // Fresh data -> dots back to gray "not checked" until re-tested
+            accessTestResults = {};
+            jumpTestResults = {};
             document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
             renderAccesses();
         }
@@ -2381,6 +2384,8 @@ window.testAccess = async function(rigId, accessId, btn) {
     const access = rig ? rig.accesses.find(a => a.id === accessId) : null;
     if (!access) return;
     if (btn) btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    const dot = document.getElementById('acc-dot_' + accessId);
+    if (dot) { dot.className = 'conn-dot conn-dot-warn'; dot.title = 'Checking...'; }
     try {
         const response = await fetch('/api/cluster/access/test', {
             method: 'POST',
@@ -2404,6 +2409,8 @@ window.testJump = async function(jumpId, btn) {
     const jump = ((clusterData && clusterData.jump_hosts) || []).find(j => j.id === jumpId);
     if (!jump) return;
     if (btn) btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    const dot = document.getElementById('jump-dot_' + jumpId);
+    if (dot) { dot.className = 'conn-dot conn-dot-warn'; dot.title = 'Checking...'; }
     try {
         const response = await fetch('/api/cluster/jump/test', {
             method: 'POST',
