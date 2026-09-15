@@ -876,7 +876,12 @@ def write_shell_config(filepath, config):
         try:
             with open(filepath, 'w') as f:
                 for k, v in config.items():
-                    f.write(f'{k}="{v}"\n')
+                    # HiveOS writes META-like JSON values in single quotes; nested
+                    # double quotes would corrupt the shell-style file for hive's parser
+                    if isinstance(v, str) and '"' in v:
+                        f.write(f"{k}='{v}'\n")
+                    else:
+                        f.write(f'{k}="{v}"\n')
             return True
         except Exception as e:
             logging.error(f"Error writing config file {filepath}: {e}")
