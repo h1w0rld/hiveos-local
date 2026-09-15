@@ -1514,10 +1514,14 @@ def get_overclocks_formatted():
     
     return {
         "nvidia": {
-            "core": nv_data.get("CORE", "").split(),
+            # HiveOS nvidia-oc.conf keys: CLOCK (offset) / LCLOCK (locked),
+            # MEM (offset) / LMEM (locked), PLIMIT, FAN
+            "core": nv_data.get("CLOCK", nv_data.get("CORE", "")).split(),
             "mem": nv_data.get("MEM", "").split(),
-            "pl": nv_data.get("PL", "").split(),
-            "fan": nv_data.get("FAN", "").split()
+            "pl": nv_data.get("PLIMIT", nv_data.get("PL", "")).split(),
+            "fan": nv_data.get("FAN", "").split(),
+            "lcore": nv_data.get("LCLOCK", "").split(),
+            "lmem": nv_data.get("LMEM", "").split()
         },
         "amd": {
             "core": amd_data.get("CORE", "").split(),
@@ -1727,33 +1731,48 @@ def save_overclock():
         filepath = NVIDIA_OC_CONF
         config = parse_shell_config(filepath)
         
-        core = config.get("CORE", "").split()
+        # Real HiveOS nvidia-oc.conf keys (the nvidia-oc script reads CLOCK/PLIMIT,
+        # not the legacy CORE/PL our older versions used to write)
+        clock = (config.get("CLOCK") if "CLOCK" in config else config.get("CORE", "")).split()
         mem = config.get("MEM", "").split()
-        pl = config.get("PL", "").split()
+        plimit = (config.get("PLIMIT") if "PLIMIT" in config else config.get("PL", "")).split()
         fan = config.get("FAN", "").split()
+        lclock = config.get("LCLOCK", "").split()
+        lmem = config.get("LMEM", "").split()
         
         max_idx = max(3, gpu_index)
-        core += ["0"] * (max_idx + 1 - len(core))
+        clock += ["0"] * (max_idx + 1 - len(clock))
         mem += ["0"] * (max_idx + 1 - len(mem))
-        pl += ["0"] * (max_idx + 1 - len(pl))
+        plimit += ["0"] * (max_idx + 1 - len(plimit))
         fan += ["0"] * (max_idx + 1 - len(fan))
+        lclock += [""] * (max_idx + 1 - len(lclock))
+        lmem += [""] * (max_idx + 1 - len(lmem))
         
         if "core" in data:
-            core[gpu_index] = str(data["core"])
+            clock[gpu_index] = str(data["core"])
         if "mem" in data:
             mem[gpu_index] = str(data["mem"])
         if "pl" in data:
-            pl[gpu_index] = str(data["pl"])
+            plimit[gpu_index] = str(data["pl"])
         if "fan" in data:
             fan[gpu_index] = str(data["fan"])
+        # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM)
+        if "lcore" in data:
+            lclock[gpu_index] = str(data["lcore"]).strip()
+        if "lmem" in data:
+            lmem[gpu_index] = str(data["lmem"]).strip()
             
-        config["CORE"] = " ".join(core)
+        config.pop("CORE", None)  # legacy key written by older versions
+        config.pop("PL", None)
+        config["CLOCK"] = " ".join(clock)
         config["MEM"] = " ".join(mem)
-        config["PL"] = " ".join(pl)
+        config["PLIMIT"] = " ".join(plimit)
         config["FAN"] = " ".join(fan)
+        config["LCLOCK"] = " ".join(lclock)
+        config["LMEM"] = " ".join(lmem)
         
         write_shell_config(filepath, config)
-        logging.info(f"NVIDIA GPU {gpu_index} parameters updated: Core={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}")
+        logging.info(f"NVIDIA GPU {gpu_index} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}")
         
         stdout, stderr, code = run_command("sudo /hive/sbin/nvidia-oc")
         if code != 0:
@@ -2206,12 +2225,15 @@ def get_diagnostics():
         "gpu_logs": gpu_logs
     })
 
-def _apply_flight_sheet(coin, wallet, pool, miner):
-    """Write COIN/WAL/POOL_URL into wallet.conf and MINER into rig.conf, restart miner."""
+def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
+    """Write COIN/WAL/POOL_URL into wallet.conf and MINER into rig.conf, restart miner.
+    For custom miners (miner == 'custom') the HiveOS-style CUSTOM_* block is written
+    exactly like HiveOS flight sheets do it."""
     coin = str(coin or "").strip()
     wallet = str(wallet or "").strip()
     pool = str(pool or "").strip()
     miner = str(miner or "none").strip().lower()
+    extra = extra or {}
 
     if not re.match(r'^[A-Za-z0-9_\-\s]+$', coin):
         return False, "Invalid Coin parameter. Use alphanumeric characters only."
@@ -2223,7 +2245,7 @@ def _apply_flight_sheet(coin, wallet, pool, miner):
     whitelisted_miners = [
         "lolminer", "xmrig", "gminer", "rigel", "bzminer",
         "teamredminer", "hiveon", "srbminer", "wildrig-multi",
-        "bminer", "ccminer", "t-rex", "none"
+        "bminer", "ccminer", "t-rex", "none", "custom"
     ]
     if miner not in whitelisted_miners:
         return False, "Unsupported miner program choice."
@@ -2236,6 +2258,52 @@ def _apply_flight_sheet(coin, wallet, pool, miner):
             shutil.copy2(RIG_CONF_PATH, RIG_CONF_PATH + ".bak")
     except Exception as e:
         logging.error(f"Backup configurations failed: {e}")
+
+    if miner == "custom":
+        miner_alt = str(extra.get("miner_alt", "")).strip().lower() or "custom_miner"
+        install_url = str(extra.get("install_url", "")).strip()
+        algo = str(extra.get("algo", "")).strip().lower()
+        user_config = str(extra.get("user_config", "")).strip()
+        fs_name = str(extra.get("name", "")).strip()
+        if miner_alt and not re.match(r'^[a-z0-9_\-]+$', miner_alt):
+            return False, "Invalid custom miner package name."
+        if install_url and not re.match(r'^https://[A-Za-z0-9\.\-/_]+$', install_url):
+            return False, "Invalid miner install URL."
+        if algo and not re.match(r'^[a-z0-9_\-]+$', algo):
+            return False, "Invalid hash algorithm name."
+        if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
+            return False, "Invalid miner configuration arguments."
+        if not wallet:
+            return False, "Wallet address is required for a custom miner flight sheet."
+
+        worker_name = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+        wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+        wallet_conf.clear()
+        if fs_name:
+            wallet_conf["FS_NAME"] = fs_name
+        wallet_conf["CUSTOM_MINER"] = miner_alt
+        if install_url:
+            wallet_conf["CUSTOM_INSTALL_URL"] = install_url
+        if algo:
+            wallet_conf["CUSTOM_ALGO"] = algo
+        wallet_conf["CUSTOM_TEMPLATE"] = wallet + "." + worker_name
+        wallet_conf["CUSTOM_URL"] = pool
+        wallet_conf["CUSTOM_PASS"] = "x"
+        if user_config:
+            wallet_conf["CUSTOM_USER_CONFIG"] = user_config
+        if coin:
+            wallet_conf["META"] = json.dumps({"custom": {"coin": coin}})
+        if not write_shell_config(WALLET_CONF_PATH, wallet_conf):
+            return False, "Failed to write wallet.conf"
+
+        rig_conf = parse_shell_config(RIG_CONF_PATH)
+        rig_conf["MINER"] = "custom"
+        if not write_shell_config(RIG_CONF_PATH, rig_conf):
+            return False, "Failed to write rig.conf"
+
+        logging.info(f"Custom flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Package={miner_alt})")
+        run_command(MINER_RESTART_CMD)
+        return True, "Flight sheet applied successfully! Miner daemon restarting..."
 
     wallet_conf = parse_shell_config(WALLET_CONF_PATH)
     wallet_conf["COIN"] = coin
@@ -2252,6 +2320,61 @@ def _apply_flight_sheet(coin, wallet, pool, miner):
     logging.info(f"Flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
     run_command(MINER_RESTART_CMD)
     return True, "Flight sheet applied successfully! Miner daemon restarting..."
+
+def _read_active_mining_config():
+    """Summarize the mining setup currently applied on this rig (wallet.conf / rig.conf).
+
+    Rigs usually mine via a HiveOS-style config (custom miner, rigel, ...) rather
+    than the local wallet library, so this synthesizes the wallet/flight sheet
+    view of the live configuration for the UI."""
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+    miner = (rig_conf.get("MINER") or "none").strip().lower()
+
+    name, coin, wallet, pool = "", "", "", ""
+    # Flight sheet name from the header comment of wallet.conf (or FS_NAME key we write)
+    try:
+        with open(WALLET_CONF_PATH, 'r') as f:
+            for line in f:
+                m = re.match(r'^#\s*#\s*#\s*FLIGHT SHEET\s+"([^"]+)"', line.strip())
+                if m:
+                    name = m.group(1)
+                    break
+    except Exception:
+        pass
+    if not name:
+        name = (wallet_conf.get("FS_NAME") or "").strip()
+
+    coin = (wallet_conf.get("COIN") or "").strip()
+    if not coin:
+        try:
+            meta = json.loads(wallet_conf.get("META", "") or "{}")
+            if isinstance(meta, dict):
+                for section in (miner, "custom", "rigel", "gminer", "lolminer", "srbminer",
+                                "bzminer", "trex", "wildrig", "teamredminer", "xmrig"):
+                    sec = meta.get(section)
+                    if isinstance(sec, dict) and sec.get("coin"):
+                        coin = str(sec["coin"]).upper()
+                        break
+        except Exception:
+            pass
+
+    wallet = (wallet_conf.get("WAL") or "").strip()
+    pool = (wallet_conf.get("POOL_URL") or "").strip()
+    if not wallet or not pool:
+        for k, v in wallet_conf.items():
+            ku = k.upper()
+            if ku.endswith("_TEMPLATE") and not wallet:
+                wallet = str(v).strip()
+            elif ku.endswith("_URL") and "INSTALL" not in ku and not pool:
+                pool = str(v).strip()
+    return {
+        "name": name or "Current mining config",
+        "coin": coin,
+        "wallet": wallet,
+        "pool": pool,
+        "miner": miner,
+    }
 
 def _load_json_store(path, default):
     try:
@@ -2301,21 +2424,40 @@ def _validate_fsheet_entry(entry):
     wallet = str(entry.get("wallet", "")).strip()
     pool = str(entry.get("pool", "")).strip()
     miner = str(entry.get("miner", "none")).strip().lower()
+    if not coin:
+        return None, "Coin is required."
+    if not pool:
+        return None, "Pool URL is required."
     if not re.match(r'^[A-Za-z0-9_\-\s]*$', coin):
         return None, "Invalid coin symbol."
     if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@\:]*$', wallet):
         return None, "Invalid wallet address."
     if not re.match(r'^[a-zA-Z0-9\.\-\:\/]*$', pool):
         return None, "Invalid pool URL format."
+    # Optional HiveOS-style fields for custom miners
+    miner_alt = str(entry.get("miner_alt", "")).strip().lower()
+    install_url = str(entry.get("install_url", "")).strip()
+    algo = str(entry.get("algo", "")).strip().lower()
+    user_config = str(entry.get("user_config", "")).strip()
+    if miner_alt and not re.match(r'^[a-z0-9_\-]+$', miner_alt):
+        return None, "Invalid custom miner package name."
+    if install_url and not re.match(r'^https://[A-Za-z0-9\.\-/_]+$', install_url):
+        return None, "Invalid miner install URL."
+    if algo and not re.match(r'^[a-z0-9_\-]+$', algo):
+        return None, "Invalid hash algorithm name."
+    if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
+        return None, "Invalid miner configuration arguments."
     clean = {
         "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
         "name": name, "coin": coin, "wallet": wallet, "pool": pool, "miner": miner,
+        "miner_alt": miner_alt, "install_url": install_url, "algo": algo, "user_config": user_config,
     }
     return clean, ""
 
 @app.route('/api/wallets', methods=['GET'])
 def list_wallets():
-    return jsonify({"success": True, "wallets": _load_json_store(WALLETS_PATH, [])})
+    return jsonify({"success": True, "wallets": _load_json_store(WALLETS_PATH, []),
+                    "rig_config": _read_active_mining_config()})
 
 @app.route('/api/wallets/save', methods=['POST'])
 def save_wallet():
@@ -2360,7 +2502,10 @@ def list_fsheets():
             "wallet": wallet_conf.get("WAL", ""),
             "pool": wallet_conf.get("POOL_URL", ""),
             "miner": rig_conf.get("MINER", "none")
-        }
+        },
+        # Live mining setup parsed from the rig's own configs (works even when
+        # the wallet/flight sheet libraries are empty)
+        "rig_config": _read_active_mining_config()
     })
 
 @app.route('/api/fsheets/save', methods=['POST'])
@@ -2408,7 +2553,10 @@ def apply_fsheet():
     w = next((x for x in wallets if x.get("id") == wallet), None)
     if w:
         wallet = w.get("address", "")
-    ok, msg = _apply_flight_sheet(fsheet.get("coin"), wallet, fsheet.get("pool"), fsheet.get("miner"))
+    ok, msg = _apply_flight_sheet(fsheet.get("coin"), wallet, fsheet.get("pool"), fsheet.get("miner"),
+                                  extra={"name": fsheet.get("name", ""), "miner_alt": fsheet.get("miner_alt", ""),
+                                         "install_url": fsheet.get("install_url", ""), "algo": fsheet.get("algo", ""),
+                                         "user_config": fsheet.get("user_config", "")})
     return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/flightsheet', methods=['GET', 'POST'])
@@ -2439,9 +2587,11 @@ def reset_overclock():
     backup_configs()
     
     nv_stock = {
-        "CORE": "",
+        "CLOCK": "",
+        "LCLOCK": "",
         "MEM": "",
-        "PL": "",
+        "LMEM": "",
+        "PLIMIT": "",
         "FAN": ""
     }
     amd_stock = {

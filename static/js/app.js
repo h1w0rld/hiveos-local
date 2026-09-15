@@ -324,6 +324,12 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('showGpusBtn').addEventListener('click', () => switchHardwareTab(true));
     document.getElementById('showIgpusBtn').addEventListener('click', () => switchHardwareTab(false));
 
+    // Dashboard section tabs (GPUs / Wallets / Flight Sheets)
+    document.getElementById('dashTabGpusBtn').addEventListener('click', () => showDashTab('gpus'));
+    document.getElementById('dashTabWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
+    document.getElementById('dashTabFsheetsBtn').addEventListener('click', () => showDashTab('fsheets'));
+    document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
+
     // CPU mining settings modal save handler
     document.getElementById('cpuSettingsSaveBtn').addEventListener('click', async function() {
         const enable = document.getElementById('cpuHugepagesSelect').value === 'enable';
@@ -525,6 +531,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('saveFsheetForm').addEventListener('submit', async function(e) {
         e.preventDefault();
         const walletVal = document.getElementById('fsWalletSelect').value;
+        const extra = window._editingFsheetExtra || {};
         const payload = {
             fsheet: {
                 id: window._editingFsheetId || '',
@@ -532,7 +539,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 coin: document.getElementById('fsCoin').value.trim(),
                 wallet: walletVal === '__custom__' ? document.getElementById('fsWalletCustom').value.trim() : walletVal,
                 pool: document.getElementById('fsPool').value.trim(),
-                miner: document.getElementById('fsMinerSelect').value
+                miner: document.getElementById('fsMinerSelect').value,
+                miner_alt: extra.miner_alt || '',
+                install_url: extra.install_url || '',
+                algo: extra.algo || '',
+                user_config: extra.user_config || ''
             }
         };
         const submitBtn = this.querySelector('button[type="submit"]');
@@ -549,6 +560,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (data.success) {
                 this.reset();
                 window._editingFsheetId = null;
+                window._editingFsheetExtra = {};
                 document.getElementById('fsWalletCustom').classList.add('d-none');
                 populateFsheetMiners();
                 loadFsheets();
@@ -565,7 +577,6 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('fsWalletCustom').classList.toggle('d-none', this.value !== '__custom__');
     });
 
-    document.getElementById('manageWalletsBtn').addEventListener('click', openWalletModal);
     document.getElementById('saveWalletForm').addEventListener('submit', addWallet);
     document.getElementById('importFsheetsBtn').addEventListener('click', () => {
         document.getElementById('fsheetImportText').value = '';
@@ -2670,7 +2681,7 @@ window.deleteJump = async function(jumpId) {
 // ---------------- Flight sheets & wallets ----------------
 
 const MINER_OPTIONS = ["lolminer", "xmrig", "gminer", "rigel", "bzminer", "teamredminer",
-    "hiveon", "srbminer", "wildrig-multi", "bminer", "ccminer", "t-rex", "none"];
+    "hiveon", "srbminer", "wildrig-multi", "bminer", "ccminer", "t-rex", "custom", "none"];
 
 function populateFsheetMiners() {
     const sel = document.getElementById('fsMinerSelect');
@@ -2693,15 +2704,17 @@ async function loadFsheets() {
         const response = await apiFetch('/api/fsheets');
         const data = await response.json();
         if (!data.success) return;
-        renderFsheets(data.fsheets || [], data.wallets || [], data.active || {});
+        window._rigConfig = data.rig_config || {};
+        renderFsheets(data.fsheets || [], data.wallets || [], data.active || {}, data.rig_config || {});
     } catch (e) {
         console.error('Failed to load flight sheets:', e);
     }
 }
 
-function renderFsheets(fsheets, wallets, active) {
+function renderFsheets(fsheets, wallets, active, rigConfig) {
     populateWalletSelect(wallets);
     window._fsWallets = wallets;
+    rigConfig = rigConfig || {};
     // Prefill the quick-save form once with the active mining config
     if (!window._fsFormPrefilled) {
         window._fsFormPrefilled = true;
@@ -2720,31 +2733,56 @@ function renderFsheets(fsheets, wallets, active) {
         document.getElementById('fsMinerSelect').value = active.miner || 'none';
     }
     const container = document.getElementById('fsheetsContainer');
-    if (!fsheets.length) {
-        container.innerHTML = '<div class="text-center text-muted small py-3">No flight sheets saved yet. Save one below or import.</div>';
-        return;
-    }
     const walletLabel = (ref) => {
         const w = wallets.find(x => x.id === ref);
         if (w) return w.name;
         return ref ? ref.slice(0, 14) + (ref.length > 14 ? '…' : '') : '—';
     };
-    container.innerHTML = fsheets.map(f => {
+    // Resolve a stored fsheet's wallet reference to an address for the live-config match
+    const walletAddressOf = (f) => {
+        const w = wallets.find(x => x.id === f.wallet);
+        return w ? w.address : f.wallet;
+    };
+    // The mining setup currently running on the rig (from its own configs) —
+    // shown as a live ACTIVE entry even when the library stores are empty
+    let rows = fsheets.map(f => {
         const isWalletRef = wallets.some(x => x.id === f.wallet);
         const isActive = active.coin === f.coin && (isWalletRef || (active.wallet === f.wallet));
-        return '<div class="d-flex justify-content-between align-items-center border border-secondary-subtle rounded px-2 py-1 mb-1 fsheet-row' + (isActive ? ' border-warning-subtle' : '') + '">' +
+        return { f: f, isActive: isActive };
+    });
+    const rcHasContent = rigConfig.wallet || rigConfig.pool;
+    const liveMatchesStored = rcHasContent && fsheets.some(f =>
+        (f.coin || '').toLowerCase() === (rigConfig.coin || '').toLowerCase() &&
+        (f.miner || '').toLowerCase() === (rigConfig.miner || '').toLowerCase() &&
+        (f.pool || '') === (rigConfig.pool || ''));
+    if (rcHasContent && !liveMatchesStored) {
+        rows.unshift({ f: {
+            id: '__rig__', name: rigConfig.name || 'Current mining config',
+            coin: rigConfig.coin || '?', wallet: rigConfig.wallet || '',
+            pool: rigConfig.pool || '—', miner: rigConfig.miner || 'none'
+        }, isActive: true, live: true });
+    }
+    if (!rows.length) {
+        container.innerHTML = '<div class="text-center text-muted small py-3">No flight sheets saved yet. Save one below or import.</div>';
+        return;
+    }
+    container.innerHTML = rows.map(({ f, isActive, live }) =>
+        '<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1 mb-1 fsheet-row' +
+            (isActive ? ' border-warning-subtle' : ' border-secondary-subtle') + '">' +
             '<div class="min-w-0">' +
                 '<span class="fw-semibold small">' + escapeHtml(f.name) + '</span>' +
                 (isActive ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
-                '<div class="small text-muted text-truncate">' + escapeHtml(f.coin || '?') + ' • ' + escapeHtml(walletLabel(f.wallet)) + ' • ' + escapeHtml(f.pool || '—') + ' • ' + escapeHtml(f.miner) + '</div>' +
+                '<div class="small text-muted text-truncate">' + escapeHtml(f.coin || '?') + ' • ' +
+                    escapeHtml(live ? (f.wallet || '—') : walletLabel(f.wallet)) + ' • ' + escapeHtml(f.pool || '—') + ' • ' + escapeHtml(f.miner) +
+                    (live ? ' (running)' : '') + '</div>' +
             '</div>' +
+            (live ? '' :
             '<div class="d-flex gap-1 flex-shrink-0">' +
                 '<button class="btn btn-xs btn-outline-warning py-0 px-2" title="Apply" onclick="applyFsheet(\'' + f.id + '\', this)"><i class="bi bi-lightning-charge-fill"></i></button>' +
                 '<button class="btn btn-xs btn-outline-primary py-0 px-2" title="Edit" onclick="editFsheet(\'' + f.id + '\')"><i class="bi bi-pencil"></i></button>' +
                 '<button class="btn btn-xs btn-outline-danger py-0 px-2" title="Delete" onclick="deleteFsheet(\'' + f.id + '\')"><i class="bi bi-trash"></i></button>' +
-            '</div>' +
-        '</div>';
-    }).join('');
+            '</div>') +
+        '</div>').join('');
 }
 
 window.applyFsheet = async function(fid, btn) {
@@ -2786,7 +2824,12 @@ window.editFsheet = function(fid) {
         }
         document.getElementById('fsPool').value = f.pool;
         populateFsheetMiners();
-        document.getElementById('fsMinerSelect').value = f.miner;
+        document.getElementById('fsMinerSelect').value = f.miner || 'none';
+        // Preserve advanced (custom miner) fields while the form edits the basic ones
+        window._editingFsheetExtra = {
+            miner_alt: f.miner_alt || '', install_url: f.install_url || '',
+            algo: f.algo || '', user_config: f.user_config || ''
+        };
         // Reuse the save form; saving updates by name+id when editing flag set
         window._editingFsheetId = fid;
         const form = document.getElementById('saveFsheetForm');
@@ -2812,17 +2855,54 @@ window.deleteFsheet = async function(fid) {
     }
 };
 
+// Normalize an imported flight sheet entry (ours, or a HiveOS export with
+// nested wallet/pool objects and an items[] array)
+function normalizeFsheetItems(parsed) {
+    const roots = Array.isArray(parsed) ? parsed : [parsed];
+    const out = [];
+    for (const root of roots) {
+        if (!root || typeof root !== 'object') continue;
+        if (Array.isArray(root.items)) {
+            // HiveOS export: {name, items:[{coin, pool_urls, wal_id, miner, miner_alt, miner_config:{...}}]}
+            for (const it of root.items) {
+                const mc = it.miner_config || {};
+                out.push({
+                    id: '', name: it.name || root.name || '',
+                    coin: String(it.coin || ''), wallet: '',
+                    pool: String(mc.url || (it.pool_urls && it.pool_urls[0]) || ''),
+                    miner: String(it.miner || 'none'),
+                    miner_alt: String(it.miner_alt || ''),
+                    install_url: String(mc.install_url || ''),
+                    algo: String(mc.algo || ''),
+                    user_config: String(mc.user_config || '')
+                });
+            }
+        } else {
+            let wallet = root.wallet, pool = root.pool;
+            if (wallet && typeof wallet === 'object') wallet = wallet.address || wallet.url || '';
+            if (pool && typeof pool === 'object') pool = pool.url || (pool.host ? pool.host + ':' + (pool.port || '') : '');
+            out.push({
+                id: root.id || '', name: root.name || '', coin: String(root.coin || ''),
+                wallet: String(wallet || ''), pool: String(pool || ''), miner: String(root.miner || 'none'),
+                miner_alt: String(root.miner_alt || ''), install_url: String(root.install_url || ''),
+                algo: String(root.algo || ''), user_config: String(root.user_config || '')
+            });
+        }
+    }
+    return out;
+}
+
 async function importFsheets() {
     const text = document.getElementById('fsheetImportText').value.trim();
     if (!text) { showToast('Nothing to import.', false); return; }
     let items;
     try {
-        const parsed = JSON.parse(text);
-        items = Array.isArray(parsed) ? parsed : [parsed];
+        items = normalizeFsheetItems(JSON.parse(text));
     } catch (e) {
         showToast('Invalid JSON.', false);
         return;
     }
+    if (!items.length) { showToast('Nothing to import.', false); return; }
     let ok = 0;
     for (const item of items) {
         try {
@@ -2840,9 +2920,31 @@ async function importFsheets() {
     loadFsheets();
 }
 
+// Switch the dashboard section tabs (GPUs / Wallets / Flight Sheets)
+function showDashTab(tab) {
+    const isGpus = tab === 'gpus';
+    const isWallets = tab === 'wallets';
+    const isFsheets = tab === 'fsheets';
+    [['dashTabGpusBtn', isGpus], ['dashTabWalletsBtn', isWallets], ['dashTabFsheetsBtn', isFsheets]].forEach(([id, on]) => {
+        const b = document.getElementById(id);
+        b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-outline-primary', !on);
+        b.classList.toggle('active', on);
+    });
+    // GPUs tab shows the gpu or igpu grid per the hardware sub-switch
+    document.getElementById('gpuContainer').classList.toggle('d-none', !(isGpus && activeHardwareTab === 'gpus'));
+    document.getElementById('igpuContainer').classList.toggle('d-none', !(isGpus && activeHardwareTab !== 'gpus'));
+    document.getElementById('walletsTabContainer').classList.toggle('d-none', !isWallets);
+    document.getElementById('fsheetsTabContainer').classList.toggle('d-none', !isFsheets);
+    // Stats refresh + hardware sub-switch only make sense on the GPUs tab
+    document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
+    if (isWallets) renderWallets();
+    if (isFsheets) loadFsheets();
+}
+
 function openWalletModal() {
     renderWallets();
-    new bootstrap.Modal(document.getElementById('walletModal')).show();
+    showDashTab('wallets');
 }
 
 async function renderWallets() {
@@ -2850,20 +2952,28 @@ async function renderWallets() {
         const response = await apiFetch('/api/wallets');
         const data = await response.json();
         const list = data.wallets || [];
+        const rc = data.rig_config || {};
         window._fsWallets = list;
         populateWalletSelect(list);
         const container = document.getElementById('walletsContainer');
-        if (!list.length) {
+        // Live wallet currently used by the rig's mining config (may not exist in the library)
+        const liveWallet = (rc.wallet && !list.some(w => w.address === rc.wallet))
+            ? [{ id: '__rig__', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true }]
+            : [];
+        const rows = liveWallet.concat(list);
+        if (!rows.length) {
             container.innerHTML = '<div class="text-center text-muted small py-3">No wallets saved yet.</div>';
             return;
         }
-        container.innerHTML = list.map(w =>
-            '<div class="d-flex justify-content-between align-items-center border border-secondary-subtle rounded px-2 py-1 mb-1">' +
+        container.innerHTML = rows.map(w =>
+            '<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1 mb-1 ' +
+                (w.live ? 'border-warning-subtle' : 'border-secondary-subtle') + '">' +
                 '<div class="min-w-0">' +
                     '<span class="fw-semibold small">' + escapeHtml(w.name) + '</span>' +
+                    (w.live ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
                     '<div class="small text-muted font-monospace text-truncate">' + escapeHtml(w.address) + '</div>' +
                 '</div>' +
-                '<button class="btn btn-xs btn-outline-danger py-0 px-2 flex-shrink-0" title="Delete" onclick="deleteWallet(\'' + w.id + '\')"><i class="bi bi-trash"></i></button>' +
+                (w.live ? '' : '<button class="btn btn-xs btn-outline-danger py-0 px-2 flex-shrink-0" title="Delete" onclick="deleteWallet(\'' + w.id + '\')"><i class="bi bi-trash"></i></button>') +
             '</div>').join('');
     } catch (e) {
         showToast('Failed to load wallets.', false);
