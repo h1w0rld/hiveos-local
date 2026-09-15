@@ -454,6 +454,118 @@ body {
     background: rgba(255, 255, 255, 0.03);
 }
 
+/* ---------------- Wallets & Flight Sheets (cloud-style) ---------------- */
+
+/* Coin letter avatar (deterministic hue per ticker) */
+.coin-av {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: hsl(var(--h, 210), 80%, 78%);
+    background: hsl(var(--h, 210), 45%, 22%);
+    border: 1px solid hsl(var(--h, 210), 60%, 35%);
+}
+
+/* Miner platform badges N/A/C */
+.fs-badge {
+    display: inline-block;
+    font-size: 0.62rem;
+    font-weight: 800;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    margin-left: 3px;
+}
+.fs-badge.n { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
+.fs-badge.a { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+.fs-badge.c { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+
+/* Coin filter chips */
+.chip-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--bs-secondary-color, #adb5bd);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.chip-btn:hover { border-color: rgba(255, 255, 255, 0.3); color: #fff; }
+.chip-btn.active {
+    border-color: #f59e0b;
+    color: #fbbf24;
+    background: var(--warning-glow);
+}
+.chip-btn .coin-av { width: 16px; height: 16px; font-size: 0.5rem; }
+.chip-count { opacity: 0.65; font-weight: 500; }
+
+/* Wallet table */
+.wallet-table .table { --bs-table-bg: transparent; }
+.wallet-table td, .wallet-table th { border-color: rgba(255, 255, 255, 0.06); }
+.wallet-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+/* Flight sheet builder */
+.fs-builder { background: rgba(255, 255, 255, 0.02); }
+.fs-item-row { position: relative; }
+.fs-item-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+.fs-item-remove {
+    position: absolute;
+    top: -7px;
+    right: -5px;
+    z-index: 2;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 50%;
+    line-height: 1;
+    font-size: 0.7rem;
+}
+
+/* Cloud-style fsheet list rows */
+.fsheet-row2 {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 7px 10px;
+    margin-bottom: 6px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.fsheet-row2:hover { background: rgba(255, 255, 255, 0.03); border-color: rgba(255, 255, 255, 0.16); }
+.fsheet-row2.is-active { border-color: rgba(245, 158, 11, 0.45); background: var(--warning-glow); }
+.fsheet-row2 .fs-name { font-weight: 600; font-size: 0.86rem; }
+.fsheet-row2 .fs-sub { font-size: 0.75rem; color: #8b949e; }
+.fs-star { background: none; border: none; padding: 0 2px; color: #6c757d; font-size: 0.95rem; }
+.fs-star.on { color: #fbbf24; }
+.fs-star:hover { color: #fbbf24; }
+.fs-kebab { border: none; color: #adb5bd; padding: 0 6px; }
+.fs-kebab:hover { color: #fff; }
+
+/* Dropdowns inside the scrollable fsheet list need visible overflow while open */
+.fs-scroll { overflow-y: auto; max-height: 380px; }
+.fs-scroll.dd-open { overflow: visible; }
+
 /* Fan slider rows */
 .fan-slider {
     height: 1rem;

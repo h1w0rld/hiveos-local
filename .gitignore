@@ -12,3 +12,7 @@ hiveos-local.log
 
 # local handoff notes
 HANDOFF.md
+
+# hiveos account credentials (never commit)
+.hive_credentials
+.hive_token

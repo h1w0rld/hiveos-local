@@ -2247,12 +2247,9 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
     if not re.match(r'^[a-zA-Z0-9\.\-\:\/]+$', pool):
         return False, "Invalid Pool URL format."
 
-    whitelisted_miners = [
-        "lolminer", "xmrig", "gminer", "rigel", "bzminer",
-        "teamredminer", "hiveon", "srbminer", "wildrig-multi",
-        "bminer", "ccminer", "t-rex", "none", "custom"
-    ]
-    if miner not in whitelisted_miners:
+    # Miner ids follow the HiveOS package naming (catalog provides the list);
+    # the strict format check blocks injection into rig.conf
+    if miner != "none" and not re.match(r'^[a-z0-9_\-]{1,32}$', miner):
         return False, "Unsupported miner program choice."
 
     # Backup files first
@@ -2412,41 +2409,47 @@ FSHEETS_PATH = os.path.join(HIVE_CONFIG_DIR, "flightsheets.json")
 def _validate_wallet_entry(entry):
     name = str(entry.get("name", "")).strip()
     address = str(entry.get("address", "")).strip()
+    coin = str(entry.get("coin", "")).strip().upper()
     if not name or len(name) > 60:
         return None, "Wallet name must be 1-60 characters."
     if not address or len(address) > 200:
         return None, "Wallet address must be 1-200 characters."
     if not re.match(r'^[A-Za-z0-9_\-\.\:\@\/]+$', address):
         return None, "Invalid wallet address format."
+    if coin and not re.match(r'^[A-Za-z0-9_+\-]{1,24}$', coin):
+        return None, "Invalid coin symbol."
     clean = {
         "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "coin": coin,
         "name": name, "address": address,
     }
     return clean, ""
 
-def _validate_fsheet_entry(entry):
-    name = str(entry.get("name", "")).strip()
-    if not name or len(name) > 60:
-        return None, "Flight sheet name must be 1-60 characters."
-    coin = str(entry.get("coin", "")).strip()
-    wallet = str(entry.get("wallet", "")).strip()
-    pool = str(entry.get("pool", "")).strip()
-    miner = str(entry.get("miner", "none")).strip().lower()
+def _validate_fsheet_item(item):
+    """Validate one miner item of a flight sheet (HiveOS-style items[])."""
+    coin = str(item.get("coin", "")).strip()
+    wallet = str(item.get("wallet", "")).strip()
+    pool = str(item.get("pool", "")).strip()
+    miner = str(item.get("miner", "none")).strip().lower()
     if not coin:
-        return None, "Coin is required."
+        return None, "Coin is required in every miner item."
     if not pool:
-        return None, "Pool URL is required."
-    if not re.match(r'^[A-Za-z0-9_\-\s]*$', coin):
+        return None, "Pool URL is required in every miner item."
+    if not re.match(r'^[A-Za-z0-9_+\-\s]*$', coin):
         return None, "Invalid coin symbol."
-    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@\:]*$', wallet):
+    if not re.match(r'^[A-Za-z0-9_\-\s\.\/\@\:\%]*$', wallet):
         return None, "Invalid wallet address."
     if not re.match(r'^[a-zA-Z0-9\.\-\:\/]*$', pool):
         return None, "Invalid pool URL format."
+    # Any HiveOS-style miner id is accepted (the catalog provides the list);
+    # the strict format check blocks injection into rig.conf
+    if miner != "none" and not re.match(r'^[a-z0-9_\-]{1,32}$', miner):
+        return None, "Invalid miner program choice."
     # Optional HiveOS-style fields for custom miners
-    miner_alt = str(entry.get("miner_alt", "")).strip().lower()
-    install_url = str(entry.get("install_url", "")).strip()
-    algo = str(entry.get("algo", "")).strip().lower()
-    user_config = str(entry.get("user_config", "")).strip()
+    miner_alt = str(item.get("miner_alt", "")).strip().lower()
+    install_url = str(item.get("install_url", "")).strip()
+    algo = str(item.get("algo", "")).strip().lower()
+    user_config = str(item.get("user_config", "")).strip()
     if miner_alt and not re.match(r'^[a-z0-9_\-]+$', miner_alt):
         return None, "Invalid custom miner package name."
     if install_url and not re.match(r'^https://[A-Za-z0-9\.\-/_]+$', install_url):
@@ -2455,16 +2458,127 @@ def _validate_fsheet_entry(entry):
         return None, "Invalid hash algorithm name."
     if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
         return None, "Invalid miner configuration arguments."
-    clean = {
-        "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
-        "name": name, "coin": coin, "wallet": wallet, "pool": pool, "miner": miner,
+    return {
+        "coin": coin, "wallet": wallet, "pool": pool, "miner": miner,
         "miner_alt": miner_alt, "install_url": install_url, "algo": algo, "user_config": user_config,
-    }
-    return clean, ""
+    }, ""
+
+FSHEET_ITEM_FIELDS = ["coin", "wallet", "pool", "miner", "miner_alt", "install_url", "algo", "user_config"]
+
+def _validate_fsheet_entry(entry):
+    """Validate a flight sheet: {id, name, coin, fav, items[]}.
+
+    Accepts legacy flat payloads ({coin, wallet, pool, miner, ...}) by wrapping
+    them into a single item, keeping the old UI/import paths working."""
+    name = str(entry.get("name", "")).strip()
+    if not name or len(name) > 60:
+        return None, "Flight sheet name must be 1-60 characters."
+    items_raw = entry.get("items")
+    if not isinstance(items_raw, list) or not items_raw:
+        items_raw = [{k: entry.get(k, "") for k in FSHEET_ITEM_FIELDS}]
+    if len(items_raw) > 5:
+        return None, "A flight sheet supports up to 5 miner items."
+    items = []
+    for raw in items_raw:
+        if not isinstance(raw, dict):
+            return None, "Invalid miner item."
+        clean, err = _validate_fsheet_item(raw)
+        if err:
+            return None, err
+        items.append(clean)
+    coin = str(entry.get("coin", "")).strip() or items[0]["coin"]
+    if coin and not re.match(r'^[A-Za-z0-9_+\-\s]{1,32}$', coin):
+        return None, "Invalid coin symbol."
+    return {
+        "id": str(entry.get("id", "")).strip() or uuid.uuid4().hex[:12],
+        "name": name, "coin": coin,
+        "fav": bool(entry.get("fav", False)),
+        "items": items,
+    }, ""
+
+def _load_wallets_store():
+    wallets = _load_json_store(WALLETS_PATH, [])
+    changed = False
+    for w in wallets:
+        if "coin" not in w:
+            w["coin"] = ""
+            changed = True
+    if changed:
+        _save_json_store(WALLETS_PATH, wallets)
+    return wallets
+
+def _load_fsheets_store():
+    """Load flight sheets and migrate legacy flat entries to items[] form."""
+    fsheets = _load_json_store(FSHEETS_PATH, [])
+    changed = False
+    for f in fsheets:
+        if not isinstance(f.get("items"), list) or not f["items"]:
+            f["items"] = [{k: f.get(k, "") for k in FSHEET_ITEM_FIELDS}]
+            changed = True
+        if "fav" not in f:
+            f["fav"] = False
+            changed = True
+        # Drop legacy flat copies (items[] is the single source of truth now)
+        for k in FSHEET_ITEM_FIELDS:
+            if k in f and k != "coin":
+                f.pop(k, None)
+                changed = True
+    if changed:
+        _save_json_store(FSHEETS_PATH, fsheets)
+    return fsheets
+
+def _miner_catalog():
+    """Bundled HiveOS miner catalog (static/data/hive-miners.json), cached."""
+    global _MINER_CATALOG_CACHE
+    if _MINER_CATALOG_CACHE is None:
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "data", "hive-miners.json")
+            with open(path, 'r') as f:
+                data = json.load(f)
+            _MINER_CATALOG_CACHE = {m["id"]: m for m in data.get("miners", []) if m.get("id")}
+        except Exception as e:
+            logging.error(f"Failed to load miner catalog: {e}")
+            _MINER_CATALOG_CACHE = {}
+    return _MINER_CATALOG_CACHE
+
+_MINER_CATALOG_CACHE = None
+
+def _rig_gpu_platforms():
+    """GPU vendor platforms physically present on this rig ('nvidia'/'amd')."""
+    brands = set()
+    try:
+        for g in get_gpu_stats().get("gpus", []):
+            b = str(g.get("brand") or "").strip().lower()
+            if b in ("nvidia", "amd"):
+                brands.add(b)
+    except Exception:
+        pass
+    return brands
+
+def _pick_apply_item(fsheet):
+    """Choose which miner item applies on this rig: prefer an item whose miner
+    supports a GPU vendor present on the rig (mixed NVIDIA/AMD rigs), else the
+    first item."""
+    items = [i for i in fsheet.get("items", []) if isinstance(i, dict)]
+    if len(items) <= 1:
+        return items[0] if items else {}
+    plats = _rig_gpu_platforms()
+    if plats:
+        catalog = _miner_catalog()
+        for it in items:
+            miner_id = it.get("miner", "")
+            info = catalog.get(miner_id)
+            # srbminer_custom-style ids inherit the base miner's platforms
+            if info is None and miner_id.endswith("_custom"):
+                info = catalog.get(miner_id[:-len("_custom")])
+            supported = {v for v in ("nvidia", "amd") if (info or {}).get(v)}
+            if supported & plats:
+                return it
+    return items[0]
 
 @app.route('/api/wallets', methods=['GET'])
 def list_wallets():
-    return jsonify({"success": True, "wallets": _load_json_store(WALLETS_PATH, []),
+    return jsonify({"success": True, "wallets": _load_wallets_store(),
                     "rig_config": _read_active_mining_config()})
 
 @app.route('/api/wallets/save', methods=['POST'])
@@ -2475,7 +2589,7 @@ def save_wallet():
     clean, err = _validate_wallet_entry(data.get("wallet") or {})
     if err:
         return jsonify({"success": False, "message": err}), 400
-    wallets = _load_json_store(WALLETS_PATH, [])
+    wallets = _load_wallets_store()
     wallets = [w for w in wallets if w.get("id") != clean["id"]]
     wallets.append(clean)
     if _save_json_store(WALLETS_PATH, wallets):
@@ -2488,7 +2602,7 @@ def delete_wallet():
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
     wid = str(data.get("id", "")).strip()
-    wallets = _load_json_store(WALLETS_PATH, [])
+    wallets = _load_wallets_store()
     before = len(wallets)
     wallets = [w for w in wallets if w.get("id") != wid]
     if len(wallets) == before:
@@ -2503,8 +2617,8 @@ def list_fsheets():
     rig_conf = parse_shell_config(RIG_CONF_PATH)
     return jsonify({
         "success": True,
-        "fsheets": _load_json_store(FSHEETS_PATH, []),
-        "wallets": _load_json_store(WALLETS_PATH, []),
+        "fsheets": _load_fsheets_store(),
+        "wallets": _load_wallets_store(),
         "active": {
             "coin": wallet_conf.get("COIN", ""),
             "wallet": wallet_conf.get("WAL", ""),
@@ -2524,7 +2638,7 @@ def save_fsheet():
     clean, err = _validate_fsheet_entry(data.get("fsheet") or {})
     if err:
         return jsonify({"success": False, "message": err}), 400
-    fsheets = _load_json_store(FSHEETS_PATH, [])
+    fsheets = _load_fsheets_store()
     fsheets = [f for f in fsheets if f.get("id") != clean["id"]]
     fsheets.append(clean)
     if _save_json_store(FSHEETS_PATH, fsheets):
@@ -2537,7 +2651,7 @@ def delete_fsheet():
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
     fid = str(data.get("id", "")).strip()
-    fsheets = _load_json_store(FSHEETS_PATH, [])
+    fsheets = _load_fsheets_store()
     before = len(fsheets)
     fsheets = [f for f in fsheets if f.get("id") != fid]
     if len(fsheets) == before:
@@ -2552,19 +2666,20 @@ def apply_fsheet():
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
     fid = str(data.get("id", "")).strip()
-    fsheet = next((f for f in _load_json_store(FSHEETS_PATH, []) if f.get("id") == fid), None)
+    fsheet = next((f for f in _load_fsheets_store() if f.get("id") == fid), None)
     if fsheet is None:
         return jsonify({"success": False, "message": "Flight sheet not found."}), 404
+    item = _pick_apply_item(fsheet)
     # Resolve wallet reference (either stored address or wallet library id)
-    wallet = str(fsheet.get("wallet", "")).strip()
-    wallets = _load_json_store(WALLETS_PATH, [])
+    wallet = str(item.get("wallet", "")).strip()
+    wallets = _load_wallets_store()
     w = next((x for x in wallets if x.get("id") == wallet), None)
     if w:
         wallet = w.get("address", "")
-    ok, msg = _apply_flight_sheet(fsheet.get("coin"), wallet, fsheet.get("pool"), fsheet.get("miner"),
-                                  extra={"name": fsheet.get("name", ""), "miner_alt": fsheet.get("miner_alt", ""),
-                                         "install_url": fsheet.get("install_url", ""), "algo": fsheet.get("algo", ""),
-                                         "user_config": fsheet.get("user_config", "")})
+    ok, msg = _apply_flight_sheet(item.get("coin"), wallet, item.get("pool"), item.get("miner"),
+                                  extra={"name": fsheet.get("name", ""), "miner_alt": item.get("miner_alt", ""),
+                                         "install_url": item.get("install_url", ""), "algo": item.get("algo", ""),
+                                         "user_config": item.get("user_config", "")})
     return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/flightsheet', methods=['GET', 'POST'])

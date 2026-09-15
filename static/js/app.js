@@ -526,61 +526,45 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
-    // Flight Sheets: wallets select and quick-save form
-    populateFsheetMiners();
-    document.getElementById('saveFsheetForm').addEventListener('submit', async function(e) {
-        e.preventDefault();
-        const walletVal = document.getElementById('fsWalletSelect').value;
-        const extra = window._editingFsheetExtra || {};
-        const payload = {
-            fsheet: {
-                id: window._editingFsheetId || '',
-                name: document.getElementById('fsName').value.trim(),
-                coin: document.getElementById('fsCoin').value.trim(),
-                wallet: walletVal === '__custom__' ? document.getElementById('fsWalletCustom').value.trim() : walletVal,
-                pool: document.getElementById('fsPool').value.trim(),
-                miner: document.getElementById('fsMinerSelect').value,
-                miner_alt: extra.miner_alt || '',
-                install_url: extra.install_url || '',
-                algo: extra.algo || '',
-                user_config: extra.user_config || ''
-            }
-        };
-        const submitBtn = this.querySelector('button[type="submit"]');
-        const origHTML = submitBtn.innerHTML;
-        submitBtn.disabled = true;
-        try {
-            const response = await apiFetch('/api/fsheets/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            showToast(data.message || (data.success ? 'Flight sheet saved.' : 'Failed to save flight sheet.'), !!data.success);
-            if (data.success) {
-                this.reset();
-                window._editingFsheetId = null;
-                window._editingFsheetExtra = {};
-                document.getElementById('fsWalletCustom').classList.add('d-none');
-                populateFsheetMiners();
-                loadFsheets();
-            }
-        } catch (error) {
-            showToast("Network error saving flight sheet.", false);
-        } finally {
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = origHTML;
+    // Flight Sheets builder + Wallets tab (cloud-style)
+    window._fsBuilderItems = [{}];
+    loadCatalog();
+    rebuildFsItemsContainer();
+    document.getElementById('saveFsheetForm').addEventListener('submit', saveFsheetFromBuilder);
+    document.getElementById('fsAddMinerBtn').addEventListener('click', () => builderAddRow({}));
+    document.getElementById('fsResetBuilderBtn').addEventListener('click', resetFsheetBuilder);
+    setupFsFilter();
+    setupFsheetsContainer();
+    setupWalletsContainer();
+    const fsItems = document.getElementById('fsItemsContainer');
+    fsItems.addEventListener('change', function(e) {
+        const row = e.target.closest('.fs-item-row');
+        if (!row) return;
+        if (e.target.classList.contains('fs-wallet')) {
+            row.querySelector('.fs-wallet-custom').classList.toggle('d-none', e.target.value !== '__custom__');
+        } else if (e.target.classList.contains('fs-miner')) {
+            row.querySelector('.fs-custom-extra').classList.toggle('d-none', e.target.value !== 'custom');
         }
     });
-
-    document.getElementById('fsWalletSelect').addEventListener('change', function() {
-        document.getElementById('fsWalletCustom').classList.toggle('d-none', this.value !== '__custom__');
+    fsItems.addEventListener('focusin', function(e) {
+        if (e.target.classList.contains('fs-pool')) updatePoolDatalist();
     });
-
-    document.getElementById('saveWalletForm').addEventListener('submit', addWallet);
+    fsItems.addEventListener('click', function(e) {
+        const btn = e.target.closest('[data-action="remove-item"]');
+        if (!btn) return;
+        const row = btn.closest('.fs-item-row');
+        const idx = parseInt(row.dataset.idx, 10);
+        (window._fsBuilderItems || []).splice(idx, 1);
+        if (!window._fsBuilderItems.length) window._fsBuilderItems = [{}];
+        rebuildFsItemsContainer();
+    });
+    document.getElementById('walletAddBtn').addEventListener('click', () => showWalletModal(null));
+    document.getElementById('walletEditSaveBtn').addEventListener('click', saveWalletFromModal);
+    document.getElementById('walletsRefreshBtn').addEventListener('click', () => renderWallets());
+    document.getElementById('fsheetsRefreshBtn').addEventListener('click', () => loadFsheets());
     document.getElementById('importFsheetsBtn').addEventListener('click', () => {
         document.getElementById('fsheetImportText').value = '';
-        new bootstrap.Modal(document.getElementById('fsheetImportModal')).show();
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('fsheetImportModal')).show();
     });
     document.getElementById('fsheetImportFile').addEventListener('change', function() {
         const file = this.files && this.files[0];
@@ -589,6 +573,7 @@ document.addEventListener('DOMContentLoaded', function() {
         reader.onload = () => { document.getElementById('fsheetImportText').value = reader.result; };
         reader.readAsText(file);
     });
+    document.getElementById('fsheetImportClipboardBtn').addEventListener('click', importFromClipboard);
     document.getElementById('fsheetImportSaveBtn').addEventListener('click', importFsheets);
     document.getElementById('fansRefreshBtn').addEventListener('click', loadFans);
 
@@ -855,7 +840,9 @@ const AUTO_REFRESH_LOADERS = {
     stats: () => fetchStats(),
     accesses: () => loadAccessList(),
     jumps: () => loadAccessList(),
-    cluster: () => { if (activeView === 'cluster') loadClusterData(true); }
+    cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
+    wallets: () => renderWallets(),
+    fsheets: () => loadFsheets()
 };
 
 function autoRefreshDefault(target) {
@@ -2678,25 +2665,226 @@ window.deleteJump = async function(jumpId) {
     }
 };
 
-// ---------------- Flight sheets & wallets ----------------
+// ---------------- Flight sheets & wallets (cloud-style) ----------------
 
-const MINER_OPTIONS = ["lolminer", "xmrig", "gminer", "rigel", "bzminer", "teamredminer",
-    "hiveon", "srbminer", "wildrig-multi", "bminer", "ccminer", "t-rex", "custom", "none"];
+// Bundled HiveOS catalogs (miners with N/A/C platforms, pools per coin, coins)
+const CATALOG = { miners: [], minerById: {}, pools: [], coins: [], loaded: false, promise: null };
 
-function populateFsheetMiners() {
-    const sel = document.getElementById('fsMinerSelect');
-    const current = sel.value;
-    sel.innerHTML = MINER_OPTIONS.map(m => '<option value="' + m + '">' + m + '</option>').join('');
-    if (current) sel.value = current;
+async function loadCatalog() {
+    if (CATALOG.loaded) return CATALOG;
+    if (!CATALOG.promise) {
+        CATALOG.promise = Promise.all([
+            fetch('static/data/hive-miners.json').then(r => r.json()),
+            fetch('static/data/hive-pools.json').then(r => r.json()),
+            fetch('static/data/hive-coins.json').then(r => r.json())
+        ]).then(([m, p, c]) => {
+            CATALOG.miners = (m.miners || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+            CATALOG.minerById = {};
+            CATALOG.miners.forEach(x => { CATALOG.minerById[x.id] = x; });
+            CATALOG.pools = p.pools || [];
+            CATALOG.coins = c.coins || [];
+            CATALOG.loaded = true;
+            fillCoinDatalists();
+            rebuildFsItemsContainer();
+        }).catch(() => { CATALOG.promise = null; });
+    }
+    await CATALOG.promise;
+    return CATALOG;
 }
 
-function populateWalletSelect(wallets) {
-    const sel = document.getElementById('fsWalletSelect');
-    const current = sel.value;
-    let options = wallets.map(w => '<option value="' + w.id + '">' + escapeHtml(w.name) + '</option>');
-    options.push('<option value="__custom__">Custom address...</option>');
-    sel.innerHTML = options.join('') || '<option value="__custom__">Custom address...</option>';
-    if (current) sel.value = current;
+function fillCoinDatalists() {
+    const dl = document.getElementById('walletCoinList');
+    if (dl) dl.innerHTML = CATALOG.coins.map(c => '<option value="' + escapeHtml(c) + '"></option>').join('');
+}
+
+function minerBadgesHtml(minerId) {
+    let m = CATALOG.minerById[minerId];
+    if (!m && /_custom$/.test(minerId)) m = CATALOG.minerById[minerId.replace(/_custom$/, '')];
+    if (!m) return '';
+    let out = '';
+    if (m.nvidia) out += '<span class="fs-badge n" title="NVIDIA">N</span>';
+    if (m.amd) out += '<span class="fs-badge a" title="AMD">A</span>';
+    if (m.cpu) out += '<span class="fs-badge c" title="CPU">C</span>';
+    return out;
+}
+
+function coinHue(ticker) {
+    let h = 0;
+    const s = String(ticker || '?');
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+}
+
+function coinAvatarHtml(coin, extraCls) {
+    const c = String(coin || '').trim().toUpperCase();
+    const label = c ? escapeHtml(c.slice(0, 3)) : '—';
+    return '<span class="coin-av ' + (extraCls || '') + '" style="--h:' + coinHue(c) + '" title="' + escapeHtml(c || 'no coin') + '">' + label + '</span>';
+}
+
+// ---------------- Flight sheet builder (cloud-style numbered items) ----------------
+
+function walletOptionsHtml(selected) {
+    const wallets = (window._fsData && window._fsData.wallets) || [];
+    const isRef = wallets.some(w => w.id === selected);
+    let opts = wallets.map(w =>
+        '<option value="' + escapeHtml(w.id) + '"' + (selected === w.id ? ' selected' : '') + '>' +
+        escapeHtml(w.name) + (w.coin ? ' · ' + escapeHtml(w.coin) : '') + '</option>').join('');
+    opts += '<option value="__custom__"' + (!isRef ? ' selected' : '') + '>Custom address...</option>';
+    return opts;
+}
+
+function minerOptionsHtml(selected) {
+    let opts = CATALOG.miners.map(m =>
+        '<option value="' + escapeHtml(m.id) + '"' + (selected === m.id ? ' selected' : '') + '>' +
+        escapeHtml(m.name) + '</option>').join('');
+    const known = CATALOG.minerById[selected];
+    if (selected && !known && selected !== 'custom' && selected !== 'none') {
+        opts = '<option value="' + escapeHtml(selected) + '" selected>' + escapeHtml(selected) + '</option>' + opts;
+    }
+    opts += '<option value="custom"' + (selected === 'custom' ? ' selected' : '') + '>Custom miner...</option>';
+    opts += '<option value="none"' + (selected === 'none' ? ' selected' : '') + '>None</option>';
+    return opts;
+}
+
+function builderRowHtml(idx, item) {
+    item = item || {};
+    const isRef = ((window._fsData && window._fsData.wallets) || []).some(w => w.id === item.wallet);
+    const removable = idx > 0;
+    const isCustom = (item.miner || 'none') === 'custom';
+    return '<div class="row g-2 fs-item-row align-items-start mb-2" data-idx="' + idx + '">' +
+        (removable ? '<button type="button" class="btn btn-outline-danger fs-item-remove" data-action="remove-item" title="Remove this miner item">&times;</button>' : '') +
+        '<div class="col-auto pt-1"><span class="fs-item-num">' + (idx + 1) + '</span></div>' +
+        '<div class="col-md-2">' +
+            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle text-uppercase fs-coin" list="walletCoinList" placeholder="Coin" value="' + escapeHtml(item.coin || '') + '">' +
+        '</div>' +
+        '<div class="col-md-3">' +
+            '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-wallet">' + walletOptionsHtml(item.wallet) + '</select>' +
+            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace mt-1 fs-wallet-custom' + (!isRef ? '' : ' d-none') + '" placeholder="Custom wallet address" value="' + escapeHtml(isRef ? '' : (item.wallet || '')) + '">' +
+        '</div>' +
+        '<div class="col-md-3">' +
+            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-pool" list="fsPoolList" placeholder="pool:port" value="' + escapeHtml(item.pool || '') + '">' +
+        '</div>' +
+        '<div class="col-md-4">' +
+            '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-miner">' + minerOptionsHtml(item.miner) + '</select>' +
+            '<div class="row g-1 mt-1 fs-custom-extra' + (isCustom ? '' : ' d-none') + '">' +
+                '<div class="col-6"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-alt" placeholder="package" value="' + escapeHtml(item.miner_alt || '') + '"></div>' +
+                '<div class="col-6"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-algo" placeholder="algo" value="' + escapeHtml(item.algo || '') + '"></div>' +
+                '<div class="col-12"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-url" placeholder="install URL (https://...)" value="' + escapeHtml(item.install_url || '') + '"></div>' +
+                '<div class="col-12"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-uc" placeholder="user config" value="' + escapeHtml(item.user_config || '') + '"></div>' +
+            '</div>' +
+        '</div>' +
+    '</div>';
+}
+
+function rebuildFsItemsContainer() {
+    const container = document.getElementById('fsItemsContainer');
+    if (!container) return;
+    const rows = window._fsBuilderItems || [{}];
+    container.innerHTML = rows.map((it, i) => builderRowHtml(i, it)).join('');
+    updatePoolDatalist();
+}
+
+function builderAddRow(item) {
+    const rows = window._fsBuilderItems || (window._fsBuilderItems = [{}]);
+    if (rows.length >= 5) { showToast('Up to 5 miner items per flight sheet.', false); return; }
+    rows.push(item || {});
+    rebuildFsItemsContainer();
+    const container = document.getElementById('fsItemsContainer');
+    const last = container.lastElementChild;
+    if (last) last.querySelector('.fs-coin').focus();
+}
+
+function resetFsheetBuilder() {
+    window._fsBuilderItems = [{}];
+    window._editingFsheetId = null;
+    document.getElementById('fsName').value = '';
+    document.getElementById('fsCreateBtn').innerHTML = '<i class="bi bi-magic me-1"></i>Create';
+    rebuildFsItemsContainer();
+}
+
+function updatePoolDatalist(coinFilter) {
+    const dl = document.getElementById('fsPoolList');
+    if (!dl) return;
+    let coin = coinFilter;
+    if (typeof coinFilter !== 'string') {
+        const active = document.activeElement;
+        const row = active && active.classList.contains('fs-pool') ? active.closest('.fs-item-row') : null;
+        coin = row ? (row.querySelector('.fs-coin').value.trim().toUpperCase()) : '';
+    }
+    let pools = CATALOG.pools;
+    if (coin) {
+        const matched = pools.filter(p => (p.coins || []).some(c => String(c).toUpperCase() === coin));
+        if (matched.length) pools = matched;
+    }
+    dl.innerHTML = pools.slice(0, 400).map(p => '<option value="' + escapeHtml(p.name) + '"></option>').join('');
+}
+
+function collectBuilderItems() {
+    const items = [];
+    document.querySelectorAll('#fsItemsContainer .fs-item-row').forEach(row => {
+        const walletSel = row.querySelector('.fs-wallet').value;
+        const wallet = walletSel === '__custom__' ? row.querySelector('.fs-wallet-custom').value.trim() : walletSel;
+        const miner = row.querySelector('.fs-miner').value;
+        const item = {
+            coin: row.querySelector('.fs-coin').value.trim().toUpperCase(),
+            wallet: wallet,
+            pool: row.querySelector('.fs-pool').value.trim(),
+            miner: miner,
+            miner_alt: '', install_url: '', algo: '', user_config: ''
+        };
+        const extra = row.querySelector('.fs-custom-extra');
+        if (extra && (miner === 'custom' || extra.querySelector('.fs-alt').value.trim() || extra.querySelector('.fs-url').value.trim())) {
+            item.miner_alt = extra.querySelector('.fs-alt').value.trim().toLowerCase();
+            item.install_url = extra.querySelector('.fs-url').value.trim();
+            item.algo = extra.querySelector('.fs-algo').value.trim().toLowerCase();
+            item.user_config = extra.querySelector('.fs-uc').value.trim();
+        }
+        items.push(item);
+    });
+    return items;
+}
+
+function fillBuilderFromFsheet(f) {
+    window._fsBuilderItems = (f.items && f.items.length ? JSON.parse(JSON.stringify(f.items)) : [{}]);
+    window._editingFsheetId = f.id;
+    document.getElementById('fsName').value = f.name || '';
+    document.getElementById('fsCreateBtn').innerHTML = '<i class="bi bi-save2 me-1"></i>Save';
+    rebuildFsItemsContainer();
+}
+
+async function saveFsheetFromBuilder(e) {
+    e.preventDefault();
+    const items = collectBuilderItems();
+    if (!items.length) { showToast('Add at least one miner item.', false); return; }
+    const payload = {
+        fsheet: {
+            id: window._editingFsheetId || '',
+            name: document.getElementById('fsName').value.trim(),
+            coin: items[0].coin,
+            items: items
+        }
+    };
+    const submitBtn = document.getElementById('fsCreateBtn');
+    const origHTML = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    try {
+        const response = await apiFetch('/api/fsheets/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Flight sheet saved.' : 'Failed to save flight sheet.'), !!data.success);
+        if (data.success) {
+            resetFsheetBuilder();
+            loadFsheets();
+        }
+    } catch (error) {
+        showToast("Network error saving flight sheet.", false);
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = origHTML;
+    }
 }
 
 async function loadFsheets() {
@@ -2704,90 +2892,141 @@ async function loadFsheets() {
         const response = await apiFetch('/api/fsheets');
         const data = await response.json();
         if (!data.success) return;
-        window._rigConfig = data.rig_config || {};
-        renderFsheets(data.fsheets || [], data.wallets || [], data.active || {}, data.rig_config || {});
+        window._fsData = {
+            fsheets: data.fsheets || [],
+            wallets: data.wallets || [],
+            active: data.active || {},
+            rig_config: data.rig_config || {}
+        };
+        // Prefill the builder once with the rig's live mining config
+        if (!window._fsFormPrefilled) {
+            window._fsFormPrefilled = true;
+            const wallets = window._fsData.wallets;
+            const active = window._fsData.active;
+            const rc = window._fsData.rig_config || {};
+            const liveWallet = active.wallet || rc.wallet || '';
+            const w = wallets.find(x => x.address === liveWallet);
+            window._fsBuilderItems = [{
+                coin: String(active.coin || rc.coin || '').toUpperCase(),
+                wallet: w ? w.id : (liveWallet || ''),
+                pool: active.pool || rc.pool || '',
+                miner: active.miner || rc.miner || 'none'
+            }];
+        }
+        renderFsheets();
+        if (!window._editingFsheetId) rebuildFsItemsContainer();
     } catch (e) {
         console.error('Failed to load flight sheets:', e);
     }
 }
 
-function renderFsheets(fsheets, wallets, active, rigConfig) {
-    populateWalletSelect(wallets);
-    window._fsWallets = wallets;
-    rigConfig = rigConfig || {};
-    // Prefill the quick-save form once with the active mining config
-    if (!window._fsFormPrefilled) {
-        window._fsFormPrefilled = true;
-        document.getElementById('fsCoin').value = active.coin || '';
-        document.getElementById('fsPool').value = active.pool || '';
-        const sel = document.getElementById('fsWalletSelect');
-        const w = wallets.find(x => x.address === active.wallet);
-        if (w) { sel.value = w.id; }
-        else {
-            sel.value = '__custom__';
-            const custom = document.getElementById('fsWalletCustom');
-            custom.classList.remove('d-none');
-            custom.value = active.wallet || '';
-        }
-        populateFsheetMiners();
-        document.getElementById('fsMinerSelect').value = active.miner || 'none';
-    }
-    const container = document.getElementById('fsheetsContainer');
-    const walletLabel = (ref) => {
-        const w = wallets.find(x => x.id === ref);
-        if (w) return w.name;
-        return ref ? ref.slice(0, 14) + (ref.length > 14 ? '…' : '') : '—';
-    };
-    // Resolve a stored fsheet's wallet reference to an address for the live-config match
-    const walletAddressOf = (f) => {
-        const w = wallets.find(x => x.id === f.wallet);
-        return w ? w.address : f.wallet;
-    };
-    // The mining setup currently running on the rig (from its own configs) —
-    // shown as a live ACTIVE entry even when the library stores are empty
-    let rows = fsheets.map(f => {
-        const isWalletRef = wallets.some(x => x.id === f.wallet);
-        const isActive = active.coin === f.coin && (isWalletRef || (active.wallet === f.wallet));
-        return { f: f, isActive: isActive };
-    });
-    const rcHasContent = rigConfig.wallet || rigConfig.pool;
-    const liveMatchesStored = rcHasContent && fsheets.some(f =>
-        (f.coin || '').toLowerCase() === (rigConfig.coin || '').toLowerCase() &&
-        (f.miner || '').toLowerCase() === (rigConfig.miner || '').toLowerCase() &&
-        (f.pool || '') === (rigConfig.pool || ''));
-    if (rcHasContent && !liveMatchesStored) {
-        rows.unshift({ f: {
-            id: '__rig__', name: rigConfig.name || 'Current mining config',
-            coin: rigConfig.coin || '?', wallet: rigConfig.wallet || '',
-            pool: rigConfig.pool || '—', miner: rigConfig.miner || 'none'
-        }, isActive: true, live: true });
-    }
-    if (!rows.length) {
-        container.innerHTML = '<div class="text-center text-muted small py-3">No flight sheets saved yet. Save one below or import.</div>';
-        return;
-    }
-    container.innerHTML = rows.map(({ f, isActive, live }) =>
-        '<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1 mb-1 fsheet-row' +
-            (isActive ? ' border-warning-subtle' : ' border-secondary-subtle') + '">' +
-            '<div class="min-w-0">' +
-                '<span class="fw-semibold small">' + escapeHtml(f.name) + '</span>' +
-                (isActive ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
-                '<div class="small text-muted text-truncate">' + escapeHtml(f.coin || '?') + ' • ' +
-                    escapeHtml(live ? (f.wallet || '—') : walletLabel(f.wallet)) + ' • ' + escapeHtml(f.pool || '—') + ' • ' + escapeHtml(f.miner) +
-                    (live ? ' (running)' : '') + '</div>' +
-            '</div>' +
-            (live ? '' :
-            '<div class="d-flex gap-1 flex-shrink-0">' +
-                '<button class="btn btn-xs btn-outline-warning py-0 px-2" title="Apply" onclick="applyFsheet(\'' + f.id + '\', this)"><i class="bi bi-lightning-charge-fill"></i></button>' +
-                '<button class="btn btn-xs btn-outline-primary py-0 px-2" title="Edit" onclick="editFsheet(\'' + f.id + '\')"><i class="bi bi-pencil"></i></button>' +
-                '<button class="btn btn-xs btn-outline-danger py-0 px-2" title="Delete" onclick="deleteFsheet(\'' + f.id + '\')"><i class="bi bi-trash"></i></button>' +
-            '</div>') +
-        '</div>').join('');
+function resolveItemWallet(item, wallets) {
+    if (!item) return '';
+    const w = (wallets || []).find(x => x.id === item.wallet);
+    return w ? w.address : (item.wallet || '');
 }
 
-window.applyFsheet = async function(fid, btn) {
-    const orig = btn.innerHTML;
-    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+function fsMatchesLive(f, wallets, active, rc) {
+    const it = (f.items && f.items[0]) || {};
+    const liveCoin = String(active.coin || rc.coin || '').toLowerCase();
+    const liveWallet = active.wallet || rc.wallet || '';
+    const livePool = active.pool || rc.pool || '';
+    const liveMiner = String(active.miner || rc.miner || '').toLowerCase();
+    return liveCoin !== '' &&
+        String(it.coin || '').toLowerCase() === liveCoin &&
+        String(it.pool || '') === livePool &&
+        String(it.miner || '').toLowerCase() === liveMiner &&
+        resolveItemWallet(it, wallets) === liveWallet;
+}
+
+function renderFsheets() {
+    const container = document.getElementById('fsheetsContainer');
+    const data = window._fsData;
+    if (!data) return;
+    const wallets = data.wallets;
+    const active = data.active;
+    const rc = data.rig_config || {};
+
+    // Live rig config shown as a pseudo-row when it does not match any saved sheet
+    const rcHasContent = rc.wallet || rc.pool;
+    const anyMatch = data.fsheets.some(f => fsMatchesLive(f, wallets, active, rc));
+    let entries = data.fsheets.map(f => ({ f: f, applied: fsMatchesLive(f, wallets, active, rc), live: false }));
+    if (rcHasContent && !anyMatch) {
+        entries.unshift({ f: {
+            id: '__rig__', name: rc.name || 'Current mining config',
+            coin: rc.coin || '?', items: [{ coin: rc.coin || '', wallet: rc.wallet || '', pool: rc.pool || '—', miner: rc.miner || 'none' }],
+            fav: false
+        }, applied: true, live: true });
+    }
+
+    // Filter: all / applied / not-applied
+    const filter = window._fsFilter || 'all';
+    const shown = entries.filter(e =>
+        filter === 'all' || (filter === 'applied') === e.applied);
+    // Favorites first, then by name
+    shown.sort((a, b) => (b.f.fav ? 1 : 0) - (a.f.fav ? 1 : 0) ||
+        String(a.f.name).localeCompare(String(b.f.name)));
+
+    const counter = document.getElementById('fsheetsCount');
+    if (counter) counter.textContent = shown.length + ' of ' + entries.length + ' shown';
+
+    if (!shown.length) {
+        container.innerHTML = '<div class="text-center text-muted small py-3">' +
+            (entries.length ? 'No flight sheets match this filter.' : 'No flight sheets yet. Build one above or import.') + '</div>';
+        return;
+    }
+
+    container.innerHTML = shown.map(({ f, applied, live }) => {
+        const items = (f.items && f.items.length ? f.items : [{}]);
+        const it = items[0] || {};
+        const walletLabel = live ? (it.wallet || '—') : (walletAddressLabel(it.wallet, wallets));
+        const coins = Array.from(new Set(items.map(x => (x.coin || '').toUpperCase()).filter(Boolean)));
+        const minerBadges = items.map(x => minerBadgesHtml(x.miner)).join('');
+        const extra = items.length > 1 ? ' <span class="badge bg-secondary text-dark" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
+        const star = live ? '' :
+            '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + escapeHtml(f.id) + '" title="Favorite">' +
+            '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
+        const actions = live ? '' :
+            '<div class="d-flex gap-1 align-items-center flex-shrink-0">' +
+                '<button type="button" class="btn btn-xs btn-outline-warning py-0 px-2" data-action="apply" data-id="' + escapeHtml(f.id) + '" title="Apply"><i class="bi bi-lightning-charge-fill"></i></button>' +
+                '<button type="button" class="btn btn-xs btn-outline-primary py-0 px-2" data-action="edit" data-id="' + escapeHtml(f.id) + '" title="Edit"><i class="bi bi-pencil"></i></button>' +
+                '<div class="dropdown">' +
+                    '<button type="button" class="fs-kebab" data-bs-toggle="dropdown" aria-expanded="false" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>' +
+                    '<ul class="dropdown-menu dropdown-menu-end">' +
+                        '<li><button type="button" class="dropdown-item" data-action="duplicate" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-copy me-2"></i>Duplicate</button></li>' +
+                        '<li><button type="button" class="dropdown-item" data-action="export" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-download me-2"></i>Export</button></li>' +
+                        '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-clipboard me-2"></i>Copy</button></li>' +
+                        '<li><hr class="dropdown-divider"></li>' +
+                        '<li><button type="button" class="dropdown-item text-danger" data-action="delete" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-trash me-2"></i>Delete</button></li>' +
+                    '</ul>' +
+                '</div>' +
+            '</div>';
+        return '<div class="fsheet-row2 d-flex align-items-center gap-2' + (applied ? ' is-active' : '') + '">' +
+            star +
+            coinAvatarHtml(coins[0] || it.coin) +
+            '<div class="min-w-0 flex-grow-1">' +
+                '<div class="fs-name text-truncate">' + escapeHtml(f.name) +
+                    (applied ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
+                    (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
+                '</div>' +
+                '<div class="fs-sub text-truncate" title="' + escapeHtml([coins.join(' + '), walletLabel, it.pool, it.miner].join(' • ')) + '">' +
+                    escapeHtml((coins.join(' + ') || '—') + ' • ' + walletLabel + ' • ' + (it.pool || '—') + ' • ' + (it.miner || 'none')) +
+                '</div>' +
+            '</div>' +
+            '<span class="flex-shrink-0">' + minerBadges + '</span>' + extra +
+            actions +
+        '</div>';
+    }).join('');
+}
+
+function walletAddressLabel(walletRef, wallets) {
+    const w = (wallets || []).find(x => x.id === walletRef);
+    if (w) return w.name;
+    if (!walletRef) return 'In miner config';
+    return walletRef.length > 18 ? walletRef.slice(0, 18) + '…' : walletRef;
+}
+
+window.applyFsheet = async function(fid) {
     try {
         const response = await apiFetch('/api/fsheets/apply', {
             method: 'POST',
@@ -2799,44 +3038,21 @@ window.applyFsheet = async function(fid, btn) {
         if (data.success) setTimeout(() => { fetchStats(); loadFsheets(); }, 2500);
     } catch (e) {
         showToast('Network error applying flight sheet.', false);
-    } finally {
-        setTimeout(() => { btn.innerHTML = orig; }, 800);
     }
 };
 
+function findFsheet(fid) {
+    const data = window._fsData;
+    return data ? (data.fsheets || []).find(x => x.id === fid) : null;
+}
+
 window.editFsheet = function(fid) {
-    apiFetch('/api/fsheets').then(r => r.json()).then(data => {
-        const f = (data.fsheets || []).find(x => x.id === fid);
-        if (!f) return;
-        populateWalletSelect(data.wallets || []);
-        document.getElementById('fsName').value = f.name;
-        document.getElementById('fsCoin').value = f.coin;
-        const sel = document.getElementById('fsWalletSelect');
-        const isRef = (data.wallets || []).some(w => w.id === f.wallet);
-        if (isRef) {
-            sel.value = f.wallet;
-            document.getElementById('fsWalletCustom').classList.add('d-none');
-        } else {
-            sel.value = '__custom__';
-            const custom = document.getElementById('fsWalletCustom');
-            custom.classList.remove('d-none');
-            custom.value = f.wallet;
-        }
-        document.getElementById('fsPool').value = f.pool;
-        populateFsheetMiners();
-        document.getElementById('fsMinerSelect').value = f.miner || 'none';
-        // Preserve advanced (custom miner) fields while the form edits the basic ones
-        window._editingFsheetExtra = {
-            miner_alt: f.miner_alt || '', install_url: f.install_url || '',
-            algo: f.algo || '', user_config: f.user_config || ''
-        };
-        // Reuse the save form; saving updates by name+id when editing flag set
-        window._editingFsheetId = fid;
-        const form = document.getElementById('saveFsheetForm');
-        form.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        document.getElementById('fsName').focus();
-        showToast('Editing "' + f.name + '" - press Save to update.', true);
-    });
+    const f = findFsheet(fid);
+    if (!f) return;
+    fillBuilderFromFsheet(f);
+    const form = document.getElementById('saveFsheetForm');
+    form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.getElementById('fsName').focus();
 };
 
 window.deleteFsheet = async function(fid) {
@@ -2855,37 +3071,186 @@ window.deleteFsheet = async function(fid) {
     }
 };
 
-// Normalize an imported flight sheet entry (ours, or a HiveOS export with
-// nested wallet/pool objects and an items[] array)
+window.duplicateFsheet = async function(fid) {
+    const f = findFsheet(fid);
+    if (!f) return;
+    try {
+        const response = await apiFetch('/api/fsheets/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ fsheet: {
+                id: '', name: (f.name || 'flight sheet') + ' (copy)',
+                coin: f.coin || '', fav: false, items: f.items || []
+            } })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Duplicated.' : 'Failed to duplicate.'), !!data.success);
+        if (data.success) loadFsheets();
+    } catch (e) {
+        showToast('Network error duplicating flight sheet.', false);
+    }
+};
+
+function fsheetExportJson(f) {
+    return JSON.stringify({ name: f.name, coin: f.coin, fav: !!f.fav, items: f.items || [] }, null, 2);
+}
+
+window.exportFsheet = function(fid) {
+    const f = findFsheet(fid);
+    if (!f) return;
+    try {
+        const blob = new Blob([fsheetExportJson(f)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'fsheet_' + String(f.name || 'export').replace(/[^\w\-]+/g, '_').slice(0, 40) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    } catch (e) {
+        showToast('Export failed.', false);
+    }
+};
+
+function copyTextFallback(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+}
+
+window.copyFsheet = async function(fid) {
+    const f = findFsheet(fid);
+    if (!f) return;
+    const json = fsheetExportJson(f);
+    let ok = false;
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(json);
+            ok = true;
+        } else {
+            ok = copyTextFallback(json);
+        }
+    } catch (e) {
+        ok = copyTextFallback(json);
+    }
+    showToast(ok ? 'Flight sheet JSON copied to clipboard.' : 'Copy failed — use Export instead.', ok);
+};
+
+window.toggleFsheetFav = async function(fid) {
+    const f = findFsheet(fid);
+    if (!f) return;
+    try {
+        const response = await apiFetch('/api/fsheets/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ fsheet: {
+                id: f.id, name: f.name, coin: f.coin || '', fav: !f.fav, items: f.items || []
+            } })
+        });
+        const data = await response.json();
+        if (data.success) { f.fav = !f.fav; renderFsheets(); }
+        else showToast(data.message || 'Failed to update favorite.', false);
+    } catch (e) {
+        showToast('Network error updating favorite.', false);
+    }
+};
+
+// One delegated click handler for all flight sheet row actions
+function setupFsheetsContainer() {
+    const container = document.getElementById('fsheetsContainer');
+    if (!container) return;
+    container.classList.add('fs-scroll');
+    container.addEventListener('click', (e) => {
+        const target = e.target.closest('[data-action]');
+        if (!target || !container.contains(target)) return;
+        const action = target.dataset.action;
+        const fid = target.dataset.id;
+        if (!fid) return;
+        if (action === 'fav') toggleFsheetFav(fid);
+        else if (action === 'apply') applyFsheet(fid);
+        else if (action === 'edit') editFsheet(fid);
+        else if (action === 'duplicate') duplicateFsheet(fid);
+        else if (action === 'export') exportFsheet(fid);
+        else if (action === 'copy') copyFsheet(fid);
+        else if (action === 'delete') deleteFsheet(fid);
+    });
+    // Keep dropdown menus visible above the scroll container while open
+    document.addEventListener('show.bs.dropdown', (e) => {
+        if (container.contains(e.target)) container.classList.add('dd-open');
+    });
+    document.addEventListener('hidden.bs.dropdown', (e) => {
+        if (container.contains(e.target)) container.classList.remove('dd-open');
+    });
+}
+
+// Filter switch: All / Applied / Not Applied
+function setupFsFilter() {
+    const group = document.getElementById('fsFilterGroup');
+    if (!group) return;
+    group.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-filter]');
+        if (!btn) return;
+        window._fsFilter = btn.dataset.filter;
+        group.querySelectorAll('button').forEach(b => {
+            b.classList.toggle('active', b === btn);
+            b.classList.toggle('btn-secondary', b === btn);
+            b.classList.toggle('btn-outline-secondary', b !== btn);
+        });
+        renderFsheets();
+    });
+}
+
+// Normalize an imported flight sheet (ours, or a HiveOS export with nested
+// wallet/pool objects and an items[] array) into the items[]-based model
 function normalizeFsheetItems(parsed) {
     const roots = Array.isArray(parsed) ? parsed : [parsed];
     const out = [];
     for (const root of roots) {
         if (!root || typeof root !== 'object') continue;
         if (Array.isArray(root.items)) {
-            // HiveOS export: {name, items:[{coin, pool_urls, wal_id, miner, miner_alt, miner_config:{...}}]}
-            for (const it of root.items) {
+            // items[] export: ours {name, items[]} or HiveOS {name, items:[{coin, pool_urls, wal_id, miner, miner_alt, miner_config}]}
+            const items = root.items.map(it => {
+                if (!it || typeof it !== 'object') return null;
                 const mc = it.miner_config || {};
-                out.push({
-                    id: '', name: it.name || root.name || '',
-                    coin: String(it.coin || ''), wallet: '',
-                    pool: String(mc.url || (it.pool_urls && it.pool_urls[0]) || ''),
+                let wallet = it.wallet;
+                if (wallet && typeof wallet === 'object') wallet = wallet.address || wallet.id || '';
+                if (wallet && typeof wallet !== 'string') wallet = '';
+                return {
+                    coin: String(it.coin || ''),
+                    wallet: String(wallet || ''),
+                    pool: String(it.pool || mc.url || (it.pool_urls && it.pool_urls[0]) || ''),
                     miner: String(it.miner || 'none'),
                     miner_alt: String(it.miner_alt || ''),
                     install_url: String(mc.install_url || ''),
                     algo: String(mc.algo || ''),
                     user_config: String(mc.user_config || '')
-                });
-            }
+                };
+            }).filter(Boolean);
+            if (!items.length) continue;
+            out.push({
+                id: '', name: String(root.name || ''), coin: String(root.coin || items[0].coin || ''),
+                fav: !!root.fav, items: items
+            });
         } else {
             let wallet = root.wallet, pool = root.pool;
             if (wallet && typeof wallet === 'object') wallet = wallet.address || wallet.url || '';
             if (pool && typeof pool === 'object') pool = pool.url || (pool.host ? pool.host + ':' + (pool.port || '') : '');
             out.push({
-                id: root.id || '', name: root.name || '', coin: String(root.coin || ''),
-                wallet: String(wallet || ''), pool: String(pool || ''), miner: String(root.miner || 'none'),
-                miner_alt: String(root.miner_alt || ''), install_url: String(root.install_url || ''),
-                algo: String(root.algo || ''), user_config: String(root.user_config || '')
+                id: root.id || '', name: String(root.name || ''), coin: String(root.coin || ''),
+                fav: !!root.fav,
+                items: [{
+                    coin: String(root.coin || ''), wallet: String(wallet || ''), pool: String(pool || ''),
+                    miner: String(root.miner || 'none'), miner_alt: String(root.miner_alt || ''),
+                    install_url: String(root.install_url || ''), algo: String(root.algo || ''),
+                    user_config: String(root.user_config || '')
+                }]
             });
         }
     }
@@ -2916,8 +3281,22 @@ async function importFsheets() {
         } catch (e) { /* keep going */ }
     }
     if (ok) showToast('Imported ' + ok + ' flight sheet' + (ok === 1 ? '' : 's') + '.', true);
-    bootstrap.Modal.getInstance(document.getElementById('fsheetImportModal')).hide();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('fsheetImportModal')).hide();
     loadFsheets();
+}
+
+async function importFromClipboard() {
+    let text = '';
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            text = await navigator.clipboard.readText();
+        }
+    } catch (e) { text = ''; }
+    if (!text) {
+        showToast('Clipboard is not available over plain HTTP — paste with Ctrl+V.', false);
+        return;
+    }
+    document.getElementById('fsheetImportText').value = text;
 }
 
 // Switch the dashboard section tabs (GPUs / Wallets / Flight Sheets)
@@ -2943,51 +3322,32 @@ function showDashTab(tab) {
 }
 
 function openWalletModal() {
-    renderWallets();
-    showDashTab('wallets');
+    // Legacy entry point: open the modal in "add" mode
+    showWalletModal(null);
 }
 
-async function renderWallets() {
-    try {
-        const response = await apiFetch('/api/wallets');
-        const data = await response.json();
-        const list = data.wallets || [];
-        const rc = data.rig_config || {};
-        window._fsWallets = list;
-        populateWalletSelect(list);
-        const container = document.getElementById('walletsContainer');
-        // Live wallet currently used by the rig's mining config (may not exist in the library)
-        const liveWallet = (rc.wallet && !list.some(w => w.address === rc.wallet))
-            ? [{ id: '__rig__', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true }]
-            : [];
-        const rows = liveWallet.concat(list);
-        if (!rows.length) {
-            container.innerHTML = '<div class="text-center text-muted small py-3">No wallets saved yet.</div>';
-            return;
-        }
-        container.innerHTML = rows.map(w =>
-            '<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1 mb-1 ' +
-                (w.live ? 'border-warning-subtle' : 'border-secondary-subtle') + '">' +
-                '<div class="min-w-0">' +
-                    '<span class="fw-semibold small">' + escapeHtml(w.name) + '</span>' +
-                    (w.live ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
-                    '<div class="small text-muted font-monospace text-truncate">' + escapeHtml(w.address) + '</div>' +
-                '</div>' +
-                (w.live ? '' : '<button class="btn btn-xs btn-outline-danger py-0 px-2 flex-shrink-0" title="Delete" onclick="deleteWallet(\'' + w.id + '\')"><i class="bi bi-trash"></i></button>') +
-            '</div>').join('');
-    } catch (e) {
-        showToast('Failed to load wallets.', false);
-    }
+function showWalletModal(entry) {
+    window._editingWalletId = entry ? entry.id : '';
+    document.getElementById('walletEditTitle').innerHTML = entry
+        ? '<i class="bi bi-wallet2 text-warning me-2"></i>Edit Wallet'
+        : '<i class="bi bi-wallet2 text-warning me-2"></i>New Wallet';
+    document.getElementById('walletCoinInput').value = entry ? (entry.coin || '') : '';
+    document.getElementById('walletAddressInput2').value = entry ? (entry.address || '') : '';
+    document.getElementById('walletNameInput2').value = entry ? (entry.name || '') : '';
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('walletEditModal')).show();
 }
 
-async function addWallet(e) {
-    e.preventDefault();
+async function saveWalletFromModal() {
     const payload = {
         wallet: {
-            name: document.getElementById('walletNameInput').value.trim(),
-            address: document.getElementById('walletAddressInput').value.trim()
+            id: window._editingWalletId || '',
+            coin: document.getElementById('walletCoinInput').value.trim().toUpperCase(),
+            name: document.getElementById('walletNameInput2').value.trim(),
+            address: document.getElementById('walletAddressInput2').value.trim()
         }
     };
+    const btn = document.getElementById('walletEditSaveBtn');
+    btn.disabled = true;
     try {
         const response = await apiFetch('/api/wallets/save', {
             method: 'POST',
@@ -2997,13 +3357,14 @@ async function addWallet(e) {
         const data = await response.json();
         showToast(data.message || (data.success ? 'Wallet saved.' : 'Failed to save wallet.'), !!data.success);
         if (data.success) {
-            document.getElementById('walletNameInput').value = '';
-            document.getElementById('walletAddressInput').value = '';
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('walletEditModal')).hide();
             renderWallets();
             loadFsheets();
         }
     } catch (err) {
         showToast('Network error saving wallet.', false);
+    } finally {
+        btn.disabled = false;
     }
 }
 
@@ -3022,6 +3383,109 @@ window.deleteWallet = async function(wid) {
         showToast('Network error deleting wallet.', false);
     }
 };
+
+async function renderWallets() {
+    try {
+        const response = await apiFetch('/api/wallets');
+        const data = await response.json();
+        window._walletsData = { wallets: data.wallets || [], rig_config: data.rig_config || {} };
+        // keep the fsheet builder wallet selects in sync with the library
+        window._fsData = Object.assign({}, window._fsData || {}, { wallets: window._walletsData.wallets });
+        renderWalletChips();
+        renderWalletTable();
+    } catch (e) {
+        showToast('Failed to load wallets.', false);
+    }
+}
+
+function renderWalletChips() {
+    const box = document.getElementById('walletCoinChips');
+    const data = window._walletsData;
+    if (!box || !data) return;
+    const wallets = data.wallets;
+    const byCoin = {};
+    wallets.forEach(w => {
+        const c = (w.coin || '').toUpperCase();
+        if (c) byCoin[c] = (byCoin[c] || 0) + 1;
+    });
+    const coins = Object.keys(byCoin).sort();
+    const selected = window._walletCoinFilter || '';
+    const expanded = window._walletChipsExpanded;
+    let chipCoins = coins;
+    let moreChip = '';
+    if (coins.length > 8 && !expanded) {
+        chipCoins = coins.slice(0, 7);
+        moreChip = '<button type="button" class="chip-btn" data-action="more" title="Show all coins">… ' + (coins.length - 7) + ' more coins</button>';
+    }
+    const chip = (value, label, count, av) =>
+        '<button type="button" class="chip-btn' + (selected === value ? ' active' : '') + '" data-action="coin" data-coin="' + escapeHtml(value) + '" title="Filter wallets by coin">' +
+        (av || '') + '<span>' + escapeHtml(label) + '</span>' + (count !== undefined ? ' <span class="chip-count">' + count + '</span>' : '') + '</button>';
+    let html = chip('', 'All', wallets.length);
+    html += chipCoins.map(c => chip(c, c, byCoin[c], coinAvatarHtml(c))).join('');
+    if (moreChip) html += moreChip;
+    box.innerHTML = html;
+}
+
+function renderWalletTable() {
+    const data = window._walletsData;
+    if (!data) return;
+    const tbody = document.getElementById('walletsTableBody');
+    const wallets = data.wallets;
+    const rc = data.rig_config || {};
+    const filter = window._walletCoinFilter || '';
+    // Live wallet currently used by the rig's mining config (may not exist in the library)
+    const liveWallet = (rc.wallet && !wallets.some(w => w.address === rc.wallet))
+        ? [{ id: '__rig__', coin: rc.coin || '', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true }]
+        : [];
+    const rows = liveWallet.concat(wallets.filter(w => !filter || (w.coin || '').toUpperCase() === filter));
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">' +
+            (wallets.length ? 'No wallets for this coin.' : 'No wallets saved yet. Click Add.') + '</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(w =>
+        '<tr class="' + (w.live ? 'border-warning-subtle' : '') + '">' +
+            '<td>' + (w.live ? '<span class="badge bg-warning-glow text-warning small me-1">ACTIVE</span>' : '') + coinAvatarHtml(w.coin) + '</td>' +
+            '<td><span class="small fw-semibold">' + escapeHtml(w.name) + '</span></td>' +
+            '<td><span class="small font-monospace text-muted d-inline-block text-truncate align-middle" style="max-width: 100%;" title="' + escapeHtml(w.address) + '">' + escapeHtml(w.address) + '</span></td>' +
+            '<td class="text-end">' + (w.live ? '<span class="small text-muted">running</span>' :
+                '<button type="button" class="btn btn-xs btn-outline-primary py-0 px-2" data-action="wallet-edit" data-id="' + escapeHtml(w.id) + '" title="Edit"><i class="bi bi-pencil"></i></button> ' +
+                '<button type="button" class="btn btn-xs btn-outline-danger py-0 px-2" data-action="wallet-delete" data-id="' + escapeHtml(w.id) + '" title="Delete"><i class="bi bi-trash"></i></button>') +
+            '</td>' +
+        '</tr>').join('');
+}
+
+function setupWalletsContainer() {
+    const chips = document.getElementById('walletCoinChips');
+    if (chips) {
+        chips.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            if (btn.dataset.action === 'more') {
+                window._walletChipsExpanded = true;
+                renderWalletChips();
+            } else if (btn.dataset.action === 'coin') {
+                const c = btn.dataset.coin;
+                window._walletCoinFilter = (window._walletCoinFilter === c) ? '' : c;
+                renderWalletChips();
+                renderWalletTable();
+            }
+        });
+    }
+    const tbody = document.getElementById('walletsTableBody');
+    if (tbody) {
+        tbody.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn || !tbody.contains(btn)) return;
+            if (btn.dataset.action === 'wallet-edit') {
+                const w = ((window._walletsData || {}).wallets || []).find(x => x.id === btn.dataset.id);
+                if (w) showWalletModal(w);
+            } else if (btn.dataset.action === 'wallet-delete') {
+                deleteWallet(btn.dataset.id);
+            }
+        });
+    }
+}
 
 // ---------------- Extra fans control ----------------
 
