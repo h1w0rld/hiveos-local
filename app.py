@@ -2863,6 +2863,67 @@ def set_fan():
         logging.error(f"Fan control failed on {hwmon}/pwm{idx}: {e}")
         return jsonify({"success": False, "message": "Failed to write fan control (root perms required)."}), 500
 
+@app.route('/api/gpu-fan', methods=['POST'])
+def gpu_fan_set():
+    """Apply a fan setting to one or all NVIDIA GPUs right away.
+
+    Writes the FAN list of nvidia-oc.conf (0 = driver/auto control, 1-100 =
+    static speed) and re-applies it via hive's nvidia-oc script — the same
+    store the per-GPU overclock form uses."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+    gpu = data.get("gpu", "all")
+    mode = str(data.get("mode", "auto")).strip().lower()
+    if mode not in ("auto", "static"):
+        return jsonify({"success": False, "message": "Fan mode must be 'auto' or 'static'."}), 400
+    speed = 0
+    if mode == "static":
+        try:
+            speed = int(data.get("speed", 0))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Fan speed must be an integer."}), 400
+        if not (1 <= speed <= 100):
+            return jsonify({"success": False, "message": "Static fan speed must be 1-100%."}), 400
+    gpu_index = None
+    if gpu != "all":
+        try:
+            gpu_index = int(gpu)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "GPU index must be an integer or 'all'."}), 400
+        if not (0 <= gpu_index < 64):
+            return jsonify({"success": False, "message": "GPU index out of acceptable bounds (0-63)."}), 400
+    gpus = get_gpu_stats().get("gpus", [])
+    target_count = len(gpus) or 1
+    if gpu_index is not None:
+        tgt = next((g for g in gpus if g.get("index") == gpu_index), None)
+        if tgt and tgt.get("brand") != "NVIDIA":
+            return jsonify({"success": False, "message": "Fan control is only supported for NVIDIA GPUs."}), 400
+    elif any(g.get("brand") != "NVIDIA" for g in gpus):
+        return jsonify({"success": False, "message": "Fan control is only supported for NVIDIA GPUs (this rig has AMD GPUs)."}), 400
+
+    backup_configs()
+    config = parse_shell_config(NVIDIA_OC_CONF)
+    fan = config.get("FAN", "").split()
+    if len(fan) < target_count:
+        fan += ["0"] * (target_count - len(fan))
+    new_val = str(speed)
+    if gpu_index is None:
+        fan = [new_val] * target_count
+    else:
+        fan[gpu_index] = new_val
+    config["FAN"] = " ".join(fan)
+    if not write_shell_config(NVIDIA_OC_CONF, config):
+        return jsonify({"success": False, "message": "Failed to write nvidia-oc.conf"}), 500
+    stdout, stderr, code = run_command("sudo /hive/sbin/nvidia-oc")
+    label = "all GPUs" if gpu_index is None else f"GPU #{gpu_index}"
+    logging.info(f"GPU fan {label} -> {mode}" + (f" {speed}%" if mode == "static" else "") +
+                 f" by IP: {request.remote_addr}")
+    if code == 0:
+        return jsonify({"success": True,
+                        "message": f"Fan set to auto on {label}." if mode == "auto" else f"Fan speed set to {speed}% on {label}."})
+    return jsonify({"success": False, "message": "Failed to apply fan settings (nvidia-oc). " + (stderr or "")[:150]}), 500
+
 @app.route('/api/update/check', methods=['GET'])
 def check_update():
     try:

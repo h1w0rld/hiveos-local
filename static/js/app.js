@@ -2,6 +2,7 @@
 let activeOverclocks = {};
 let csrfToken = '';
 let activeHardwareTab = 'gpus';
+let activeDashTab = 'gpus';
 let lastStatsData = null;
 let lastHugepagesEnabled = false;
 
@@ -64,6 +65,11 @@ function switchHardwareTab(showGpus) {
     
     gpuContainer.classList.toggle('d-none', !showGpus);
     igpuContainer.classList.toggle('d-none', showGpus);
+    // CPU Mining card belongs to the iGPU sub-view, OC guide to the GPU Cards sub-view
+    const cpuCard = document.getElementById('cpuCardContainer');
+    const ocGuide = document.getElementById('ocGuideContainer');
+    if (cpuCard) cpuCard.classList.toggle('d-none', !(!showGpus && activeDashTab === 'gpus'));
+    if (ocGuide) ocGuide.classList.toggle('d-none', !(showGpus && activeDashTab === 'gpus'));
     
     gpusBtn.classList.toggle('btn-primary', showGpus);
     gpusBtn.classList.toggle('btn-outline-primary', !showGpus);
@@ -326,9 +332,28 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Dashboard section tabs (GPUs / Wallets / Flight Sheets)
     document.getElementById('dashTabGpusBtn').addEventListener('click', () => showDashTab('gpus'));
+    document.getElementById('dashTabFansBtn').addEventListener('click', () => showDashTab('fans'));
     document.getElementById('dashTabWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
     document.getElementById('dashTabFsheetsBtn').addEventListener('click', () => showDashTab('fsheets'));
+    document.getElementById('dashTabPresetsBtn').addEventListener('click', () => showDashTab('presets'));
+    document.getElementById('dashTabServicesBtn').addEventListener('click', () => showDashTab('services'));
     document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
+
+    // GPU Fans tab
+    document.getElementById('gpuFansRefreshBtn').addEventListener('click', () => fetchStats());
+    document.getElementById('gpuFanAllMode').addEventListener('change', function() {
+        document.getElementById('gpuFanAllSpeedCol').classList.toggle('d-none', this.value !== 'static');
+    });
+    document.getElementById('gpuFanAllForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const mode = document.getElementById('gpuFanAllMode').value;
+        const speed = parseInt(document.getElementById('gpuFanAllSpeed').value, 10);
+        if (mode === 'static' && (!Number.isFinite(speed) || speed < 1 || speed > 100)) {
+            showToast('Static fan speed must be 1-100%.', false);
+            return;
+        }
+        await postGpuFan({ gpu: 'all', mode: mode, speed: mode === 'static' ? speed : 0 }, e.submitter);
+    });
 
     // CPU mining settings modal save handler
     document.getElementById('cpuSettingsSaveBtn').addEventListener('click', async function() {
@@ -949,6 +974,7 @@ function showView(view) {
     } else if (view === 'accesses') {
         loadAccessList();
     } else if (view === 'dashboard') {
+        showDashTab(activeDashTab);
         fetchStats();
     }
 }
@@ -1166,6 +1192,8 @@ async function fetchStats() {
         renderGpus(data.gpus);
         renderIgpus(data.igpus || [], data.system);
         lastStatsData = data;
+        // Keep the GPU fan table live while the Fans tab is open
+        if (activeDashTab === 'fans') renderGpuFanTable();
         
     } catch (error) {
         console.error("Error fetching stats:", error);
@@ -3331,25 +3359,38 @@ async function importFromClipboard() {
 
 // Switch the dashboard section tabs (GPUs / Wallets / Flight Sheets)
 function showDashTab(tab) {
+    activeDashTab = tab;
     const isGpus = tab === 'gpus';
-    const isWallets = tab === 'wallets';
-    const isFsheets = tab === 'fsheets';
-    [['dashTabGpusBtn', isGpus], ['dashTabWalletsBtn', isWallets], ['dashTabFsheetsBtn', isFsheets]].forEach(([id, on]) => {
+    const isGpusCards = isGpus && activeHardwareTab === 'gpus';
+    const isIgpu = isGpus && activeHardwareTab !== 'gpus';
+    [['dashTabGpusBtn', isGpus], ['dashTabFansBtn', tab === 'fans'], ['dashTabWalletsBtn', tab === 'wallets'],
+     ['dashTabFsheetsBtn', tab === 'fsheets'], ['dashTabPresetsBtn', tab === 'presets'],
+     ['dashTabServicesBtn', tab === 'services']].forEach(([id, on]) => {
         const b = document.getElementById(id);
         b.classList.toggle('btn-primary', on);
         b.classList.toggle('btn-outline-primary', !on);
         b.classList.toggle('active', on);
     });
     // GPUs tab shows the gpu or igpu grid per the hardware sub-switch
-    document.getElementById('gpuContainer').classList.toggle('d-none', !(isGpus && activeHardwareTab === 'gpus'));
-    document.getElementById('igpuContainer').classList.toggle('d-none', !(isGpus && activeHardwareTab !== 'gpus'));
-    document.getElementById('walletsTabContainer').classList.toggle('d-none', !isWallets);
-    document.getElementById('fsheetsTabContainer').classList.toggle('d-none', !isFsheets);
+    document.getElementById('gpuContainer').classList.toggle('d-none', !isGpusCards);
+    document.getElementById('igpuContainer').classList.toggle('d-none', !isIgpu);
+    // CPU Mining card lives in the CPU iGPU sub-view, OC guide in the GPU Cards sub-view
+    document.getElementById('cpuCardContainer').classList.toggle('d-none', !isIgpu);
+    document.getElementById('ocGuideContainer').classList.toggle('d-none', !isGpusCards);
+    document.getElementById('walletsTabContainer').classList.toggle('d-none', tab !== 'wallets');
+    document.getElementById('fansTabContainer').classList.toggle('d-none', tab !== 'fans');
+    document.getElementById('presetsTabContainer').classList.toggle('d-none', tab !== 'presets');
+    document.getElementById('servicesTabContainer').classList.toggle('d-none', tab !== 'services');
+    document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
     // Stats refresh + hardware sub-switch only make sense on the GPUs tab
     document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
-    if (isWallets) renderWallets();
-    if (isFsheets) loadFsheets();
+    if (isWalletsTab(tab)) renderWallets();
+    if (tab === 'fsheets') loadFsheets();
+    if (tab === 'fans') { renderGpuFanTable(); loadFans(); }
+    if (tab === 'presets') loadPresetsList();
 }
+
+function isWalletsTab(tab) { return tab === 'wallets'; }
 
 function openWalletModal() {
     // Legacy entry point: open the modal in "add" mode
@@ -3588,6 +3629,87 @@ async function setFanDuty(hwmon, pwm, duty) {
         showToast('Network error setting fan speed.', false);
     }
 }
+
+// ---------------- GPU fan control (Fans tab, cloud-style autofan table) ----------------
+
+function renderGpuFanTable() {
+    const body = document.getElementById('gpuFanTableBody');
+    if (!body || !lastStatsData || !lastStatsData.gpus) return;
+    const gpus = lastStatsData.gpus;
+    if (!gpus.length) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted small py-3">No GPUs detected.</td></tr>';
+        return;
+    }
+    const fanCfg = (activeOverclocks.nvidia && activeOverclocks.nvidia.fan) || {};
+    body.innerHTML = gpus.map(g => {
+        const i = g.index;
+        const staticVal = parseInt(fanCfg[i], 10) || 0;
+        const isStatic = staticVal > 0;
+        const tempCls = g.temp >= 80 ? 'text-danger' : (g.temp >= 70 ? 'text-warning' : '');
+        const unsupported = g.brand !== 'NVIDIA';
+        return '<tr>' +
+            '<td class="fw-semibold font-monospace">#' + i + '</td>' +
+            '<td class="small">' + escapeHtml(g.model || '') +
+                (unsupported ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis small">' + escapeHtml(g.brand || '') + '</span>' : '') + '</td>' +
+            '<td class="fw-semibold ' + tempCls + '">' + g.temp + ' °C</td>' +
+            '<td class="font-monospace">' + g.fan + '%</td>' +
+            (unsupported
+                ? '<td colspan="2" class="small text-muted">Use Smart Autofan (AMD)</td>'
+                : '<td><select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle gpu-fan-mode" data-gpu="' + i + '" onchange="onGpuFanModeChange(this)" title="Fan mode">' +
+                    '<option value="auto"' + (!isStatic ? ' selected' : '') + '>Auto</option>' +
+                    '<option value="static"' + (isStatic ? ' selected' : '') + '>Static</option>' +
+                '</select></td>' +
+                '<td><input type="number" min="0" max="100" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-speed" data-gpu="' + i + '" value="' + (isStatic ? staticVal : '') + '" placeholder="e.g. 60" style="width: 90px;"' + (!isStatic ? ' disabled' : '') + '></td>') +
+            '<td class="text-end">' + (unsupported ? '' :
+                '<button class="btn btn-sm btn-outline-warning" onclick="applyGpuFan(' + i + ', this)" title="Apply fan setting to this GPU">Apply</button>') + '</td>' +
+        '</tr>';
+    }).join('');
+}
+
+function onGpuFanModeChange(sel) {
+    const row = sel.closest('tr');
+    const speed = row.querySelector('.gpu-fan-speed');
+    if (speed) speed.disabled = sel.value === 'auto';
+}
+
+async function postGpuFan(payload, btn) {
+    let orig;
+    if (btn) {
+        orig = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
+    }
+    try {
+        const response = await apiFetch('/api/gpu-fan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Fan setting applied.' : 'Failed to apply fan setting.'), !!data.success);
+        if (data.success) fetchStats();
+    } catch (e) {
+        showToast('Network error applying fan setting.', false);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = orig;
+        }
+    }
+}
+
+window.onGpuFanModeChange = onGpuFanModeChange;
+
+window.applyGpuFan = async function(gpuIdx, btn) {
+    const row = btn.closest('tr');
+    const mode = row.querySelector('.gpu-fan-mode').value;
+    const speed = parseInt(row.querySelector('.gpu-fan-speed').value, 10);
+    if (mode === 'static' && (!Number.isFinite(speed) || speed < 1 || speed > 100)) {
+        showToast('Static fan speed must be 1-100%.', false);
+        return;
+    }
+    await postGpuFan({ gpu: gpuIdx, mode: mode, speed: mode === 'static' ? speed : 0 }, btn);
+};
 
 // ---------------- Password change ----------------
 

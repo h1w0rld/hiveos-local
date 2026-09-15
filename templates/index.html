@@ -440,11 +440,20 @@
                     <button id="dashTabGpusBtn" type="button" class="btn btn-primary active">
                         <i class="bi bi-gpu-card me-1"></i> GPUs
                     </button>
+                    <button id="dashTabFansBtn" type="button" class="btn btn-outline-primary">
+                        <i class="bi bi-fan me-1"></i> Fans
+                    </button>
                     <button id="dashTabWalletsBtn" type="button" class="btn btn-outline-primary">
                         <i class="bi bi-wallet2 me-1"></i> Wallets
                     </button>
                     <button id="dashTabFsheetsBtn" type="button" class="btn btn-outline-primary">
                         <i class="bi bi-folder2-open me-1"></i> Flight Sheets
+                    </button>
+                    <button id="dashTabPresetsBtn" type="button" class="btn btn-outline-primary">
+                        <i class="bi bi-folder-fill me-1"></i> Presets
+                    </button>
+                    <button id="dashTabServicesBtn" type="button" class="btn btn-outline-primary">
+                        <i class="bi bi-shield-fill-check me-1"></i> Services
                     </button>
                 </div>
                 <div class="d-flex align-items-center gap-2" id="gpusTabControls">
@@ -482,6 +491,80 @@
                 <div class="col-12 text-center py-4">
                     <div class="spinner-border text-info" role="status">
                         <span class="visually-hidden">Loading iGPU Stats...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CPU Mining & Tuning card: shown in the CPU iGPU sub-view -->
+            <div id="cpuCardContainer" class="d-none mt-1">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-cpu text-info"></i> CPU Mining & Tuning
+                            </h2>
+                            <span id="cpuHashrateBadge" class="badge bg-accent-glow text-primary fw-bold font-monospace">0 H/s</span>
+                        </div>
+                        <div class="row g-3 align-items-center">
+                            <div class="col-md-4">
+                                <div class="stat-box">
+                                    <span class="stat-label">Processor</span>
+                                    <span id="cpuModelName" class="stat-value text-secondary-emphasis mb-0" style="font-size: 0.95rem;">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">CPU Temp</span>
+                                    <span id="cpuTemp" class="stat-value">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Huge Pages</span>
+                                    <span id="hugePagesStatus" class="stat-value text-warning">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-md-4 text-md-end">
+                                <button id="toggleHugepagesBtn" class="btn btn-outline-warning fw-semibold px-4 py-2 d-flex align-items-center gap-2 ms-auto">
+                                    <i class="bi bi-gear-fill"></i> Toggle Huge Pages
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Overclocking Quick Guide: shown in the GPU Cards sub-view -->
+            <div id="ocGuideContainer" class="d-none mt-1">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <h3 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                            <i class="bi bi-book text-success"></i> Novice's Guide to Basic GPU Overclocking
+                        </h3>
+                        <div class="row g-4">
+                            <div class="col-md-6">
+                                <div class="guide-box">
+                                    <h4 class="h6 fw-bold text-primary"><i class="bi bi-cpu"></i> NVIDIA Overclocking Rules</h4>
+                                    <ul>
+                                        <li><strong>Core Clock Offset (MHz):</strong> Enter values like <code>-200</code> or <code>+150</code> to offset the graphics clock.</li>
+                                        <li><strong>Absolute Core Clock (MHz):</strong> Enter a value <strong>above 500</strong> (e.g. <code>1450</code>) to lock the core clock to that exact frequency. This reduces heat and power consumption. (Recommended for RTX cards).</li>
+                                        <li><strong>Memory Clock Offset (MHz):</strong> In HiveOS (Linux), memory clocks are <strong>doubled</strong> compared to Windows. E.g., if you set <code>+1000</code> in Windows, enter <code>2000</code> in HiveOS.</li>
+                                        <li><strong>Power Limit (Watts):</strong> Limit the maximum power. Setting it to <code>0</code> or leaving it blank disables limits (allowing maximum base spec).</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="guide-box">
+                                    <h4 class="h6 fw-bold text-success"><i class="bi bi-cpu-fill"></i> AMD Overclocking Rules</h4>
+                                    <ul>
+                                        <li><strong>Core Clock (MHz) & Voltage (mV):</strong> Set the exact core frequency and target core voltage (e.g., <code>1150</code> MHz at <code>800</code> mV).</li>
+                                        <li><strong>Memory Clock (MHz):</strong> Set the memory speed directly (e.g. <code>2000</code>).</li>
+                                        <li><strong>MVDD & VDDCI:</strong> Core memory and controller voltages (set to <code>0</code> to use defaults if you are unsure).</li>
+                                        <li><strong>DPM (State):</strong> Power states 1-7. (Set to <code>4</code> or <code>5</code> for stable power control on Polaris/Vega cards).</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -599,86 +682,70 @@
                     </div>
                 </div>
             </div>
-        </section>
 
-        <!-- CPU Mining Section -->
-        <section class="row g-4 mb-4">
-            <div class="col-md-12">
-                <div class="card glass-card">
+            <!-- Fans tab content -->
+            <div id="fansTabContainer" class="d-none">
+                <div class="card glass-card mb-3">
                     <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
-                                <i class="bi bi-cpu text-info"></i> CPU Mining & Tuning
+                                <i class="bi bi-fan text-info"></i> GPU Fans
                             </h2>
-                            <span id="cpuHashrateBadge" class="badge bg-accent-glow text-primary fw-bold font-monospace">0 H/s</span>
-                        </div>
-                        <div class="row g-3 align-items-center">
-                            <div class="col-md-4">
-                                <div class="stat-box">
-                                    <span class="stat-label">Processor</span>
-                                    <span id="cpuModelName" class="stat-value text-secondary-emphasis mb-0" style="font-size: 0.95rem;">Loading...</span>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="stat-box">
-                                    <span class="stat-label">CPU Temp</span>
-                                    <span id="cpuTemp" class="stat-value">Loading...</span>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="stat-box">
-                                    <span class="stat-label">Huge Pages</span>
-                                    <span id="hugePagesStatus" class="stat-value text-warning">Loading...</span>
-                                </div>
-                            </div>
-                            <div class="col-md-4 text-md-end">
-                                <button id="toggleHugepagesBtn" class="btn btn-outline-warning fw-semibold px-4 py-2 d-flex align-items-center gap-2 ms-auto">
-                                    <i class="bi bi-gear-fill"></i> Toggle Huge Pages
+                            <div class="btn-group" role="group">
+                                <button id="gpuFansRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload GPU temperatures and fan speeds">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
                                 </button>
                             </div>
                         </div>
-                    </div>
-                </div>
-            </div>
-        </section>
 
-        <!-- Services & Tuning and Presets Section -->
-        <section class="row g-4 mb-4">
-            <div class="col-lg-6">
-                <div class="card glass-card h-100">
-                    <div class="card-body">
-                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
-                            <i class="bi bi-shield-fill-check text-warning"></i> Local Rig Services Tuning
-                        </h2>
-                        
-                        <!-- Watchdog Settings Form -->
-                        <form id="watchdogForm" class="mb-4">
-                            <h3 class="h6 fw-bold mb-3 text-secondary-emphasis border-bottom pb-2">
-                                <i class="bi bi-heartpulse text-danger"></i> Hashrate Watchdog
-                            </h3>
-                            <div class="row g-3 align-items-end">
-                                <div class="col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Status</label>
-                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="wdEnabled">
-                                        <option value="0">Disabled</option>
-                                        <option value="1">Enabled</option>
-                                    </select>
-                                </div>
-                                <div class="col-sm-5">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Min Hashrate (MH/s)</label>
-                                    <input type="number" step="0.1" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="wdMinHashrate" placeholder="e.g. 150" required>
-                                </div>
-                                <div class="col-sm-3">
-                                    <button type="submit" class="btn btn-sm btn-warning w-100 py-2 fw-semibold">Save</button>
-                                </div>
+                        <!-- Set settings for all GPUs -->
+                        <form id="gpuFanAllForm" class="row g-2 align-items-end border border-secondary-subtle rounded p-3 mb-3">
+                            <div class="col-6 col-sm-3">
+                                <label class="form-label small fw-semibold text-muted mb-1">Set settings for all GPUs</label>
+                                <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMode" title="Fan mode for all GPUs">
+                                    <option value="auto">Auto</option>
+                                    <option value="static">Static</option>
+                                </select>
+                            </div>
+                            <div class="col-6 col-sm-3 d-none" id="gpuFanAllSpeedCol">
+                                <label class="form-label small fw-semibold text-muted mb-1">Speed (%)</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllSpeed" min="0" max="100" placeholder="e.g. 60">
+                            </div>
+                            <div class="col-6 col-sm-3">
+                                <button type="submit" class="btn btn-sm btn-warning fw-semibold px-3" title="Apply the mode/speed to all GPUs">Apply</button>
                             </div>
                         </form>
-                        
-                        <!-- Autofan Settings Form -->
+
+                        <div class="table-responsive">
+                            <table class="table table-sm table-dark table-borderless align-middle mb-0">
+                                <thead>
+                                    <tr class="small text-muted text-uppercase">
+                                        <th>GPU</th>
+                                        <th>Name</th>
+                                        <th>Temp</th>
+                                        <th>Fan Now</th>
+                                        <th>Mode</th>
+                                        <th>Speed (%)</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gpuFanTableBody">
+                                    <tr><td colspan="7" class="text-center text-muted small py-3">Loading GPUs...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="small text-muted mt-2">
+                            <i class="bi bi-info-circle me-1"></i>Static speed is saved to the overclock config and applied right away. Auto (0) returns the fan to driver control.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card glass-card mb-3">
+                    <div class="card-body">
+                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                            <i class="bi bi-sliders text-success"></i> Smart Autofan Controls
+                        </h2>
                         <form id="autofanForm">
-                            <h3 class="h6 fw-bold mb-3 text-secondary-emphasis border-bottom pb-2">
-                                <i class="bi bi-fan text-success"></i> Smart Autofan Controls
-                            </h3>
                             <div class="row g-3">
                                 <div class="col-6 col-sm-4">
                                     <label class="form-label small fw-semibold text-muted mb-1">Status</label>
@@ -712,97 +779,27 @@
                                 </div>
                             </div>
                         </form>
+                    </div>
+                </div>
 
-                        <!-- Extra (non-GPU) fans -->
-                        <div class="mt-4 border-top border-secondary-subtle pt-3">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <h3 class="h6 fw-bold mb-0 text-secondary-emphasis">
-                                    <i class="bi bi-fan text-info"></i> Extra Fans
-                                </h3>
-                                <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary py-0 px-2"><i class="bi bi-arrow-clockwise"></i></button>
-                            </div>
-                            <div id="fansContainer" class="small">
-                                <div class="text-muted small">Detecting controllable fans...</div>
-                            </div>
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-motherboard text-info"></i> Extra Fans
+                            </h2>
+                            <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Reload motherboard fans"><i class="bi bi-arrow-clockwise"></i></button>
                         </div>
-
-                        <!-- System Updates section -->
-                        <div class="mt-4 border-top border-secondary-subtle pt-3">
-                            <h3 class="h6 fw-bold mb-3 text-secondary-emphasis">
-                                <i class="bi bi-cloud-arrow-down text-info"></i> System Updates
-                            </h3>
-                            <div class="d-flex justify-content-between align-items-center bg-dark-card p-3 rounded border border-secondary-subtle">
-                                <div class="d-flex align-items-center gap-2">
-                                    <span class="small text-muted">Current Version:</span>
-                                    <span class="badge bg-secondary-subtle text-secondary-emphasis fw-bold font-monospace">v<span id="currentVerText">1.0.0</span></span>
-                                </div>
-                                <button id="manualCheckUpdateBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1">
-                                    <i class="bi bi-arrow-repeat"></i> Check
-                                </button>
-                            </div>
-                        </div>
-
-                        <!-- Rig Services Control Panel -->
-                        <div class="mt-4 border-top border-secondary-subtle pt-3">
-                            <h3 class="h6 fw-bold mb-3 text-secondary-emphasis">
-                                <i class="bi bi-cpu-fill text-warning"></i> Background Services Management
-                            </h3>
-                            <div class="table-responsive">
-                                <table class="table table-sm table-dark table-borderless align-middle mb-0" style="font-size: 0.85rem;">
-                                    <thead>
-                                        <tr class="text-muted border-bottom border-secondary-subtle">
-                                            <th>Service Daemon</th>
-                                            <th class="text-end">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr>
-                                            <td>
-                                                <span class="fw-semibold text-white">Watchdog daemon (wd)</span>
-                                                <span class="d-block small text-muted">Controls hashrate thresholds</span>
-                                            </td>
-                                            <td class="text-end">
-                                                <div class="btn-group btn-group-sm">
-                                                    <button class="btn btn-outline-success service-ctrl-btn" data-service="wd" data-action="restart" title="Restart / Start service"><i class="bi bi-play-fill"></i></button>
-                                                    <button class="btn btn-outline-danger service-ctrl-btn" data-service="wd" data-action="stop" title="Stop service"><i class="bi bi-stop-fill"></i></button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        <tr>
-                                            <td>
-                                                <span class="fw-semibold text-white">Autofan daemon (autofan)</span>
-                                                <span class="d-block small text-muted">Regulates fans duty cycles</span>
-                                            </td>
-                                            <td class="text-end">
-                                                <div class="btn-group btn-group-sm">
-                                                    <button class="btn btn-outline-success service-ctrl-btn" data-service="autofan" data-action="restart" title="Restart / Start service"><i class="bi bi-play-fill"></i></button>
-                                                    <button class="btn btn-outline-danger service-ctrl-btn" data-service="autofan" data-action="stop" title="Stop service"><i class="bi bi-stop-fill"></i></button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        <tr>
-                                            <td>
-                                                <span class="fw-semibold text-white">Local Dashboard Service</span>
-                                                <span class="d-block small text-muted">Logger daemon and web server</span>
-                                            </td>
-                                            <td class="text-end">
-                                                <div class="btn-group btn-group-sm">
-                                                    <button class="btn btn-outline-warning service-ctrl-btn" data-service="hiveos-local" data-action="restart" title="Restart local service"><i class="bi bi-arrow-clockwise"></i></button>
-                                                    <button class="btn btn-outline-danger service-ctrl-btn" data-service="hiveos-local" data-action="stop" title="Stop local service"><i class="bi bi-stop-fill"></i></button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
+                        <div id="fansContainer" class="small">
+                            <div class="text-muted small">Detecting controllable fans...</div>
                         </div>
                     </div>
                 </div>
             </div>
-            
-            <div class="col-lg-6">
-                <!-- Local Profile Presets -->
-                <div class="card glass-card h-100">
+
+            <!-- Presets tab content -->
+            <div id="presetsTabContainer" class="d-none">
+                <div class="card glass-card">
                     <div class="card-body d-flex flex-column">
                         <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
                             <i class="bi bi-folder-fill text-primary"></i> Local Profile Presets (Flight Sheets)
@@ -810,12 +807,12 @@
                         <p class="text-muted small mb-3">
                             Save active coins and miner pool configurations as local presets to easily swap configuration setups.
                         </p>
-                        
+
                         <!-- List of presets -->
-                        <div class="flex-grow-1 overflow-auto mb-3" style="max-height: 220px; min-height: 180px;" id="presetsContainer">
+                        <div class="flex-grow-1 overflow-auto mb-3" style="max-height: 380px; min-height: 180px;" id="presetsContainer">
                             <div class="text-center text-muted small py-4">Loading saved presets...</div>
                         </div>
-                        
+
                         <!-- Save Preset Form -->
                         <form id="savePresetForm" class="border-top border-secondary-subtle pt-3">
                             <div class="input-group">
@@ -828,40 +825,110 @@
                     </div>
                 </div>
             </div>
-        </section>
 
-        <!-- Overclocking Quick Guide -->
-        <section class="card glass-card mb-5">
-            <div class="card-body">
-                <h3 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
-                    <i class="bi bi-book text-success"></i> Novice's Guide to Basic GPU Overclocking
-                </h3>
-                <div class="row g-4">
-                    <div class="col-md-6">
-                        <div class="guide-box">
-                            <h4 class="h6 fw-bold text-primary"><i class="bi bi-cpu"></i> NVIDIA Overclocking Rules</h4>
-                            <ul>
-                                <li><strong>Core Clock Offset (MHz):</strong> Enter values like <code>-200</code> or <code>+150</code> to offset the graphics clock.</li>
-                                <li><strong>Absolute Core Clock (MHz):</strong> Enter a value <strong>above 500</strong> (e.g. <code>1450</code>) to lock the core clock to that exact frequency. This reduces heat and power consumption. (Recommended for RTX cards).</li>
-                                <li><strong>Memory Clock Offset (MHz):</strong> In HiveOS (Linux), memory clocks are <strong>doubled</strong> compared to Windows. E.g., if you set <code>+1000</code> in Windows, enter <code>2000</code> in HiveOS.</li>
-                                <li><strong>Power Limit (Watts):</strong> Limit the maximum power. Setting it to <code>0</code> or leaving it blank disables limits (allowing maximum base spec).</li>
-                            </ul>
+            <!-- Services tab content -->
+            <div id="servicesTabContainer" class="d-none">
+                <div class="card glass-card mb-3">
+                    <div class="card-body">
+                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                            <i class="bi bi-heartpulse text-danger"></i> Hashrate Watchdog
+                        </h2>
+                        <form id="watchdogForm" class="mb-2">
+                            <div class="row g-3 align-items-end">
+                                <div class="col-sm-4">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Status</label>
+                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="wdEnabled">
+                                        <option value="0">Disabled</option>
+                                        <option value="1">Enabled</option>
+                                    </select>
+                                </div>
+                                <div class="col-sm-5">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Min Hashrate (MH/s)</label>
+                                    <input type="number" step="0.1" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="wdMinHashrate" placeholder="e.g. 150" required>
+                                </div>
+                                <div class="col-sm-3">
+                                    <button type="submit" class="btn btn-sm btn-warning w-100 py-2 fw-semibold">Save</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="card glass-card mb-3">
+                    <div class="card-body">
+                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                            <i class="bi bi-cloud-arrow-down text-info"></i> System Updates
+                        </h2>
+                        <div class="d-flex justify-content-between align-items-center bg-dark-card p-3 rounded border border-secondary-subtle">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="small text-muted">Current Version:</span>
+                                <span class="badge bg-secondary-subtle text-secondary-emphasis fw-bold font-monospace">v<span id="currentVerText">1.0.0</span></span>
+                            </div>
+                            <button id="manualCheckUpdateBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1">
+                                <i class="bi bi-arrow-repeat"></i> Check
+                            </button>
                         </div>
                     </div>
-                    <div class="col-md-6">
-                        <div class="guide-box">
-                            <h4 class="h6 fw-bold text-success"><i class="bi bi-cpu-fill"></i> AMD Overclocking Rules</h4>
-                            <ul>
-                                <li><strong>Core Clock (MHz) & Voltage (mV):</strong> Set the exact core frequency and target core voltage (e.g., <code>1150</code> MHz at <code>800</code> mV).</li>
-                                <li><strong>Memory Clock (MHz):</strong> Set the memory speed directly (e.g. <code>2000</code>).</li>
-                                <li><strong>MVDD & VDDCI:</strong> Core memory and controller voltages (set to <code>0</code> to use defaults if you are unsure).</li>
-                                <li><strong>DPM (State):</strong> Power states 1-7. (Set to <code>4</code> or <code>5</code> for stable power control on Polaris/Vega cards).</li>
-                            </ul>
+                </div>
+
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
+                            <i class="bi bi-cpu-fill text-warning"></i> Background Services Management
+                        </h2>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-dark table-borderless align-middle mb-0" style="font-size: 0.85rem;">
+                                <thead>
+                                    <tr class="text-muted border-bottom border-secondary-subtle">
+                                        <th>Service Daemon</th>
+                                        <th class="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>
+                                            <span class="fw-semibold text-white">Watchdog daemon (wd)</span>
+                                            <span class="d-block small text-muted">Controls hashrate thresholds</span>
+                                        </td>
+                                        <td class="text-end">
+                                            <div class="btn-group btn-group-sm">
+                                                <button class="btn btn-outline-success service-ctrl-btn" data-service="wd" data-action="restart" title="Restart / Start service"><i class="bi bi-play-fill"></i></button>
+                                                <button class="btn btn-outline-danger service-ctrl-btn" data-service="wd" data-action="stop" title="Stop service"><i class="bi bi-stop-fill"></i></button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>
+                                            <span class="fw-semibold text-white">Autofan daemon (autofan)</span>
+                                            <span class="d-block small text-muted">Regulates fans duty cycles</span>
+                                        </td>
+                                        <td class="text-end">
+                                            <div class="btn-group btn-group-sm">
+                                                <button class="btn btn-outline-success service-ctrl-btn" data-service="autofan" data-action="restart" title="Restart / Start service"><i class="bi bi-play-fill"></i></button>
+                                                <button class="btn btn-outline-danger service-ctrl-btn" data-service="autofan" data-action="stop" title="Stop service"><i class="bi bi-stop-fill"></i></button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>
+                                            <span class="fw-semibold text-white">Local Dashboard Service</span>
+                                            <span class="d-block small text-muted">Logger daemon and web server</span>
+                                        </td>
+                                        <td class="text-end">
+                                            <div class="btn-group btn-group-sm">
+                                                <button class="btn btn-outline-warning service-ctrl-btn" data-service="hiveos-local" data-action="restart" title="Restart local service"><i class="bi bi-arrow-clockwise"></i></button>
+                                                <button class="btn btn-outline-danger service-ctrl-btn" data-service="hiveos-local" data-action="stop" title="Stop local service"><i class="bi bi-stop-fill"></i></button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
             </div>
         </section>
+
         </div><!-- /view-dashboard -->
     </div>
 
