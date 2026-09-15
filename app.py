@@ -2282,6 +2282,9 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
             return False, "Wallet address is required for a custom miner flight sheet."
 
         worker_name = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+        # HiveOS resolves %WAL%/%WORKER_NAME% server-side; our local apply must do it
+        # itself or the miner would literally mine to "%WAL%.%WORKER_NAME%"
+        user_config = user_config.replace("%WAL%", wallet).replace("%worker_name%", worker_name).replace("%WORKER_NAME%", worker_name)
         wallet_conf = parse_shell_config(WALLET_CONF_PATH)
         wallet_conf.clear()
         if fs_name:
