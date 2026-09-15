@@ -340,19 +340,15 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
 
     // GPU Fans tab
-    document.getElementById('gpuFansRefreshBtn').addEventListener('click', () => fetchStats());
+    document.getElementById('gpuFansRefreshBtn').addEventListener('click', () => { fetchStats(); loadAutofan(); });
     document.getElementById('gpuFanAllMode').addEventListener('change', function() {
-        document.getElementById('gpuFanAllSpeedCol').classList.toggle('d-none', this.value !== 'static');
+        document.getElementById('gpuFanAllStaticCol').classList.toggle('d-none', this.value !== 'static');
     });
     document.getElementById('gpuFanAllForm').addEventListener('submit', async function(e) {
         e.preventDefault();
-        const mode = document.getElementById('gpuFanAllMode').value;
-        const speed = parseInt(document.getElementById('gpuFanAllSpeed').value, 10);
-        if (mode === 'static' && (!Number.isFinite(speed) || speed < 1 || speed > 100)) {
-            showToast('Static fan speed must be 1-100%.', false);
-            return;
-        }
-        await postGpuFan({ gpu: 'all', mode: mode, speed: mode === 'static' ? speed : 0 }, e.submitter);
+        const payload = gpuFanRowPayload(this, 'all');
+        if (!payload) return;
+        await postGpuFan(payload, e.submitter);
     });
 
     // CPU mining settings modal save handler
@@ -713,21 +709,25 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Autofan form submit
+    // AutoFan form submit (global settings)
     document.getElementById('autofanForm').addEventListener('submit', async function(e) {
         e.preventDefault();
         const btn = this.querySelector('button[type="submit"]');
         btn.disabled = true;
-        
+
         const payload = {
-            enabled: document.getElementById('afEnabled').value,
+            enabled: document.getElementById('afEnabledSwitch').checked ? '1' : '0',
             target_temp: document.getElementById('afTargetCore').value,
             target_mem_temp: document.getElementById('afTargetMem').value,
             min_fan: document.getElementById('afMinFan').value,
             max_fan: document.getElementById('afMaxFan').value,
-            critical_temp: document.getElementById('afCriticalTemp').value
+            critical_temp: document.getElementById('afCriticalTemp').value,
+            critical_action: document.getElementById('afCriticalAction').value,
+            smart_mode: document.getElementById('afSmartMode').checked ? '1' : '0',
+            reboot_on_errors: document.getElementById('afRebootOnError').checked ? '1' : '0',
+            no_amd: document.getElementById('afNoAmd').checked ? '1' : '0'
         };
-        
+
         try {
             const response = await apiFetch('/api/autofan', {
                 method: 'POST',
@@ -740,6 +740,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await response.json();
             if (response.ok && data.success) {
                 showToast(data.message, true);
+                loadAutofan();
             } else {
                 showToast(data.message || "Failed to save autofan settings.", false);
             }
@@ -1562,12 +1563,17 @@ async function loadTuningSettings() {
         if (afRes.ok) {
             const afData = await afRes.json();
             if (afData.success) {
-                document.getElementById('afEnabled').value = afData.enabled;
+                window._afData = afData;
+                document.getElementById('afEnabledSwitch').checked = afData.enabled === '1';
                 document.getElementById('afTargetCore').value = afData.target_temp;
                 document.getElementById('afTargetMem').value = afData.target_mem_temp;
                 document.getElementById('afMinFan').value = afData.min_fan;
                 document.getElementById('afMaxFan').value = afData.max_fan;
                 document.getElementById('afCriticalTemp').value = afData.critical_temp;
+                document.getElementById('afCriticalAction').value = afData.critical_action || '';
+                document.getElementById('afSmartMode').checked = afData.smart_mode === '1';
+                document.getElementById('afRebootOnError').checked = afData.reboot_on_errors === '1';
+                document.getElementById('afNoAmd').checked = afData.no_amd === '1';
             }
         }
         
@@ -3386,7 +3392,7 @@ function showDashTab(tab) {
     document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
-    if (tab === 'fans') { renderGpuFanTable(); loadFans(); }
+    if (tab === 'fans') { loadAutofan(); loadFans(); }
     if (tab === 'presets') loadPresetsList();
 }
 
@@ -3630,46 +3636,58 @@ async function setFanDuty(hwmon, pwm, duty) {
     }
 }
 
-// ---------------- GPU fan control (Fans tab, cloud-style autofan table) ----------------
+// ---------------- AutoFan (Fans tab, HiveOS-parity) ----------------
 
 function renderGpuFanTable() {
     const body = document.getElementById('gpuFanTableBody');
-    if (!body || !lastStatsData || !lastStatsData.gpus) return;
-    const gpus = lastStatsData.gpus;
+    if (!body || !window._afData || !window._afData.gpus) return;
+    const gpus = window._afData.gpus;
     if (!gpus.length) {
-        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted small py-3">No GPUs detected.</td></tr>';
+        body.innerHTML = '<tr><td colspan="12" class="text-center text-muted small py-3">No GPUs detected.</td></tr>';
         return;
     }
-    const fanCfg = (activeOverclocks.nvidia && activeOverclocks.nvidia.fan) || {};
+    const live = {};
+    ((lastStatsData && lastStatsData.gpus) || []).forEach(g => { live[g.index] = g; });
+    const g_global = window._afData;
     body.innerHTML = gpus.map(g => {
         const i = g.index;
-        const staticVal = parseInt(fanCfg[i], 10) || 0;
-        const isStatic = staticVal > 0;
-        const tempCls = g.temp >= 80 ? 'text-danger' : (g.temp >= 70 ? 'text-warning' : '');
-        const unsupported = g.brand !== 'NVIDIA';
+        const lv = live[i] || {};
+        const isStatic = g.mode === 1;
+        const tempCls = (lv.temp || 0) >= 80 ? 'text-danger' : ((lv.temp || 0) >= 70 ? 'text-warning' : '');
+        const ph = { min: 'e.g. ' + g_global.min_fan, max: 'e.g. ' + g_global.max_fan,
+                     core: 'e.g. ' + g_global.target_temp, mem: 'e.g. ' + g_global.target_mem_temp,
+                     crit: 'e.g. ' + g_global.critical_temp };
+        const numInput = (cls, val, phKey) =>
+            '<input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-' + cls + '" value="' + (val === null || val === undefined ? '' : val) + '" placeholder="' + ph[phKey] + '" style="width: 74px;">';
         return '<tr>' +
             '<td class="fw-semibold font-monospace">#' + i + '</td>' +
-            '<td class="small">' + escapeHtml(g.model || '') +
-                (unsupported ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis small">' + escapeHtml(g.brand || '') + '</span>' : '') + '</td>' +
-            '<td class="fw-semibold ' + tempCls + '">' + g.temp + ' °C</td>' +
-            '<td class="font-monospace">' + g.fan + '%</td>' +
-            (unsupported
-                ? '<td colspan="2" class="small text-muted">Use Smart Autofan (AMD)</td>'
-                : '<td><select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle gpu-fan-mode" data-gpu="' + i + '" onchange="onGpuFanModeChange(this)" title="Fan mode">' +
-                    '<option value="auto"' + (!isStatic ? ' selected' : '') + '>Auto</option>' +
-                    '<option value="static"' + (isStatic ? ' selected' : '') + '>Static</option>' +
-                '</select></td>' +
-                '<td><input type="number" min="0" max="100" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-speed" data-gpu="' + i + '" value="' + (isStatic ? staticVal : '') + '" placeholder="e.g. 60" style="width: 90px;"' + (!isStatic ? ' disabled' : '') + '></td>') +
-            '<td class="text-end">' + (unsupported ? '' :
-                '<button class="btn btn-sm btn-outline-warning" onclick="applyGpuFan(' + i + ', this)" title="Apply fan setting to this GPU">Apply</button>') + '</td>' +
+            '<td class="small" style="min-width: 150px;">' + escapeHtml(lv.model || '') + '</td>' +
+            '<td class="fw-semibold ' + tempCls + '">' + (lv.temp !== undefined ? lv.temp + ' °C' : '—') + '</td>' +
+            '<td class="font-monospace">' + (lv.fan !== undefined ? lv.fan + '%' : '—') + '</td>' +
+            '<td><select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle gpu-fan-mode" onchange="onGpuFanModeChange(this)" title="Fan mode" style="width: 96px;">' +
+                '<option value="auto"' + (!isStatic ? ' selected' : '') + '>Auto</option>' +
+                '<option value="static"' + (isStatic ? ' selected' : '') + '>Static</option>' +
+            '</select></td>' +
+            '<td>' + numInput('static', isStatic ? g.static : '', 'e.g. 60') + '</td>' +
+            '<td>' + numInput('min', g.min, 'min') + '</td>' +
+            '<td>' + numInput('max', g.max, 'max') + '</td>' +
+            '<td>' + numInput('core', g.target_core, 'core') + '</td>' +
+            '<td>' + numInput('mem', g.target_mem, 'mem') + '</td>' +
+            '<td>' + numInput('crit', g.critical, 'crit') + '</td>' +
+            '<td class="text-end"><button class="btn btn-sm btn-outline-warning" onclick="applyGpuFan(' + i + ', this)" title="Apply fan settings to this GPU">Apply</button></td>' +
         '</tr>';
     }).join('');
+    // static input enabled only in static mode
+    body.querySelectorAll('tr').forEach(tr => {
+        const sel = tr.querySelector('.gpu-fan-mode');
+        if (sel) onGpuFanModeChange(sel);
+    });
 }
 
 function onGpuFanModeChange(sel) {
     const row = sel.closest('tr');
-    const speed = row.querySelector('.gpu-fan-speed');
-    if (speed) speed.disabled = sel.value === 'auto';
+    const st = row.querySelector('.gpu-fan-static');
+    if (st) st.disabled = sel.value === 'auto';
 }
 
 async function postGpuFan(payload, btn) {
@@ -3680,14 +3698,17 @@ async function postGpuFan(payload, btn) {
         btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i>';
     }
     try {
-        const response = await apiFetch('/api/gpu-fan', {
+        const response = await apiFetch('/api/autofan/gpu', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
             body: JSON.stringify(payload)
         });
         const data = await response.json();
         showToast(data.message || (data.success ? 'Fan setting applied.' : 'Failed to apply fan setting.'), !!data.success);
-        if (data.success) fetchStats();
+        if (data.success) {
+            await loadAutofan();
+            fetchStats();
+        }
     } catch (e) {
         showToast('Network error applying fan setting.', false);
     } finally {
@@ -3698,18 +3719,68 @@ async function postGpuFan(payload, btn) {
     }
 }
 
+function gpuFanRowPayload(container, gpu) {
+    // Works both for a table row (.gpu-fan-* classes) and the set-all form (#gpuFanAll* ids)
+    const all = gpu === 'all';
+    const sel = k => all ? '#gpuFanAll' + k : '.gpu-fan-' + k.toLowerCase();
+    const num = id => {
+        const el = container.querySelector(sel(id));
+        if (!el) return null;
+        const v = String(el.value).trim();
+        return v === '' ? null : (Number.isFinite(parseInt(v, 10)) ? parseInt(v, 10) : null);
+    };
+    const modeEl = container.querySelector(all ? '#gpuFanAllMode' : '.gpu-fan-mode');
+    const mode = modeEl.value;
+    const payload = { gpu: gpu, mode: mode };
+    const stat = num('Static');
+    if (mode === 'static') {
+        if (stat === null || stat < 1 || stat > 100) {
+            showToast('Static fan speed must be 1-100%.', false);
+            return null;
+        }
+        payload.static = stat;
+    }
+    [['Min', 'min'], ['Max', 'max'], ['Core', 'target_core'], ['Mem', 'target_mem'], ['Crit', 'critical']].forEach(([id, key]) => {
+        const v = num(id);
+        if (v !== null) payload[key] = v;
+    });
+    if (payload.min !== undefined && payload.max !== undefined && payload.min > payload.max) {
+        showToast('Min fan speed cannot be greater than max fan speed.', false);
+        return null;
+    }
+    return payload;
+}
+
 window.onGpuFanModeChange = onGpuFanModeChange;
 
 window.applyGpuFan = async function(gpuIdx, btn) {
     const row = btn.closest('tr');
-    const mode = row.querySelector('.gpu-fan-mode').value;
-    const speed = parseInt(row.querySelector('.gpu-fan-speed').value, 10);
-    if (mode === 'static' && (!Number.isFinite(speed) || speed < 1 || speed > 100)) {
-        showToast('Static fan speed must be 1-100%.', false);
-        return;
-    }
-    await postGpuFan({ gpu: gpuIdx, mode: mode, speed: mode === 'static' ? speed : 0 }, btn);
+    const payload = gpuFanRowPayload(row, gpuIdx);
+    if (!payload) return;
+    await postGpuFan(payload, btn);
 };
+
+async function loadAutofan() {
+    try {
+        const response = await apiFetch('/api/autofan');
+        const data = await response.json();
+        if (response.ok && data.success) {
+            window._afData = data;
+            // General settings form
+            document.getElementById('afEnabledSwitch').checked = data.enabled === '1';
+            document.getElementById('afTargetCore').value = data.target_temp;
+            document.getElementById('afTargetMem').value = data.target_mem_temp;
+            document.getElementById('afMinFan').value = data.min_fan;
+            document.getElementById('afMaxFan').value = data.max_fan;
+            document.getElementById('afCriticalTemp').value = data.critical_temp;
+            document.getElementById('afCriticalAction').value = data.critical_action || '';
+            document.getElementById('afSmartMode').checked = data.smart_mode === '1';
+            document.getElementById('afRebootOnError').checked = data.reboot_on_errors === '1';
+            document.getElementById('afNoAmd').checked = data.no_amd === '1';
+            renderGpuFanTable();
+        }
+    } catch (e) { /* silent */ }
+}
 
 // ---------------- Password change ----------------
 

@@ -699,20 +699,40 @@
                         </div>
 
                         <!-- Set settings for all GPUs -->
-                        <form id="gpuFanAllForm" class="row g-2 align-items-end border border-secondary-subtle rounded p-3 mb-3">
-                            <div class="col-6 col-sm-3">
-                                <label class="form-label small fw-semibold text-muted mb-1">Set settings for all GPUs</label>
-                                <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMode" title="Fan mode for all GPUs">
-                                    <option value="auto">Auto</option>
-                                    <option value="static">Static</option>
-                                </select>
-                            </div>
-                            <div class="col-6 col-sm-3 d-none" id="gpuFanAllSpeedCol">
-                                <label class="form-label small fw-semibold text-muted mb-1">Speed (%)</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllSpeed" min="0" max="100" placeholder="e.g. 60">
-                            </div>
-                            <div class="col-6 col-sm-3">
-                                <button type="submit" class="btn btn-sm btn-warning fw-semibold px-3" title="Apply the mode/speed to all GPUs">Apply</button>
+                        <form id="gpuFanAllForm" class="border border-secondary-subtle rounded p-3 mb-3">
+                            <div class="d-flex flex-wrap align-items-end gap-2">
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Set settings for all GPUs</label>
+                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMode" title="Fan mode for all GPUs" style="width: 120px;">
+                                        <option value="auto">Auto</option>
+                                        <option value="static">Static</option>
+                                    </select>
+                                </div>
+                                <div class="d-none" id="gpuFanAllStaticCol">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Static (%)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllStatic" min="0" max="100" placeholder="e.g. 60" style="width: 90px;">
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Min (%)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMin" min="0" max="100" placeholder="e.g. 30" style="width: 90px;">
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Max (%)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMax" min="0" max="100" placeholder="e.g. 100" style="width: 90px;">
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Core (°C)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllCore" min="5" max="120" placeholder="e.g. 60" style="width: 90px;">
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Memory (°C)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllMem" min="10" max="120" placeholder="e.g. 80" style="width: 90px;">
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Critical (°C)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="gpuFanAllCrit" min="30" max="120" placeholder="e.g. 85" style="width: 90px;">
+                                </div>
+                                <button type="submit" class="btn btn-sm btn-warning fw-semibold px-3" title="Apply to all GPUs">Apply</button>
                             </div>
                         </form>
 
@@ -723,60 +743,85 @@
                                         <th>GPU</th>
                                         <th>Name</th>
                                         <th>Temp</th>
-                                        <th>Fan Now</th>
+                                        <th>Fan</th>
                                         <th>Mode</th>
-                                        <th>Speed (%)</th>
+                                        <th>Static (%)</th>
+                                        <th>Min (%)</th>
+                                        <th>Max (%)</th>
+                                        <th>Core (°C)</th>
+                                        <th>Memory (°C)</th>
+                                        <th>Critical (°C)</th>
                                         <th class="text-end">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="gpuFanTableBody">
-                                    <tr><td colspan="7" class="text-center text-muted small py-3">Loading GPUs...</td></tr>
+                                    <tr><td colspan="12" class="text-center text-muted small py-3">Loading GPUs...</td></tr>
                                 </tbody>
                             </table>
                         </div>
                         <div class="small text-muted mt-2">
-                            <i class="bi bi-info-circle me-1"></i>Static speed is saved to the overclock config and applied right away. Auto (0) returns the fan to driver control.
+                            <i class="bi bi-info-circle me-1"></i>Empty fields use the global AutoFan settings. Static mode keeps the fan at a fixed speed (saved to the overclock config); Auto (0) hands the fan to AutoFan/driver control.
                         </div>
                     </div>
                 </div>
 
                 <div class="card glass-card mb-3">
                     <div class="card-body">
-                        <h2 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
-                            <i class="bi bi-sliders text-success"></i> Smart Autofan Controls
-                        </h2>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-sliders text-success"></i> AutoFan
+                            </h2>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" id="afEnabledSwitch" title="Enable AutoFan fan control">
+                                <label class="form-check-label small fw-semibold" for="afEnabledSwitch">Enabled</label>
+                            </div>
+                        </div>
                         <form id="autofanForm">
+                            <h3 class="h6 fw-bold mb-3 text-secondary-emphasis border-bottom pb-2">General settings</h3>
                             <div class="row g-3">
-                                <div class="col-6 col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Status</label>
-                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="afEnabled">
-                                        <option value="0">Disabled</option>
-                                        <option value="1">Enabled</option>
-                                    </select>
-                                </div>
-                                <div class="col-6 col-sm-4">
+                                <div class="col-6 col-sm-4 col-lg-2">
                                     <label class="form-label small fw-semibold text-muted mb-1">Target Core Temp (°C)</label>
-                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afTargetCore" min="30" max="90" placeholder="e.g. 60" required>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afTargetCore" min="5" max="120" placeholder="e.g. 60" required>
                                 </div>
-                                <div class="col-6 col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Target Mem Temp (°C)</label>
-                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afTargetMem" min="40" max="110" placeholder="e.g. 80" required>
+                                <div class="col-6 col-sm-4 col-lg-2">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Target MEM Temp (°C)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afTargetMem" min="0" max="120" placeholder="e.g. 80" required>
                                 </div>
-                                <div class="col-6 col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Min Fan (%)</label>
+                                <div class="col-6 col-sm-4 col-lg-2">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Min fan speed (%)</label>
                                     <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afMinFan" min="0" max="100" placeholder="e.g. 30" required>
                                 </div>
-                                <div class="col-6 col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Max Fan (%)</label>
+                                <div class="col-6 col-sm-4 col-lg-2">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Max fan speed (%)</label>
                                     <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afMaxFan" min="0" max="100" placeholder="e.g. 100" required>
                                 </div>
-                                <div class="col-6 col-sm-4">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Critical Temp (°C)</label>
-                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afCriticalTemp" min="50" max="95" placeholder="e.g. 85" required>
+                                <div class="col-6 col-sm-4 col-lg-2">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Critical temp (°C)</label>
+                                    <input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afCriticalTemp" min="30" max="120" placeholder="e.g. 85" required>
                                 </div>
-                                <div class="col-12 text-end">
-                                    <button type="submit" class="btn btn-sm btn-success px-4 py-2 fw-semibold">Save</button>
+                                <div class="col-6 col-sm-4 col-lg-2">
+                                    <label class="form-label small fw-semibold text-muted mb-1">Critical action</label>
+                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="afCriticalAction" title="Action on reaching the critical temperature">
+                                        <option value="">Stop miner</option>
+                                        <option value="reboot">Reboot</option>
+                                        <option value="shutdown">Shutdown</option>
+                                    </select>
                                 </div>
+                            </div>
+                            <div class="d-flex flex-wrap align-items-center gap-4 mt-3">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="afSmartMode">
+                                    <label class="form-check-label small" for="afSmartMode" title="Changes the target temp depending on fan speed: 1°C per every 10% of fan speed below 50%">Smart mode</label>
+                                </div>
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="afRebootOnError">
+                                    <label class="form-check-label small" for="afRebootOnError" title="Reboot the rig on GPU errors">Reboot on errors</label>
+                                </div>
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="afNoAmd">
+                                    <label class="form-check-label small" for="afNoAmd" title="Do not manage AMD cards, NVIDIA only">Without AMD</label>
+                                </div>
+                                <button type="submit" class="btn btn-sm btn-success px-4 py-2 fw-semibold ms-auto">Save</button>
                             </div>
                         </form>
                     </div>
