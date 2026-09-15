@@ -781,11 +781,11 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('clusterModalSaveBtn').addEventListener('click', saveClusterModal);
     document.getElementById('clusterRigsSaveBtn').addEventListener('click', saveClusterRigs);
 
-    // Access page bindings
-    document.getElementById('accessRefreshBtn').addEventListener('click', loadAccessList);
+    // Access page bindings (each Refresh refreshes only its own card)
+    document.getElementById('accessRefreshBtn').addEventListener('click', () => loadAccessList({routes: true}));
     document.getElementById('addAccessBtn').addEventListener('click', () => openAccessModal(null, null));
     document.getElementById('addJumpBtn').addEventListener('click', () => openJumpModal(null));
-    document.getElementById('jumpRefreshBtn').addEventListener('click', loadAccessList);
+    document.getElementById('jumpRefreshBtn').addEventListener('click', () => loadAccessList({jumps: true}));
     document.getElementById('jumpTestBtn').addEventListener('click', async function() {
         const btn = this;
         const resultEl = document.getElementById('jumpTestResult');
@@ -838,8 +838,8 @@ const AUTO_REFRESH_ITEMS = [[0, 'Off'], [5, '5s'], [10, '10s'], [30, '30s'], [60
 const autoRefreshTimers = {};
 const AUTO_REFRESH_LOADERS = {
     stats: () => fetchStats(),
-    accesses: () => loadAccessList(),
-    jumps: () => loadAccessList(),
+    accesses: () => loadAccessList({routes: true}),
+    jumps: () => loadAccessList({jumps: true}),
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
     wallets: () => renderWallets(),
     fsheets: () => loadFsheets()
@@ -864,14 +864,20 @@ function pushSyncInterval(seconds) {
     }).catch(() => {});
 }
 
-function setAutoRefresh(target, seconds) {
+function setAutoRefresh(target, seconds, skipImmediate) {
     localStorage.setItem('autoRefresh_' + target, String(seconds));
     if (autoRefreshTimers[target]) {
         clearInterval(autoRefreshTimers[target]);
         autoRefreshTimers[target] = null;
     }
+    const loader = AUTO_REFRESH_LOADERS[target] || (() => {});
     if (seconds > 0) {
-        autoRefreshTimers[target] = setInterval(AUTO_REFRESH_LOADERS[target] || (() => {}), seconds * 1000);
+        // A newly picked interval takes effect at once: one refresh right now,
+        // then every N seconds
+        if (!skipImmediate) {
+            try { loader(); } catch (e) { /* ignore */ }
+        }
+        autoRefreshTimers[target] = setInterval(loader, seconds * 1000);
     }
     // The Sync dropdown also defines how often the rig actually syncs with peers
     // (Off only disables UI polling; the background worker keeps its last interval)
@@ -891,7 +897,9 @@ function setupAutoRefreshMenus() {
             });
         });
         paintAutoRefreshMenu(menu, target);
-        setAutoRefresh(target, getAutoRefreshInterval(target));
+        // skipImmediate: restoring the stored interval at startup must not
+        // duplicate the initial data load that already happened
+        setAutoRefresh(target, getAutoRefreshInterval(target), true);
     });
 }
 
@@ -2210,7 +2218,11 @@ function isSelfRig(rigId) {
 
 // ---------------- SSH accesses page ----------------
 
-async function loadAccessList() {
+async function loadAccessList(parts) {
+    // parts: {jumps: bool, routes: bool} — which tables to re-render.
+    // Default (no parts) re-renders both: full reload for tab entry/saves.
+    const wantJumps = !parts || parts.jumps || (!parts.jumps && !parts.routes);
+    const wantRoutes = !parts || parts.routes || (!parts.jumps && !parts.routes);
     try {
         const response = await fetch('/api/cluster/rigs');
         if (response.status === 401) {
@@ -2220,23 +2232,23 @@ async function loadAccessList() {
         const data = await response.json();
         if (response.ok && data.success) {
             clusterData = data;
-            // Fresh data -> dots back to gray "not checked" until re-tested
-            accessTestResults = {};
-            jumpTestResults = {};
             document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
-            renderAccesses();
+            if (wantJumps) renderJumpsTable();
+            if (wantRoutes) renderAccessRoutes();
         }
     } catch (e) {
         console.error('Failed to load accesses:', e);
     }
 }
 
-function renderAccesses() {
-    const body = document.getElementById('accessesTableBody');
+// Each SSH card refreshes only its own table: renderJumpsTable() for the
+// Jump Servers card, renderAccessRoutes() for the Access Routes card.
+// renderAccesses() re-renders both (used by full reloads: tab entry, saves).
+function renderJumpsTable() {
     const jumpBody = document.getElementById('jumpTableBody');
-    if (!clusterData || !clusterData.rigs) return;
-
-    // Jump server library table
+    if (!clusterData) return;
+    // Fresh data -> dots back to gray "not checked" until re-tested
+    jumpTestResults = {};
     const jumps = clusterData.jump_hosts || [];
     if (!jumps.length) {
         jumpBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted small py-3">No jump servers yet. Add one and reuse it for any rig.</td></tr>';
@@ -2260,8 +2272,13 @@ function renderAccesses() {
                 '</div></td></tr>';
         }).join('');
     }
+}
 
-    // Access routes, grouped by rig
+function renderAccessRoutes() {
+    const body = document.getElementById('accessesTableBody');
+    if (!clusterData || !clusterData.rigs) return;
+    // Fresh data -> dots back to gray "not checked" until re-tested
+    accessTestResults = {};
     const rows = [];
     clusterData.rigs.forEach(rig => {
         const rigLabel = escapeHtml(rig.name || rig.id) +
@@ -2300,6 +2317,12 @@ function renderAccesses() {
     } else {
         body.innerHTML = rows.join('');
     }
+}
+
+function renderAccesses() {
+    if (!clusterData || !clusterData.rigs) return;
+    renderJumpsTable();
+    renderAccessRoutes();
 }
 
 function jumpNameById(jumpId) {
