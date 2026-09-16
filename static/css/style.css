@@ -198,15 +198,15 @@ body {
 }
 
 /* Column proportions like the Hive table */
-.af-table th:nth-child(1) { width: 37%; }
+.af-table th:nth-child(1) { width: 34%; }
 .af-table th:nth-child(2) { width: 29%; }
-.af-table th:nth-child(3) { width: 20%; }
-.af-table th:nth-child(4) { width: 14%; }
+.af-table th:nth-child(3) { width: 21%; }
+.af-table th:nth-child(4) { width: 12%; }
 
 .af-th-split {
     display: grid;
-    grid-template-columns: 96px minmax(120px, 1fr) 150px;
-    gap: 0 12px;
+    grid-template-columns: 74px minmax(130px, 1fr) 158px;
+    gap: 0 10px;
     align-items: end;
 }
 
@@ -226,20 +226,40 @@ body {
 /* First table column: GPU info / name / mode select split */
 .af-split {
     display: grid;
-    grid-template-columns: 96px minmax(150px, 1fr) 150px;
-    gap: 0 12px;
+    grid-template-columns: 74px minmax(130px, 1fr) 158px;
+    gap: 0 10px;
     align-items: center;
+}
+
+/* Vertical separators inside the first column group (like Hive: GPU+Name | Fan mode) */
+.af-split > span:last-child {
+    border-left: 1px solid var(--border-color);
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    padding-left: 10px;
+}
+
+/* Vertical borders between the 4 column groups */
+.af-table th:nth-child(1),
+.af-table td:nth-child(1),
+.af-table th:nth-child(2),
+.af-table td:nth-child(2),
+.af-table th:nth-child(3),
+.af-table td:nth-child(3) {
+    border-right: 1px solid var(--border-color);
 }
 
 .af-labels-row td {
     padding-top: 6px;
-    padding-bottom: 0;
+    padding-bottom: 6px;
     color: var(--text-muted);
     font-size: 0.85rem;
 }
 
 .af-cell-label {
-    height: 38px;
+    width: 106px;
+    min-width: 106px;
     display: flex;
     align-items: center;
     color: var(--text-muted);
@@ -277,11 +297,12 @@ body {
     font-size: 0.85rem;
 }
 
-/* Inputs inside the table: 106x38 like the Hive md controls */
+/* Inputs inside the table: 106x38 like the Hive md controls, laid out
+   horizontally as sub-columns (Static | Min | Max, Core | Memory) */
 .af-cells {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-direction: row;
+    gap: 10px;
 }
 
 .af-in {
@@ -331,11 +352,11 @@ body {
 }
 
 .af-mode-wrap select {
-    width: 150px;
+    width: 146px;
     height: 38px;
     padding-left: 34px;
     font-size: 0.9rem;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--input-bg);
     color: var(--text-primary);
     border: 1px solid var(--border-color);
     border-radius: 8px;
