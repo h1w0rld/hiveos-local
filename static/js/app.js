@@ -4487,6 +4487,7 @@ function bindAfAdvancedEvents() {
 
 function afSetEnabledVisibility() {
     const on = document.getElementById('afEnabledSwitch').checked;
+    if (window._af) window._af.enabled = on;
     document.getElementById('afEditorWrap').classList.toggle('d-none', !on);
 }
 
