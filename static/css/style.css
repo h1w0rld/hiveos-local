@@ -141,30 +141,336 @@ body {
     border-color: rgba(99, 102, 241, 0.3);
 }
 
-/* Hive-style autofan table: stacked inputs inside table cells */
-.af-stack {
+/* ---- Autofan page (1:1 HiveOS worker Autofan layout) ---- */
+
+/* Top fields above the card: label column + control column */
+.af-topfields {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-left: 8px;
+}
+
+.af-fieldset {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.af-toplabel {
+    width: 240px;
+    flex: 0 0 240px;
+    margin: 0;
+    font-weight: 600;
+    font-size: 0.925rem;
+    color: var(--text-primary);
+}
+
+.af-ctl {
+    width: 292px;
+    height: 38px;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+/* Table */
+.af-table {
+    --bs-table-bg: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.af-table th,
+.af-table td {
+    background: transparent;
+    color: var(--text-primary);
+    vertical-align: middle;
+    padding: 8px 12px;
+    border-color: var(--border-color);
+}
+
+.af-table thead th {
+    font-weight: 600;
+    font-size: 0.9rem;
+    padding: 10px 12px;
+}
+
+/* Column proportions like the Hive table */
+.af-table th:nth-child(1) { width: 37%; }
+.af-table th:nth-child(2) { width: 29%; }
+.af-table th:nth-child(3) { width: 20%; }
+.af-table th:nth-child(4) { width: 14%; }
+
+.af-th-split {
+    display: grid;
+    grid-template-columns: 96px minmax(120px, 1fr) 150px;
+    gap: 0 12px;
+    align-items: end;
+}
+
+.af-th-split span {
+    white-space: nowrap;
+}
+
+.af-th-split .af-th-second {
+    grid-column: 3;
+}
+
+.af-th-title {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+/* First table column: GPU info / name / mode select split */
+.af-split {
+    display: grid;
+    grid-template-columns: 96px minmax(150px, 1fr) 150px;
+    gap: 0 12px;
+    align-items: center;
+}
+
+.af-labels-row td {
+    padding-top: 6px;
+    padding-bottom: 0;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.af-cell-label {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.af-gpu-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.af-gpu-sub {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.af-name-title {
+    color: #34d399;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.af-name-sub {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.af-setall-text {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+/* Inputs inside the table: 106x38 like the Hive md controls */
+.af-cells {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.af-table .af-subhead th > div {
-    line-height: 1.2;
+.af-in {
+    width: 106px;
+    min-width: 106px;
+    height: 38px;
+    padding: 4px 10px;
+    font-size: 0.9rem;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
 }
 
-.af-table td,
-.af-table th {
-    vertical-align: top;
+.af-in:disabled {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-muted);
+    border-color: var(--border-color);
 }
 
+#afTableModeView {
+    overflow-x: auto;
+}
+
+.af-in:focus,
+.af-mode-wrap select:focus,
+.af-adv-input:focus,
+.af-ctl:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 0.25rem rgba(99, 102, 241, 0.25);
+    background: rgba(0, 0, 0, 0.3);
+}
+
+/* Mode select with the A/S letter badge */
+.af-mode-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.af-mode-wrap .af-ico {
+    position: absolute;
+    left: 8px;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.af-mode-wrap select {
+    width: 150px;
+    height: 38px;
+    padding-left: 34px;
+    font-size: 0.9rem;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.af-ico {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    border: 1px dashed;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    flex: 0 0 18px;
+}
+
+.af-ico-a {
+    color: #4ade80;
+    border-color: #4ade80;
+}
+
+.af-ico-s {
+    color: #fbbf24;
+    border-color: #fbbf24;
+}
+
+/* Set-all separator row */
 tr.af-sep td {
-    height: 10px;
-    border-bottom: 1px solid var(--border-color);
+    height: 12px;
     padding: 0;
 }
 
-.af-adv-card .af-adv-head:hover {
-    background: rgba(255, 255, 255, 0.03);
+/* Advanced mode (space-separated lists) */
+.af-hint {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-bottom: 18px;
+}
+
+.af-hint code {
+    color: #38bdf8;
+    background: transparent;
+    padding: 0;
+}
+
+.af-adv-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin: 14px 0 12px;
+}
+
+.af-adv-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.af-adv-label {
+    flex: 0 0 224px;
+    width: 224px;
+    margin: 0;
+    padding-top: 8px;
+    font-weight: 600;
+    font-size: 0.925rem;
+    color: var(--text-primary);
+}
+
+.af-adv-field {
+    position: relative;
+    flex: 1 1 auto;
+    max-width: 760px;
+}
+
+.af-adv-input {
+    width: 100%;
+    height: 38px;
+    font-size: 0.925rem;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.af-adv-sep {
+    border-top: 1px solid var(--border-color);
+    margin: 20px 0 6px;
+}
+
+/* Caret helper under advanced inputs (which GPU the caret is on) */
+.af-caret {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    background: rgba(10, 12, 18, 0.95);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    white-space: nowrap;
+}
+
+.af-caret .af-caret-warn {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.af-caret .af-caret-bus {
+    color: var(--text-muted);
+}
+
+/* Switches at the card bottom: stacked vertically like Hive */
+.af-switches {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+
+.af-footer-sep {
+    border-color: var(--border-color);
+    opacity: 1;
+    margin: 4px 0 14px;
 }
 
 /* No hover animation on Cluster tab cards (removed per customer request):

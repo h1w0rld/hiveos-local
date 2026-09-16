@@ -339,8 +339,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('dashTabServicesBtn').addEventListener('click', () => showDashTab('services'));
     document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
 
-    // GPU Fans tab (Hive-style autofan page)
-    document.getElementById('gpuFansRefreshBtn').addEventListener('click', () => { fetchStats(); loadAutofan(); });
+    // GPU Fans tab (1:1 copy of the HiveOS worker Autofan page)
     document.getElementById('afTableModeBtn').addEventListener('click', () => {
         document.getElementById('afTableModeView').classList.remove('d-none');
         document.getElementById('afAdvancedModeView').classList.add('d-none');
@@ -352,6 +351,13 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('afTableModeView').classList.add('d-none');
         document.getElementById('afAdvancedModeBtn').classList.replace('btn-outline-primary', 'btn-primary');
         document.getElementById('afTableModeBtn').classList.replace('btn-primary', 'btn-outline-primary');
+    });
+    document.getElementById('afEnabledSwitch').addEventListener('change', afSetEnabledVisibility);
+    document.getElementById('afCriticalAction').addEventListener('change', function() {
+        document.getElementById('afCriticalActionAdv').value = this.value;
+    });
+    document.getElementById('afCriticalActionAdv').addEventListener('change', function() {
+        document.getElementById('afCriticalAction').value = this.value;
     });
     document.getElementById('afSaveBtn').addEventListener('click', async function() {
         const payload = afCollectPayload();
@@ -379,7 +385,11 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.innerHTML = orig;
         }
     });
-    document.getElementById('afResetBtn').addEventListener('click', () => loadAutofan());
+    document.getElementById('afResetBtn').addEventListener('click', () => {
+        // Hive reset: restore the values as they were when the page was loaded
+        if (!window._afInitial) { loadAutofan(); return; }
+        afApplyState(JSON.parse(window._afInitial));
+    });
 
     // CPU mining settings modal save handler
     document.getElementById('cpuSettingsSaveBtn').addEventListener('click', async function() {
@@ -1184,9 +1194,7 @@ async function fetchStats() {
         renderGpus(data.gpus);
         renderIgpus(data.igpus || [], data.system);
         lastStatsData = data;
-        // Keep the GPU fan table live while the Fans tab is open
-        if (activeDashTab === 'fans') updateAfLiveStats();
-        
+
     } catch (error) {
         console.error("Error fetching stats:", error);
         document.getElementById('gpuContainer').innerHTML = `
@@ -1555,14 +1563,7 @@ async function loadTuningSettings() {
             const afData = await afRes.json();
             if (afData.success) {
                 window._afData = afData;
-                document.getElementById('afCriticalTempRO').value = afData.critical_temp;
-                document.getElementById('afCriticalAction').value = afData.critical_action || '';
-                document.getElementById('afEnabledSwitch').checked = afData.enabled === '1';
-                document.getElementById('afRebootOnError').checked = afData.reboot_on_errors === '1';
-                document.getElementById('afSmartMode').checked = afData.smart_mode === '1';
-                document.getElementById('afNoAmd').checked = afData.no_amd === '1';
-                renderAfTable();
-                renderAfAdvanced();
+                applyAutofanData(afData);
             }
         }
         
@@ -3625,207 +3626,344 @@ async function setFanDuty(hwmon, pwm, duty) {
     }
 }
 
-// ---------------- AutoFan (Fans tab, HiveOS-parity layout) ----------------
-// Hive structure: header (critical temp/action + enabled switch + Table/Advanced
-// toggle), a 4-column table (General settings | Speed settings % | Target temp C
-// | Critical temp C) with a "Set settings for all GPUs" row, per-GPU Advanced
-// cards, and one global Save settings / Reset changes pair at the bottom.
+// ---------------- AutoFan (Fans tab, 1:1 HiveOS autofan page copy) ----------------
+// State model mirrors the Hive cloud SPA (module 89230 constants):
+//   items[i] = {mode: 'auto'|'static', static_fan, min_fan, max_fan,
+//               target_temp, target_mem_temp, critical_temp}
+//   common (set-all row template) = {mode:'auto', static_fan:80, min_fan:30,
+//               max_fan:100, target_temp:65, target_mem_temp:90, critical_temp:90}
+// Field mapping (verified against the rig's /hive/sbin/autofan + autofan.conf
+// and the cloud worker.autofan JSON — keys/values are identical):
+//   mode        -> CUSTOM_MODE[i] (1 = static)      cloud: items[].mode
+//   static_fan  -> nvidia-oc.conf FAN[i]            cloud: items[].static_fan
+//   min/max_fan -> CUSTOM_MIN_FAN/CUSTOM_MAX_FAN    cloud: items[].min_fan/max_fan
+//   target_temp/target_mem_temp -> CUSTOM_TARGET_TEMP/CUSTOM_TARGET_MEM_TEMP
+//   critical_temp -> CUSTOM_CRITICAL_TEMP           cloud: items[].critical_temp
+//   enabled/critical_temp_action/reboot_on_errors/smart_mode -> ENABLED/
+//               CRITICAL_TEMP_ACTION/REBOOT_ON_ERROR/SMART_MODE (same names in cloud)
 
-const AF_SETALL_DEFAULTS = { static: 80, min: 30, max: 100, core: 65, mem: 90, crit: 90 };
+const AF_DEFAULTS = { mode: 'auto', static_fan: 80, min_fan: 30, max_fan: 100, target_temp: 65, target_mem_temp: 90, critical_temp: 90 };
+// Keys allowed per mode (Hive: Zo = auto keys, Iq = static keys)
+const AF_AUTO_KEYS = ['mode', 'target_temp', 'target_mem_temp', 'min_fan', 'max_fan', 'critical_temp'];
+const AF_STATIC_KEYS = ['mode', 'static_fan', 'critical_temp'];
+const AF_ADV_FIELDS = [
+    { id: 'afAdvStatic', key: 'static_fan' },
+    { id: 'afAdvCore', key: 'target_temp' },
+    { id: 'afAdvMem', key: 'target_mem_temp' },
+    { id: 'afAdvMin', key: 'min_fan' },
+    { id: 'afAdvMax', key: 'max_fan' },
+    { id: 'afAdvCrit', key: 'critical_temp' }
+];
 
-function afInput(cls, val, ph, extra) {
-    return '<input type="number" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle gpu-fan-' + cls + '" value="' +
-        (val === null || val === undefined ? '' : val) + '" placeholder="' + ph + '" style="width: 76px;' + (extra || '') + '">';
+function afEsc(v) { return escapeHtml(String(v === null || v === undefined ? '' : v)); }
+
+function afGpuInfo(idx) {
+    const g = ((lastStatsData && lastStatsData.gpus) || []).find(x => x.index === idx) || {};
+    return {
+        model: g.model || ('GPU ' + idx),
+        brand: g.brand || '',
+        bus: g.bus_id || '',
+        vram: g.vram_mb ? g.vram_mb + ' MB' : '',
+        subvendor: g.subvendor || ''
+    };
 }
 
-function afModeSelect(mode, id) {
-    return '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle gpu-fan-mode"' +
-        (id ? ' id="' + id + '"' : '') +
-        ' onchange="onGpuFanModeChange(this)" title="Fan mode" style="width: 110px;">' +
+function afModeSelectHtml(mode, rowKey) {
+    return '<span class="af-mode-wrap"><span class="af-ico ' + (mode === 'static' ? 'af-ico-s">S' : 'af-ico-a">A') + '</span>' +
+        '<select class="gpu-fan-mode" data-row="' + rowKey + '" title="Fan mode">' +
         '<option value="auto"' + (mode !== 'static' ? ' selected' : '') + '>Auto</option>' +
         '<option value="static"' + (mode === 'static' ? ' selected' : '') + '>Static</option>' +
-        '</select>';
+        '</select></span>';
+}
+
+// Applicable/blanked rule (Hive): in auto mode the static input is hidden+disabled,
+// in static mode min/max/targets are hidden+disabled, critical is always editable.
+function afFieldApplicable(item, field) {
+    if (field === 'critical_temp' || field === 'mode') return true;
+    if (field === 'static_fan') return item.mode === 'static';
+    return item.mode === 'auto';
+}
+
+function afNumInput(field, rowKey, item) {
+    const show = afFieldApplicable(item, field);
+    const val = show ? afEsc(item[field]) : '';
+    return '<input type="text" inputmode="numeric" autocomplete="off" spellcheck="false" class="af-in gpu-fan-' + field +
+        '" data-row="' + rowKey + '" data-field="' + field + '" value="' + val + '"' + (show ? '' : ' disabled') + '>';
+}
+
+function afValueTds(item, rowKey) {
+    return '<td><div class="af-cells">' +
+            '<div class="af-cell">' + afNumInput('static_fan', rowKey, item) + '</div>' +
+            '<div class="af-cell">' + afNumInput('min_fan', rowKey, item) + '</div>' +
+            '<div class="af-cell">' + afNumInput('max_fan', rowKey, item) + '</div>' +
+        '</div></td>' +
+        '<td><div class="af-cells">' +
+            '<div class="af-cell">' + afNumInput('target_temp', rowKey, item) + '</div>' +
+            '<div class="af-cell">' + afNumInput('target_mem_temp', rowKey, item) + '</div>' +
+        '</div></td>' +
+        '<td><div class="af-cells">' +
+            '<div class="af-cell">' + afNumInput('critical_temp', rowKey, item) + '</div>' +
+        '</div></td>';
 }
 
 function renderAfTable() {
     const body = document.getElementById('afTableBody');
-    if (!body || !window._afData) return;
-    const gpus = window._afData.gpus || [];
-    const d = AF_SETALL_DEFAULTS;
+    const af = window._af;
+    if (!body || !af) return;
+    const d = AF_DEFAULTS;
+
+    // Header sub-labels row (same rhythm as the input rows below it)
+    const labelsRow =
+        '<tr class="af-labels-row">' +
+            '<td><div class="af-split">' +
+                '<span>GPU</span><span>Name</span><span></span>' +
+            '</div></td>' +
+            '<td><div class="af-cells">' +
+                '<div class="af-cell-label">Static</div>' +
+                '<div class="af-cell-label">Min</div>' +
+                '<div class="af-cell-label">Max</div>' +
+            '</div></td>' +
+            '<td><div class="af-cells">' +
+                '<div class="af-cell-label">Core</div>' +
+                '<div class="af-cell-label">Memory</div>' +
+            '</div></td>' +
+            '<td><div class="af-cells"><div class="af-cell-label">Core</div></div></td>' +
+        '</tr>';
+
+    // "Set settings for all GPU" template row (Hive keeps the MH defaults here and
+    // distributes typed values into every per-GPU item on the fly)
+    const setAllItem = { mode: 'auto', static_fan: '', min_fan: '', max_fan: '', target_temp: '', target_mem_temp: '', critical_temp: '' };
     const setAllRow =
         '<tr data-gpu-row="all">' +
-            '<td><div class="fw-semibold small mb-2">Set settings for all GPUs of this rig</div>' + afModeSelect('auto', 'afAllMode') + '</td>' +
-            '<td><div class="af-stack">' + afInput('static', '', d.static, '" id="afAllStatic') + afInput('min', '', d.min, '" id="afAllMin') + afInput('max', '', d.max, '" id="afAllMax') + '</div></td>' +
-            '<td><div class="af-stack">' + afInput('core', '', d.core, '" id="afAllCore') + afInput('mem', '', d.mem, '" id="afAllMem') + '</div></td>' +
-            '<td><div class="af-stack">' + afInput('crit', '', d.crit, '" id="afAllCrit') + '</div></td>' +
+            '<td><div class="af-split">' +
+                '<span class="af-setall-text" style="grid-column: 1 / 3;">Set settings for all GPU of your worker</span>' +
+                '<span>' + afModeSelectHtml('auto', 'all') + '</span>' +
+            '</div></td>' +
+            '<td><div class="af-cells">' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllStatic" data-field="static_fan" placeholder="' + d.static_fan + '"></div>' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllMin" data-field="min_fan" placeholder="' + d.min_fan + '"></div>' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllMax" data-field="max_fan" placeholder="' + d.max_fan + '"></div>' +
+            '</div></td>' +
+            '<td><div class="af-cells">' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllCore" data-field="target_temp" placeholder="' + d.target_temp + '"></div>' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllMem" data-field="target_mem_temp" placeholder="' + d.target_mem_temp + '"></div>' +
+            '</div></td>' +
+            '<td><div class="af-cells">' +
+                '<div class="af-cell"><input type="text" inputmode="numeric" autocomplete="off" class="af-in af-all-input" id="afAllCrit" data-field="critical_temp" placeholder="' + d.critical_temp + '"></div>' +
+            '</div></td>' +
         '</tr>' +
         '<tr class="af-sep"><td colspan="4"></td></tr>';
-    const rows = gpus.map(g => {
-        const isStatic = g.mode === 1;
-        return '<tr data-gpu-row="' + g.index + '">' +
-            '<td><div class="fw-semibold small mb-2">GPU ' + g.index + '</div>' +
-                '<div class="small text-muted mb-2">' + escapeHtml(liveGpuModel(g.index) || 'GPU ' + g.index) + '</div>' +
-                afModeSelect(isStatic ? 'static' : 'auto') + '</td>' +
-            '<td><div class="af-stack">' + afInput('static', isStatic ? g.static : '', d.static) + afInput('min', g.min, d.min) + afInput('max', g.max, d.max) + '</div></td>' +
-            '<td><div class="af-stack">' + afInput('core', g.target_core, d.core) + afInput('mem', g.target_mem, d.mem) + '</div></td>' +
-            '<td><div class="af-stack">' + afInput('crit', g.critical, d.crit) + '</div></td>' +
+
+    const rows = (af.items || []).map(item => {
+        const info = afGpuInfo(item.index);
+        const meta = [info.vram, info.subvendor].filter(Boolean).join(' · ');
+        return '<tr data-gpu-row="' + item.index + '">' +
+            '<td><div class="af-split">' +
+                '<span><div class="af-gpu-title">GPU ' + item.index + '</div>' +
+                    (info.bus ? '<div class="af-gpu-sub">' + afEsc(info.bus) + '</div>' : '') + '</span>' +
+                '<span><div class="af-name-title">' + afEsc(info.model) + '</div>' +
+                    (meta ? '<div class="af-name-sub">' + afEsc(meta) + '</div>' : '') + '</span>' +
+                '<span>' + afModeSelectHtml(item.mode, item.index) + '</span>' +
+            '</div></td>' +
+            afValueTds(item, item.index) +
         '</tr>';
     }).join('');
-    body.innerHTML = setAllRow + rows;
-    // Static input enabled only in static mode; empty set-all stays a template
-    body.querySelectorAll('tr[data-gpu-row]').forEach(tr => {
-        if (tr.dataset.gpuRow === 'all') return;
-        onGpuFanModeChange(tr.querySelector('.gpu-fan-mode'));
+
+    body.innerHTML = labelsRow + setAllRow + rows;
+    bindAfTableEvents();
+}
+
+// Re-sync one row's value cells after a mode change (values stay in state,
+// non-applicable inputs get blanked+disabled exactly like the Hive page)
+function afSyncRow(rowKey) {
+    const af = window._af;
+    const tr = document.querySelector('#afTableBody tr[data-gpu-row="' + rowKey + '"]');
+    if (!tr || !af) return;
+    const item = rowKey === 'all' ? null : af.items.find(x => String(x.index) === String(rowKey));
+    if (!item) return;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = '<table><tr>' + afValueTds(item, rowKey) + '</tr></table>';
+    const tds = wrap.querySelectorAll('td');
+    const rowTds = tr.querySelectorAll('td');
+    for (let i = 0; i < tds.length; i++) {
+        rowTds[i + 1].innerHTML = tds[i].innerHTML;
+    }
+    bindRowInputEvents(tr);
+}
+
+function bindRowInputEvents(scope) {
+    scope.querySelectorAll('input.gpu-fan-static_fan, input.gpu-fan-min_fan, input.gpu-fan-max_fan, input.gpu-fan-target_temp, input.gpu-fan-target_mem_temp, input.gpu-fan-critical_temp').forEach(inp => {
+        inp.addEventListener('input', () => {
+            inp.value = inp.value.replace(/[^\d]/g, '');
+            const item = (window._af.items || []).find(x => String(x.index) === inp.dataset.row);
+            if (item) item[inp.dataset.field] = inp.value;
+        });
     });
-    bindAfSetAll();
-}
-
-function liveGpuModel(idx) {
-    const g = ((lastStatsData && lastStatsData.gpus) || []).find(x => x.index === idx);
-    return g ? (g.model || '') : '';
-}
-
-function onGpuFanModeChange(sel) {
-    if (!sel) return;
-    const row = sel.closest('[data-gpu-row]');
-    if (!row) return;
-    const st = row.querySelector('.gpu-fan-static');
-    const isStatic = sel.value === 'static';
-    if (st) st.disabled = !isStatic;
-    // min/max are ignored by the daemon in static mode
-    ['min', 'max'].forEach(k => {
-        const el = row.querySelector('.gpu-fan-' + k);
-        if (el) el.disabled = isStatic;
+    scope.querySelectorAll('select.gpu-fan-mode').forEach(sel => {
+        sel.addEventListener('change', () => {
+            const ico = sel.parentElement.querySelector('.af-ico');
+            const rowKey = sel.dataset.row;
+            if (rowKey === 'all') {
+                (window._af.items || []).forEach(it => {
+                    it.mode = sel.value;
+                    const tr = document.querySelector('#afTableBody tr[data-gpu-row="' + it.index + '"]');
+                    const s = tr && tr.querySelector('select.gpu-fan-mode');
+                    if (s) s.value = sel.value;
+                    afSyncRow(String(it.index));
+                });
+                if (ico) { ico.className = 'af-ico ' + (sel.value === 'static' ? 'af-ico-s' : 'af-ico-a'); ico.textContent = sel.value === 'static' ? 'S' : 'A'; }
+            } else {
+                const item = (window._af.items || []).find(x => String(x.index) === rowKey);
+                if (item) item.mode = sel.value;
+                if (ico) { ico.className = 'af-ico ' + (sel.value === 'static' ? 'af-ico-s' : 'af-ico-a'); ico.textContent = sel.value === 'static' ? 'S' : 'A'; }
+                afSyncRow(rowKey);
+            }
+        });
     });
 }
-window.onGpuFanModeChange = onGpuFanModeChange;
 
-function renderAfAdvanced() {
-    const cont = document.getElementById('afAdvancedContainer');
-    if (!cont || !window._afData) return;
-    const gpus = window._afData.gpus || [];
-    const d = AF_SETALL_DEFAULTS;
-    cont.innerHTML = gpus.map(g => {
-        const isStatic = g.mode === 1;
-        const lv = ((lastStatsData && lastStatsData.gpus) || []).find(x => x.index === g.index) || {};
-        return '<div class="border border-secondary-subtle rounded mb-2 af-adv-card" data-gpu-row="' + g.index + '">' +
-            '<div class="d-flex justify-content-between align-items-center px-3 py-2 af-adv-head" role="button" onclick="toggleAfCard(this)">' +
-                '<div><span class="fw-semibold me-2">GPU ' + g.index + '</span>' +
-                    '<span class="small text-muted">' + escapeHtml(lv.model || '') + '</span></div>' +
-                '<div class="d-flex align-items-center gap-3">' +
-                    '<span class="small font-monospace af-live-badge" data-gpu-live="' + g.index + '">' +
-                        (lv.temp !== undefined ? lv.temp + ' °C · ' + lv.fan + '%' : '—') + '</span>' +
-                    '<i class="bi bi-chevron-down text-muted"></i>' +
-                '</div>' +
-            '</div>' +
-            '<div class="af-adv-body d-none border-top border-secondary-subtle p-3">' +
-                '<div class="row g-3">' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Fan mode</label>' + afModeSelect(isStatic ? 'static' : 'auto') + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Static (%)</label>' + afInput('static', isStatic ? g.static : '', d.static) + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Min (%)</label>' + afInput('min', g.min, d.min) + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Max (%)</label>' + afInput('max', g.max, d.max) + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Target Core (&deg;C)</label>' + afInput('core', g.target_core, d.core) + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Target Memory (&deg;C)</label>' + afInput('mem', g.target_mem, d.mem) + '</div>' +
-                    '<div class="col-6 col-md-2"><label class="form-label small fw-semibold text-muted mb-1">Critical (&deg;C)</label>' + afInput('crit', g.critical, d.crit) + '</div>' +
-                '</div>' +
-            '</div>' +
-        '</div>';
-    }).join('');
-    cont.querySelectorAll('.af-adv-card').forEach(card => onGpuFanModeChange(card.querySelector('.gpu-fan-mode')));
-}
-
-window.toggleAfCard = function(head) {
-    const body = head.parentElement.querySelector('.af-adv-body');
-    const icon = head.querySelector('i');
-    if (!body) return;
-    body.classList.toggle('d-none');
-    icon.classList.toggle('bi-chevron-down');
-    icon.classList.toggle('bi-chevron-up');
-};
-
-// Typing in the set-all row copies the value into every per-GPU row (both views)
-function bindAfSetAll() {
+function bindAfTableEvents() {
     const body = document.getElementById('afTableBody');
-    if (!body) return;
-    [['Static', 'static'], ['Min', 'min'], ['Max', 'max'], ['Core', 'core'], ['Mem', 'mem'], ['Crit', 'crit']].forEach(([id, cls]) => {
-        const all = document.getElementById('afAll' + id);
-        if (!all) return;
-        all.addEventListener('input', () => {
-            document.getElementById('afTableBody').querySelectorAll('tr[data-gpu-row]:not([data-gpu-row="all"]) .gpu-fan-' + cls).forEach(inp => {
-                inp.value = all.value;
+    if (!body || !window._af) return;
+    bindRowInputEvents(body);
+    // The set-all row copies typed values into every GPU item at once (like Hive
+    // handleCommonChange) — values land in the state even for blanked inputs
+    body.querySelectorAll('.af-all-input').forEach(inp => {
+        inp.addEventListener('input', () => {
+            inp.value = inp.value.replace(/[^\d]/g, '');
+            const field = inp.dataset.field;
+            (window._af.items || []).forEach(it => { it[field] = inp.value; });
+            document.querySelectorAll('#afTableBody tr[data-gpu-row]:not([data-gpu-row="all"]) input.gpu-fan-' + field).forEach(target => {
+                if (!target.disabled) target.value = inp.value;
             });
         });
     });
-    const allMode = document.getElementById('afAllMode');
-    if (allMode) allMode.addEventListener('change', () => {
-        document.getElementById('afTableBody').querySelectorAll('tr[data-gpu-row]:not([data-gpu-row="all"]) .gpu-fan-mode').forEach(sel => {
-            sel.value = allMode.value;
-            onGpuFanModeChange(sel);
-        });
-        // mirror into advanced cards
-        document.querySelectorAll('#afAdvancedContainer [data-gpu-row] .gpu-fan-mode').forEach(sel => {
-            sel.value = allMode.value;
-            onGpuFanModeChange(sel);
-        });
-    });
 }
 
-function afCollectPayload() {
-    const advanced = !document.getElementById('afAdvancedModeView').classList.contains('d-none');
-    const container = advanced ? document.getElementById('afAdvancedContainer') : document.getElementById('afTableBody');
-    const rows = container.querySelectorAll('[data-gpu-row]');
-    const gpus = [];
-    for (const row of rows) {
-        if (row.dataset.gpuRow === 'all') continue;
-        const idx = parseInt(row.dataset.gpuRow, 10);
-        const mode = row.querySelector('.gpu-fan-mode').value;
-        const get = cls => {
-            const el = row.querySelector('.gpu-fan-' + cls);
-            if (!el) return null;
-            const v = String(el.value).trim();
-            return v === '' ? null : (Number.isFinite(parseInt(v, 10)) ? parseInt(v, 10) : NaN);
-        };
-        const entry = { index: idx, mode: mode };
-        if (mode === 'static') {
-            const st = get('static');
-            if (st === null || Number.isNaN(st) || st < 1 || st > 100) {
-                showToast('GPU ' + idx + ': static fan speed must be 1-100% in Static mode.', false);
-                return null;
-            }
-            entry.static = st;
-        }
-        const pairs = [['min', 0, 99], ['max', 1, 100], ['target_core', 5, 120], ['target_mem', 10, 120], ['critical', 30, 120]];
-        for (const [key, lo, hi] of pairs) {
-            const v = get(key === 'target_core' ? 'core' : (key === 'target_mem' ? 'mem' : (key === 'critical' ? 'crit' : key)));
-            if (v === null) continue;
-            if (Number.isNaN(v) || v < lo || v > hi) {
-                showToast('GPU ' + idx + ': ' + key.replace('_', ' ') + ' must be between ' + lo + ' and ' + hi + '.', false);
-                return null;
-            }
-            entry[key] = v;
-        }
-        if (entry.min !== undefined && entry.max !== undefined && entry.min > entry.max) {
-            showToast('GPU ' + idx + ': min fan speed cannot be greater than max.', false);
-            return null;
-        }
-        gpus.push(entry);
+// ---------------- Advanced mode: space-separated per-GPU lists ----------------
+
+function renderAfAdvanced() {
+    const af = window._af;
+    if (!af) return;
+    AF_ADV_FIELDS.forEach(({ id, key }) => {
+        const el = document.getElementById(id);
+        if (el) el.value = (af.items || []).map(it => it[key] === null || it[key] === undefined ? '' : it[key]).join(' ');
+    });
+    bindAfAdvancedEvents();
+}
+
+function afCaretTokenIndex(value, caret) {
+    const tokens = value.split(' ');
+    let pos = caret, idx = 0;
+    for (let i = 0; i < tokens.length; i++) {
+        if (pos <= tokens[i].length) { idx = i; break; }
+        pos -= tokens[i].length + 1;
+        idx = i + 1;
     }
-    return {
-        enabled: document.getElementById('afEnabledSwitch').checked ? '1' : '0',
-        critical_action: document.getElementById('afCriticalAction').value,
-        reboot_on_errors: document.getElementById('afRebootOnError').checked ? '1' : '0',
-        smart_mode: document.getElementById('afSmartMode').checked ? '1' : '0',
-        no_amd: document.getElementById('afNoAmd').checked ? '1' : '0',
-        gpus: gpus
-    };
+    return { tokens, idx };
 }
 
-function updateAfLiveStats() {
-    document.querySelectorAll('.af-live-badge').forEach(badge => {
-        const idx = parseInt(badge.dataset.gpuLive, 10);
-        const g = ((lastStatsData && lastStatsData.gpus) || []).find(x => x.index === idx);
-        if (g) badge.textContent = g.temp + ' °C · ' + g.fan + '%';
+function updateAfCaret(input) {
+    const helper = document.querySelector('.af-caret[data-caret-for="' + input.id + '"]');
+    if (!helper) return;
+    const af = window._af;
+    const count = (af && af.items || []).length;
+    const { tokens, idx } = afCaretTokenIndex(input.value, input.selectionStart || 0);
+    const singleValue = tokens.length < 2;
+    // Hive warns only when the token at the caret has no value while the list
+    // already ends with a number ("fewer values than GPUs")
+    const warn = count > 0 && (tokens[idx] === undefined || tokens[idx] === '') &&
+        tokens.length >= 1 && tokens[tokens.length - 1] !== '' &&
+        !Number.isNaN(parseInt(tokens[tokens.length - 1], 10));
+    let html = '';
+    if (singleValue) {
+        html = count > 1 ? 'GPU 0...GPU ' + (count - 1) : 'GPU 0';
+    } else {
+        const info = afGpuInfo(idx);
+        if (idx < count) {
+            html = '<span>GPU ' + idx + '</span>' +
+                (info.bus ? '<span class="af-caret-bus">' + escapeHtml(info.bus) + '</span>' : '') +
+                '<span>' + escapeHtml(info.model) + (info.vram ? ' ' + escapeHtml(info.vram) : '') + '</span>';
+        }
+        if (warn) {
+            const warnText = idx >= count ? 'Out of GPU count range' : 'GPU missed';
+            html += '<span class="af-caret-warn">' + warnText + '</span>';
+        }
+    }
+    helper.innerHTML = html;
+    helper.classList.toggle('d-none', false);
+}
+
+function bindAfAdvancedEvents() {
+    const af = window._af;
+    if (!af) return;
+    AF_ADV_FIELDS.forEach(({ id, key }) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const tokens = el.value.split(' ').map(t => t.replace(/[^\d]/g, ''));
+            (af.items || []).forEach((it, i) => {
+                if (i < tokens.length) {
+                    // Extra tokens beyond the GPU count are dropped (our backend
+                    // rejects unknown GPU indices); the caret helper warns about it
+                    it[key] = tokens[i];
+                }
+            });
+        });
+        el.addEventListener('focus', () => updateAfCaret(el));
+        el.addEventListener('click', () => updateAfCaret(el));
+        el.addEventListener('keyup', () => updateAfCaret(el));
+        el.addEventListener('blur', () => {
+            const helper = document.querySelector('.af-caret[data-caret-for="' + id + '"]');
+            if (helper) helper.classList.add('d-none');
+        });
     });
+}
+
+// ---------------- Shared: load / reset / collect / save ----------------
+
+function afSetEnabledVisibility() {
+    const on = document.getElementById('afEnabledSwitch').checked;
+    document.getElementById('afEditorWrap').classList.toggle('d-none', !on);
+}
+
+function applyAutofanData(data) {
+    // Per-GPU effective values: fall back to the global scalar, then the default
+    // (the Hive cloud SPA merges globals into every item the same way)
+    const items = (data.gpus || []).map(g => ({
+        index: g.index,
+        mode: g.mode === 1 ? 'static' : 'auto',
+        static_fan: (g.static && g.static > 0) ? g.static : AF_DEFAULTS.static_fan,
+        min_fan: g.min !== null && g.min !== undefined ? g.min : (data.min_fan ? parseInt(data.min_fan, 10) || AF_DEFAULTS.min_fan : AF_DEFAULTS.min_fan),
+        max_fan: g.max !== null && g.max !== undefined ? g.max : (data.max_fan ? parseInt(data.max_fan, 10) || AF_DEFAULTS.max_fan : AF_DEFAULTS.max_fan),
+        target_temp: g.target_core !== null && g.target_core !== undefined ? g.target_core : (data.target_temp ? parseInt(data.target_temp, 10) || AF_DEFAULTS.target_temp : AF_DEFAULTS.target_temp),
+        target_mem_temp: g.target_mem !== null && g.target_mem !== undefined ? g.target_mem : (data.target_mem_temp ? parseInt(data.target_mem_temp, 10) || AF_DEFAULTS.target_mem_temp : AF_DEFAULTS.target_mem_temp),
+        critical_temp: g.critical !== null && g.critical !== undefined ? g.critical : (data.critical_temp ? parseInt(data.critical_temp, 10) || AF_DEFAULTS.critical_temp : AF_DEFAULTS.critical_temp)
+    }));
+    afApplyState({
+        enabled: data.enabled === '1',
+        critical_temp: data.critical_temp,
+        critical_action: data.critical_action || '',
+        reboot_on_errors: data.reboot_on_errors === '1',
+        smart_mode: data.smart_mode === '1',
+        no_amd: data.no_amd === '1',
+        items: items
+    });
+}
+
+function afApplyState(state) {
+    window._af = state;
+    window._afInitial = JSON.stringify(state);
+
+    document.getElementById('afCriticalTempRO').value = state.critical_temp;
+    document.getElementById('afCriticalAction').value = state.critical_action;
+    document.getElementById('afCriticalActionAdv').value = state.critical_action;
+    document.getElementById('afEnabledSwitch').checked = state.enabled;
+    document.getElementById('afRebootOnError').checked = state.reboot_on_errors;
+    document.getElementById('afSmartMode').checked = state.smart_mode;
+    afSetEnabledVisibility();
+    renderAfTable();
+    renderAfAdvanced();
 }
 
 async function loadAutofan() {
@@ -3834,16 +3972,56 @@ async function loadAutofan() {
         const data = await response.json();
         if (response.ok && data.success) {
             window._afData = data;
-            document.getElementById('afCriticalTempRO').value = data.critical_temp;
-            document.getElementById('afCriticalAction').value = data.critical_action || '';
-            document.getElementById('afEnabledSwitch').checked = data.enabled === '1';
-            document.getElementById('afRebootOnError').checked = data.reboot_on_errors === '1';
-            document.getElementById('afSmartMode').checked = data.smart_mode === '1';
-            document.getElementById('afNoAmd').checked = data.no_amd === '1';
-            renderAfTable();
-            renderAfAdvanced();
+            applyAutofanData(data);
         }
     } catch (e) { /* silent */ }
+}
+
+function afCollectPayload() {
+    const af = window._af;
+    if (!af) return null;
+    const gpus = [];
+    for (const it of (af.items || [])) {
+        const num = v => {
+            if (v === null || v === undefined || v === '') return 0;
+            const n = parseInt(v, 10);
+            return Number.isNaN(n) ? NaN : n;
+        };
+        const entry = { index: it.index, mode: it.mode };
+        if (it.mode === 'static') {
+            const st = num(it.static_fan);
+            if (Number.isNaN(st) || st < 1 || st > 100) {
+                showToast('GPU ' + it.index + ': static fan speed must be 1-100% in Static mode.', false);
+                return null;
+            }
+            entry.static = st;
+        } else {
+            entry.static = 0;
+        }
+        const pairs = [['min_fan', 'min', 0, 99], ['max_fan', 'max', 1, 100],
+                       ['target_temp', 'target_core', 5, 120], ['target_mem_temp', 'target_mem', 10, 120],
+                       ['critical_temp', 'critical', 30, 120]];
+        for (const [key, out, lo, hi] of pairs) {
+            const v = num(it[key]);
+            if (Number.isNaN(v) || (v !== 0 && (v < lo || v > hi))) {
+                showToast('GPU ' + it.index + ': ' + key.replace('_fan', ' fan').replace(/_/g, ' ') + ' must be between ' + lo + ' and ' + hi + ' (or 0 to use the global default).', false);
+                return null;
+            }
+            entry[out] = v;
+        }
+        if (entry.min > 0 && entry.max > 0 && entry.min > entry.max) {
+            showToast('GPU ' + it.index + ': min fan speed cannot be greater than max.', false);
+            return null;
+        }
+        gpus.push(entry);
+    }
+    return {
+        enabled: af.enabled ? '1' : '0',
+        critical_action: document.getElementById('afCriticalAction').value,
+        reboot_on_errors: document.getElementById('afRebootOnError').checked ? '1' : '0',
+        smart_mode: document.getElementById('afSmartMode').checked ? '1' : '0',
+        gpus: gpus
+    };
 }
 
 // ---------------- Password change ----------------

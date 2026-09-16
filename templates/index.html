@@ -683,80 +683,56 @@
                 </div>
             </div>
 
-            <!-- Fans tab content -->
+            <!-- Fans tab content (1:1 copy of the HiveOS worker Autofan page) -->
             <div id="fansTabContainer" class="d-none">
+                <!-- Top fields sit above the card, like on the Hive page -->
+                <div class="af-topfields mb-3">
+                    <div class="af-fieldset">
+                        <label class="af-toplabel" for="afCriticalTempRO">Critical temp</label>
+                        <input type="text" class="form-control af-ctl" id="afCriticalTempRO" disabled title="Global critical temperature from autofan.conf">
+                    </div>
+                    <div class="af-fieldset">
+                        <label class="af-toplabel" for="afCriticalAction">Critical action</label>
+                        <select class="form-select af-ctl" id="afCriticalAction" title="Action on reaching the critical temperature">
+                            <option value="">Stop Miner</option>
+                            <option value="reboot">Reboot</option>
+                            <option value="shutdown">Shutdown</option>
+                        </select>
+                    </div>
+                </div>
+
                 <div class="card glass-card mb-3">
                     <div class="card-body">
-                        <!-- Header: critical temp/action + AutoFan enabled (Hive layout) -->
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-3">
-                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
-                                <i class="bi bi-fan text-info"></i> Autofan settings
-                            </h2>
-                            <div class="d-flex flex-wrap align-items-center gap-3">
-                                <div>
-                                    <label class="form-label small fw-semibold text-muted mb-1" for="afCriticalTempRO">Critical temp (&deg;C)</label>
-                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="afCriticalTempRO" readonly title="Global critical temperature from autofan.conf" style="width: 90px;">
-                                </div>
-                                <div>
-                                    <label class="form-label small fw-semibold text-muted mb-1" for="afCriticalAction">Critical action</label>
-                                    <select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle" id="afCriticalAction" title="Action on reaching the critical temperature" style="width: 160px;">
-                                        <option value="">Stop miner</option>
-                                        <option value="reboot">Reboot</option>
-                                        <option value="shutdown">Shutdown</option>
-                                    </select>
-                                </div>
-                                <div class="form-check form-switch mb-0">
-                                    <input class="form-check-input" type="checkbox" role="switch" id="afEnabledSwitch" title="Enable AutoFan fan control">
-                                    <label class="form-check-label small fw-semibold" for="afEnabledSwitch">AutoFan enabled</label>
-                                </div>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" id="afEnabledSwitch" title="Enable AutoFan fan control">
+                                <label class="form-check-label fw-semibold" for="afEnabledSwitch">AutoFan enabled</label>
                             </div>
-                        </div>
-
-                        <!-- Table / Advanced mode toggle -->
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
                             <div class="btn-group btn-group-sm" role="group" aria-label="Fan settings view mode">
-                                <button type="button" id="afTableModeBtn" class="btn btn-primary active" title="Compact table mode">
+                                <button type="button" id="afTableModeBtn" class="btn btn-primary" title="Compact table mode">
                                     <i class="bi bi-table me-1"></i>Table mode
                                 </button>
-                                <button type="button" id="afAdvancedModeBtn" class="btn btn-outline-primary" title="Per-GPU cards with live stats">
+                                <button type="button" id="afAdvancedModeBtn" class="btn btn-outline-primary" title="Space-separated lists per setting">
                                     <i class="bi bi-list-ul me-1"></i>Advanced mode
                                 </button>
                             </div>
-                            <div class="btn-group" role="group">
-                                <button id="gpuFansRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload fan settings and GPU stats">
-                                    <i class="bi bi-arrow-clockwise"></i> Refresh
-                                </button>
-                            </div>
                         </div>
 
-                        <!-- Table mode (Hive-style 4-column table) -->
-                        <div id="afTableModeView">
-                            <div class="table-responsive">
-                                <table class="table table-sm table-dark table-borderless align-middle mb-0 af-table">
+                        <div id="afEditorWrap">
+                            <!-- Table mode (Hive 4-column table with a set-all row) -->
+                            <div id="afTableModeView">
+                                <table class="table af-table mb-0">
                                     <thead>
-                                        <tr class="small text-muted text-uppercase">
-                                            <th style="min-width: 220px;">
-                                                <div class="fw-bold">General settings</div>
-                                                <div class="small text-muted">Fan mode</div>
-                                            </th>
+                                        <tr>
                                             <th>
-                                                <div class="fw-bold">Speed settings</div>
-                                                <div class="small text-muted">, %</div>
+                                                <div class="af-th-split">
+                                                    <span class="af-th-first">General settings</span>
+                                                    <span class="af-th-second">Fan mode</span>
+                                                </div>
                                             </th>
-                                            <th>
-                                                <div class="fw-bold">Target temp</div>
-                                                <div class="small text-muted">, C&deg;</div>
-                                            </th>
-                                            <th>
-                                                <div class="fw-bold">Critical temp</div>
-                                                <div class="small text-muted">, C&deg;</div>
-                                            </th>
-                                        </tr>
-                                        <tr class="small text-muted af-subhead">
-                                            <th><div>GPU</div><div>Name</div></th>
-                                            <th><div>Static</div><div>Min</div><div>Max</div></th>
-                                            <th><div>Core</div><div>Memory</div></th>
-                                            <th><div>Core</div></th>
+                                            <th><div class="af-th-title">Speed settings, %</div></th>
+                                            <th><div class="af-th-title">Target temp, C&deg;</div></th>
+                                            <th><div class="af-th-title">Critical temp, C&deg;</div></th>
                                         </tr>
                                     </thead>
                                     <tbody id="afTableBody">
@@ -764,38 +740,90 @@
                                     </tbody>
                                 </table>
                             </div>
-                            <div class="small text-muted mt-2">
-                                <i class="bi bi-info-circle me-1"></i>Empty fields use the global defaults. Static keeps the fan at a fixed speed; Auto hands the fan to AutoFan/driver control. Edit the fields and press Save settings.
-                            </div>
-                        </div>
 
-                        <!-- Advanced mode (per-GPU cards) -->
-                        <div id="afAdvancedModeView" class="d-none">
-                            <div id="afAdvancedContainer"></div>
-                        </div>
-
-                        <!-- Bottom: switches + save/reset (Hive layout) -->
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-4 pt-3 border-top border-secondary-subtle">
-                            <div class="d-flex flex-wrap align-items-center gap-4">
-                                <div class="form-check form-switch mb-0">
-                                    <input class="form-check-input" type="checkbox" role="switch" id="afRebootOnError">
-                                    <label class="form-check-label small" for="afRebootOnError" title="Reboot the rig on GPU errors">Reboot on errors</label>
+                            <!-- Advanced mode (space-separated per-GPU lists, like Hive) -->
+                            <div id="afAdvancedModeView" class="d-none">
+                                <div class="af-hint">
+                                    You can specify one value for all cards or a list of values for each card, separated by spaces.<br>
+                                    <code>150</code> &ndash; one value for all GPUs.<br>
+                                    <code>0 100 0 0 0 140</code> &ndash; means GPU0 = none, GPU1 = 100, and so on.
                                 </div>
-                                <div class="form-check form-switch mb-0">
-                                    <input class="form-check-input" type="checkbox" role="switch" id="afSmartMode">
-                                    <label class="form-check-label small" for="afSmartMode" title="Changes the target temp depending on fan speed: 1&deg;C per every 10% of fan speed below 50%">Smart mode</label>
+                                <div class="af-adv-title"><span class="af-ico af-ico-s">S</span><span>Static fan mode GPU</span></div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvStatic">Fan, %</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvStatic" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvStatic"></div>
+                                    </div>
                                 </div>
-                                <div class="form-check form-switch mb-0">
-                                    <input class="form-check-input" type="checkbox" role="switch" id="afNoAmd">
-                                    <label class="form-check-label small" for="afNoAmd" title="Do not manage AMD cards, NVIDIA only">Without AMD</label>
+                                <div class="af-adv-sep"></div>
+                                <div class="af-adv-title"><span class="af-ico af-ico-a">A</span><span>Auto fan mode</span></div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvCore">Target Core Temp, C&deg;</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvCore" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvCore"></div>
+                                    </div>
+                                </div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvMem">Target MEM TEMP, C&deg;</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvMem" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvMem"></div>
+                                    </div>
+                                </div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvMin">Min fan speed, %</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvMin" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvMin"></div>
+                                    </div>
+                                </div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvMax">Max fan speed, %</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvMax" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvMax"></div>
+                                    </div>
+                                </div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afAdvCrit">Critical temperature, C&deg;</label>
+                                    <div class="af-adv-field">
+                                        <input type="text" class="form-control af-adv-input" id="afAdvCrit" autocomplete="off" spellcheck="false">
+                                        <div class="af-caret d-none" data-caret-for="afAdvCrit"></div>
+                                    </div>
+                                </div>
+                                <div class="af-adv-row">
+                                    <label class="af-adv-label" for="afCriticalActionAdv">Critical action</label>
+                                    <div class="af-adv-field">
+                                        <select class="form-select af-adv-input" id="afCriticalActionAdv">
+                                            <option value="">Stop Miner</option>
+                                            <option value="reboot">Reboot</option>
+                                            <option value="shutdown">Shutdown</option>
+                                        </select>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="d-flex gap-2">
-                                <button type="button" id="afResetBtn" class="btn btn-sm btn-outline-secondary px-3 fw-semibold" title="Revert unsaved changes">Reset changes</button>
-                                <button type="button" id="afSaveBtn" class="btn btn-sm btn-success px-4 fw-semibold" title="Save all fan settings and apply">Save settings</button>
+
+                            <!-- Switches live at the bottom of the card in both modes -->
+                            <div class="af-switches mt-3">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="afRebootOnError" title="Reboot the rig on GPU errors">
+                                    <label class="form-check-label" for="afRebootOnError">Reboot on errors</label>
+                                </div>
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="afSmartMode" title="Changes the target temp depending on fan speed: 1&deg;C per every 10% of fan speed below 50%">
+                                    <label class="form-check-label" for="afSmartMode">Smart mode</label>
+                                </div>
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <hr class="af-footer-sep">
+                <div class="d-flex justify-content-end gap-2 mb-3">
+                    <button type="button" id="afResetBtn" class="btn btn-sm btn-outline-secondary px-3" title="Revert unsaved changes">Reset changes</button>
+                    <button type="button" id="afSaveBtn" class="btn btn-sm btn-primary px-4" title="Save all fan settings and apply">Save settings</button>
                 </div>
 
                 <div class="card glass-card">

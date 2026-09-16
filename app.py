@@ -1177,13 +1177,15 @@ def get_gpu_stats():
     igpus = []  # Integrated graphics (CPU iGPU), shown in separate tab
     
     if HAS_HIVEOS or IS_LINUX:
-        stdout, stderr, code = run_command("nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,power.draw,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.limit --format=csv,noheader,nounits")
+        stdout, stderr, code = run_command("nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,power.draw,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.limit,pci.bus_id,memory.total --format=csv,noheader,nounits")
         if code == 0 and stdout:
             lines = stdout.strip().split('\n')
             for line in lines:
                 parts = [p.strip() for p in line.split(',')]
                 if len(parts) >= 9:
                     idx = safe_int(parts[0], 0)
+                    bus_id = parts[9] if len(parts) > 9 else ""
+                    vram_mb = safe_int(parts[10]) if len(parts) > 10 else 0
                     gpus.append({
                         "id": f"NV_{idx}",
                         "index": idx,
@@ -1196,7 +1198,10 @@ def get_gpu_stats():
                         "utilization": safe_int(parts[5]),
                         "core_clock": safe_int(parts[6]),
                         "mem_clock": safe_int(parts[7]),
-                        "hashrate": 0.0
+                        "hashrate": 0.0,
+                        "bus_id": _short_pci_bus(bus_id),
+                        "vram_mb": vram_mb,
+                        "subvendor": _pci_subvendor(bus_id)
                     })
 
     if HAS_HIVEOS or IS_LINUX:
@@ -1348,6 +1353,31 @@ def get_gpu_stats():
 
 # ---- Miner hashrate resolution (fills GPU cards + Total Speed) ----
 _HASHRATE_UNITS = {"H": 1e-6, "KH": 1e-3, "MH": 1.0, "GH": 1e3, "TH": 1e6, "PH": 1e9}
+
+_PCI_SUBVENDOR_NAMES = {
+    "0x1462": "MSI", "0x1043": "ASUS", "0x1458": "GIGABYTE", "0x3842": "EVGA",
+    "0x19da": "ZOTAC", "0x196e": "PNY", "0x10de": "NVIDIA", "0x1566": "Palit",
+    "0x14f7": "Gainward", "0x18c4": "KFA2", "0x1616": "Inno3D",
+    "0x7377": "Colorful", "0x148c": "PC Partner",
+}
+
+def _short_pci_bus(bus_id):
+    """00000000:01:00.0 -> 01:00.0 (HiveOS-style bus label)."""
+    m = re.match(r'^(?:[0-9a-fA-F]{4,8}):([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9])$', str(bus_id or "").strip())
+    return m.group(1) if m else ""
+
+def _pci_subvendor(bus_id):
+    """Read the board vendor name from PCI sysfs (falls back to raw id)."""
+    short = _short_pci_bus(bus_id)
+    if not short:
+        return ""
+    path = f"/sys/bus/pci/devices/0000:{short}/subsystem_vendor"
+    try:
+        with open(path) as f:
+            vid = f.read().strip().lower()
+        return _PCI_SUBVENDOR_NAMES.get(vid, vid)
+    except OSError:
+        return ""
 
 def _parse_hashrate_str(text):
     match = re.search(r'([0-9.]+)\s*(PH|TH|GH|MH|KH|H)/s', str(text))
@@ -2074,9 +2104,14 @@ def autofan_save_all():
     critical_action = str(data.get("critical_action", "")).strip().lower()
     reboot_on_errors = str(data.get("reboot_on_errors", "0")).strip()
     smart_mode = str(data.get("smart_mode", "0")).strip()
-    no_amd = str(data.get("no_amd", "0")).strip()
+    # The worker autofan page has no "Without AMD" switch (like the HiveOS cloud
+    # UI); preserve the stored value unless a payload explicitly provides it.
+    preserve_no_amd = "no_amd" not in data
+    no_amd = str(data.get("no_amd", "0")).strip() if not preserve_no_amd else ""
     if enabled not in ("0", "1") or reboot_on_errors not in ("0", "1") \
-            or smart_mode not in ("0", "1") or no_amd not in ("0", "1"):
+            or smart_mode not in ("0", "1"):
+        return jsonify({"success": False, "message": "Switch values must be 0 or 1."}), 400
+    if not preserve_no_amd and no_amd not in ("0", "1"):
         return jsonify({"success": False, "message": "Switch values must be 0 or 1."}), 400
     if critical_action not in ("", "reboot", "shutdown"):
         return jsonify({"success": False, "message": "Critical action must be empty, 'reboot' or 'shutdown'."}), 400
@@ -2147,7 +2182,10 @@ def autofan_save_all():
     conf["CRITICAL_TEMP_ACTION"] = critical_action
     conf["REBOOT_ON_ERROR"] = reboot_on_errors
     conf["SMART_MODE"] = smart_mode
-    conf["NO_AMD"] = no_amd
+    if preserve_no_amd:
+        logging.info("AutoFan save: NO_AMD not in payload, preserving existing value")
+    else:
+        conf["NO_AMD"] = no_amd
 
     order = {p["index"]: p for p in parsed}
     def gpu_values(key, default):
