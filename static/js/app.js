@@ -3645,7 +3645,7 @@ async function setFanDuty(hwmon, pwm, duty) {
 //   enabled/critical_temp_action/reboot_on_errors/smart_mode -> ENABLED/
 //               CRITICAL_TEMP_ACTION/REBOOT_ON_ERROR/SMART_MODE (same names in cloud)
 
-const AF_DEFAULTS = { mode: 'auto', static_fan: 80, min_fan: 30, max_fan: 100, target_temp: 65, target_mem_temp: 90, critical_temp: 90 };
+const AF_DEFAULTS = { mode: 'auto', static_fan: 80, min_fan: 30, max_fan: 100, target_temp: 60, target_mem_temp: 90, critical_temp: 70 };
 // Keys allowed per mode (Hive: Zo = auto keys, Iq = static keys)
 const AF_AUTO_KEYS = ['mode', 'target_temp', 'target_mem_temp', 'min_fan', 'max_fan', 'critical_temp'];
 const AF_STATIC_KEYS = ['mode', 'static_fan', 'critical_temp'];
