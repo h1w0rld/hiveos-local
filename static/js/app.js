@@ -389,9 +389,12 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     document.getElementById('afResetBtn').addEventListener('click', () => {
-        // Re-fetch the saved values from the rig (as it worked before v1.9):
-        // this also picks up conf changes made outside the dashboard
-        loadAutofan();
+        // Reset the table to the default values (Auto mode, Static 80,
+        // Min 30 / Max 100 / Target Core 60 / Target MEM 90 / Critical 70);
+        // press Save settings to apply them to the rig
+        if (!window._af) return;
+        window._af.items = (window._af.items || []).map(it => Object.assign({ index: it.index }, AF_DEFAULTS));
+        afApplyState(window._af);
     });
 
     // CPU mining settings modal save handler
