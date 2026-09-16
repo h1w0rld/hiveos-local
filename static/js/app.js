@@ -3659,8 +3659,10 @@ function afEsc(v) { return escapeHtml(String(v === null || v === undefined ? '' 
 
 function afGpuInfo(idx) {
     const g = ((lastStatsData && lastStatsData.gpus) || []).find(x => x.index === idx) || {};
+    // Hive shows card names without the vendor prefix ("GeForce RTX 3070")
+    const model = (g.model || '').replace(/^NVIDIA\s+/i, '') || ('GPU ' + idx);
     return {
-        model: g.model || ('GPU ' + idx),
+        model: model,
         brand: g.brand || '',
         bus: g.bus_id || '',
         vram: g.vram_mb ? g.vram_mb + ' MB' : '',
@@ -3988,16 +3990,19 @@ function afCollectPayload() {
             return Number.isNaN(n) ? NaN : n;
         };
         const entry = { index: it.index, mode: it.mode };
+        // Static speed is sent for every GPU: the backend stores the whole list
+        // (CUSTOM_STATIC_FAN) so typed values stick even for GPUs still in auto
+        const st = num(it.static_fan);
         if (it.mode === 'static') {
-            const st = num(it.static_fan);
             if (Number.isNaN(st) || st < 1 || st > 100) {
                 showToast('GPU ' + it.index + ': static fan speed must be 1-100% in Static mode.', false);
                 return null;
             }
-            entry.static = st;
-        } else {
-            entry.static = 0;
+        } else if (!Number.isNaN(st) && (st < 0 || st > 100)) {
+            showToast('GPU ' + it.index + ': static fan speed must be 0-100%.', false);
+            return null;
         }
+        entry.static = Number.isNaN(st) ? 0 : st;
         const pairs = [['min_fan', 'min', 0, 99], ['max_fan', 'max', 1, 100],
                        ['target_temp', 'target_core', 5, 120], ['target_mem_temp', 'target_mem', 10, 120],
                        ['critical_temp', 'critical', 30, 120]];

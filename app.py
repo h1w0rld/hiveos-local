@@ -136,7 +136,12 @@ def load_cluster_state():
     if not state.get("self_id"):
         state["self_id"] = uuid.uuid4().hex
     rigs = [r for r in state.get("rigs", []) if isinstance(r, dict) and r.get("id")]
-    if not any(r.get("id") == state["self_id"] for r in rigs):
+    # Do not re-add this rig while an unexpired deletion tombstone for it exists:
+    # a fresh self entry (updated_at=now) would always beat the tombstone on peers
+    # and resurrect the deleted rig on every sync cycle
+    tomb_ids = {str(t.get("id")) for t in state.get("removed", [])
+                if isinstance(t, dict) and t.get("type", "rig") == "rig"}
+    if not any(r.get("id") == state["self_id"] for r in rigs) and state["self_id"] not in tomb_ids:
         rigs.insert(0, make_self_rig_entry(state))
     state["rigs"] = rigs
     # Deletion tombstones: entries removed on any node, kept so deletes propagate
@@ -317,6 +322,10 @@ def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_remove
     entries deleted on any node, so removals propagate instead of resurrecting.
     Returns (rigs, removed)."""
     removed = _merge_tombstones(base_removed, incoming_removed)
+    # Tombstones always win until they expire: a deleted rig keeps re-adding
+    # itself on every sync cycle (fresh updated_at), so comparing timestamps
+    # would resurrect it. Explicit re-add via /api/cluster/rig clears the
+    # tombstone (see api_cluster_rig_save).
     tomb = {t["id"]: t["updated_at"] for t in removed if t.get("type", "rig") == "rig"}
 
     def _ts(entry):
@@ -334,8 +343,9 @@ def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_remove
             continue
         clean = clean_rig_entry(inc)
         rid = clean["id"]
-        if rid in tomb and _ts(clean) <= tomb[rid]:
-            # This entry was deleted on a peer after its last edit
+        if rid in tomb:
+            # This entry was deleted on a peer; tombstones win until they expire
+            # or the rig is explicitly re-added
             if rid in by_id:
                 logging.info(f"Cluster merge: rig '{by_id[rid].get('name', rid)}' removed by cluster deletion")
                 del by_id[rid]
@@ -353,12 +363,9 @@ def merge_rig_lists(base_rigs, incoming_rigs, base_removed=None, incoming_remove
                 by_id[rid] = clean
     # Locally known rigs deleted on a peer disappear as well
     for rid in list(by_id):
-        if rid in tomb and _ts(by_id[rid]) <= tomb[rid]:
+        if rid in tomb:
             logging.info(f"Cluster merge: rig '{by_id[rid].get('name', rid)}' removed by cluster deletion")
             del by_id[rid]
-        elif rid in tomb:
-            # Rig was edited/re-added after the deletion - the tombstone loses
-            removed = [t for t in removed if not (t["id"] == rid and t.get("type", "rig") == "rig")]
     return list(by_id.values()), _prune_tombstones(removed)
 
 # ---------------- SSH transport for cluster communication ----------------
@@ -2061,13 +2068,19 @@ def handle_autofan():
     gpus = get_gpu_stats().get("gpus", [])
     n = len(gpus)
     fan_vals = _af_pad(_af_int_list(oc, "FAN"), n or 1)
+    # CUSTOM_STATIC_FAN keeps the static speeds typed in the advanced editor for
+    # GPUs that are currently in auto mode (FAN only holds speeds for static GPUs)
+    static_saved = _af_pad(_af_int_list(conf, "CUSTOM_STATIC_FAN"), n or 1)
     mode_vals = _af_pad(_af_int_list(conf, "CUSTOM_MODE"), n or 1)
     pergpu = []
     for i in range(n):
+        is_static = mode_vals[i] == "1"
+        static_val = fan_vals[i] if (is_static and fan_vals[i].isdigit()) else \
+            (static_saved[i] if static_saved[i].isdigit() else "0")
         pergpu.append({
             "index": gpus[i].get("index"),
             "mode": int(mode_vals[i]) if mode_vals[i].isdigit() else 0,
-            "static": int(fan_vals[i]) if fan_vals[i].isdigit() else 0,
+            "static": int(static_val) if static_val.isdigit() else 0,
             "min": _af_per_gpu(conf, "CUSTOM_MIN_FAN", n)[i],
             "max": _af_per_gpu(conf, "CUSTOM_MAX_FAN", n)[i],
             "target_core": _af_per_gpu(conf, "CUSTOM_TARGET_TEMP", n)[i],
@@ -2139,14 +2152,16 @@ def autofan_save_all():
         mode = str(g.get("mode", "auto")).strip().lower()
         if mode not in ("auto", "static"):
             return jsonify({"success": False, "message": f"GPU {idx}: fan mode must be 'auto' or 'static'."}), 400
-        static = None
+        static = 0
+        try:
+            static = int(g.get("static", 0) or 0)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": f"GPU {idx}: static fan speed is invalid."}), 400
         if mode == "static":
-            try:
-                static = int(g.get("static"))
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "message": f"GPU {idx}: static fan speed is required."}), 400
             if not (1 <= static <= 100):
                 return jsonify({"success": False, "message": f"GPU {idx}: static fan speed must be 1-100%."}), 400
+        elif not (0 <= static <= 100):
+            return jsonify({"success": False, "message": f"GPU {idx}: static fan speed must be 0-100%."}), 400
         overrides = {}
         for key in ("min", "max", "target_core", "target_mem", "critical"):
             v = g.get(key)
@@ -2197,9 +2212,15 @@ def autofan_save_all():
     conf["CUSTOM_TARGET_TEMP"] = " ".join(gpu_values("target_core", 0))
     conf["CUSTOM_TARGET_MEM_TEMP"] = " ".join(gpu_values("target_mem", 0))
     conf["CUSTOM_CRITICAL_TEMP"] = " ".join(gpu_values("critical", 0))
+    # CUSTOM_STATIC_FAN (ignored by the autofan daemon) keeps the static speeds
+    # typed in the advanced editor for ALL GPUs so the values stick even for
+    # GPUs currently in auto mode and are re-used when a GPU switches to static
+    conf["CUSTOM_STATIC_FAN"] = " ".join(str((order.get(i) or {"static": 0}).get("static", 0) or 0) for i in range(n))
     if not write_shell_config(AUTOFAN_CONF, conf):
         return jsonify({"success": False, "message": "Failed to write autofan.conf"}), 500
 
+    # FAN keeps only the speeds of GPUs currently in static mode (the daemon
+    # reads it for CUSTOM_MODE=1 rows; 0 releases the fan to driver/daemon control)
     oc = parse_shell_config(NVIDIA_OC_CONF)
     oc["FAN"] = " ".join(str(p["static"] if p["mode"] == "static" else 0) for p in
                          (order.get(i) or {"mode": "auto", "static": 0} for i in range(n)))

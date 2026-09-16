@@ -198,14 +198,14 @@ body {
 }
 
 /* Column proportions like the Hive table */
-.af-table th:nth-child(1) { width: 34%; }
-.af-table th:nth-child(2) { width: 29%; }
+.af-table th:nth-child(1) { width: 37%; }
+.af-table th:nth-child(2) { width: 28%; }
 .af-table th:nth-child(3) { width: 21%; }
-.af-table th:nth-child(4) { width: 12%; }
+.af-table th:nth-child(4) { width: 11%; }
 
 .af-th-split {
     display: grid;
-    grid-template-columns: 74px minmax(130px, 1fr) 158px;
+    grid-template-columns: 58px minmax(160px, 1fr) 146px;
     gap: 0 10px;
     align-items: end;
 }
@@ -226,7 +226,7 @@ body {
 /* First table column: GPU info / name / mode select split */
 .af-split {
     display: grid;
-    grid-template-columns: 74px minmax(130px, 1fr) 158px;
+    grid-template-columns: 58px minmax(160px, 1fr) 146px;
     gap: 0 10px;
     align-items: center;
 }
@@ -281,6 +281,7 @@ body {
 .af-name-title {
     color: #34d399;
     font-weight: 500;
+    font-size: 0.85rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -352,7 +353,8 @@ body {
 }
 
 .af-mode-wrap select {
-    width: 146px;
+    width: 100%;
+    min-width: 118px;
     height: 38px;
     padding-left: 34px;
     font-size: 0.9rem;
