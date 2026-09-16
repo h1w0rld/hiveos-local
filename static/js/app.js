@@ -3799,6 +3799,15 @@ function afSyncRow(rowKey) {
     bindRowInputEvents(tr);
 }
 
+function afUpdateModeIcon(sel) {
+    // Keep the A/S letter badge in sync with the select value
+    const ico = sel.parentElement.querySelector('.af-ico');
+    if (ico) {
+        ico.className = 'af-ico ' + (sel.value === 'static' ? 'af-ico-s' : 'af-ico-a');
+        ico.textContent = sel.value === 'static' ? 'S' : 'A';
+    }
+}
+
 function bindRowInputEvents(scope) {
     scope.querySelectorAll('input.gpu-fan-static_fan, input.gpu-fan-min_fan, input.gpu-fan-max_fan, input.gpu-fan-target_temp, input.gpu-fan-target_mem_temp, input.gpu-fan-critical_temp').forEach(inp => {
         inp.addEventListener('input', () => {
@@ -3809,21 +3818,23 @@ function bindRowInputEvents(scope) {
     });
     scope.querySelectorAll('select.gpu-fan-mode').forEach(sel => {
         sel.addEventListener('change', () => {
-            const ico = sel.parentElement.querySelector('.af-ico');
             const rowKey = sel.dataset.row;
             if (rowKey === 'all') {
                 (window._af.items || []).forEach(it => {
                     it.mode = sel.value;
                     const tr = document.querySelector('#afTableBody tr[data-gpu-row="' + it.index + '"]');
                     const s = tr && tr.querySelector('select.gpu-fan-mode');
-                    if (s) s.value = sel.value;
+                    if (s) {
+                        s.value = sel.value;
+                        afUpdateModeIcon(s);
+                    }
                     afSyncRow(String(it.index));
                 });
-                if (ico) { ico.className = 'af-ico ' + (sel.value === 'static' ? 'af-ico-s' : 'af-ico-a'); ico.textContent = sel.value === 'static' ? 'S' : 'A'; }
+                afUpdateModeIcon(sel);
             } else {
                 const item = (window._af.items || []).find(x => String(x.index) === rowKey);
                 if (item) item.mode = sel.value;
-                if (ico) { ico.className = 'af-ico ' + (sel.value === 'static' ? 'af-ico-s' : 'af-ico-a'); ico.textContent = sel.value === 'static' ? 'S' : 'A'; }
+                afUpdateModeIcon(sel);
                 afSyncRow(rowKey);
             }
         });
