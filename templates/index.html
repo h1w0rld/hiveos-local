@@ -1020,42 +1020,71 @@
                         <div class="alert alert-warning small border-warning-subtle" role="alert">
                             <i class="bi bi-exclamation-triangle-fill"></i> <strong>Safety Warning:</strong> Apply settings in small steps. Aggressive overclocks will crash the system!
                         </div>
-                        
+
                         <div class="mb-3">
-                            <label for="nvCore" class="form-label fw-medium d-flex justify-content-between">
-                                Core Clock (MHz)
-                                <span class="text-muted small">Offset OR Locked</span>
-                            </label>
-                            <input type="number" class="form-control bg-dark-input" id="nvCore" name="core" placeholder="e.g. -200 or 1450">
-                            <div class="form-text small">
-                                <strong>Novice Tip:</strong> Offset uses +/- (e.g. -200). Locked uses absolute value > 500 (e.g. 1450).
-                            </div>
+                            <label for="nvCore" class="form-label fw-medium">Core Clock Offset, MHz</label>
+                            <input type="number" class="form-control bg-dark-input" id="nvCore" name="core" placeholder="e.g. 280">
                         </div>
 
                         <div class="mb-3">
-                            <label for="nvMem" class="form-label fw-medium d-flex justify-content-between">
-                                Memory Clock Offset (MHz)
-                                <span class="text-muted small">Linux values are doubled</span>
-                            </label>
+                            <label for="nvLcore" class="form-label fw-medium">Fixed Core Clock, MHz</label>
+                            <input type="number" class="form-control bg-dark-input" id="nvLcore" name="lcore" placeholder="e.g. 1410">
+                            <div class="form-text small">Locks the core to an absolute frequency (overrides the offset).</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="nvMem" class="form-label fw-medium">Memory Clock Offset, MHz</label>
                             <input type="number" class="form-control bg-dark-input" id="nvMem" name="mem" placeholder="e.g. 2000">
-                            <div class="form-text small">
-                                <strong>Novice Tip:</strong> In HiveOS, double the Windows offset value (e.g. Windows +1000 = HiveOS 2000).
+                            <div class="form-text small">In Linux, double the Windows offset value.</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="nvLmem" class="form-label fw-medium">Lock Memory Clock, MHz</label>
+                            <input type="number" class="form-control bg-dark-input" id="nvLmem" name="lmem" placeholder="e.g. 5000">
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-6 mb-3">
+                                <label for="nvPl" class="form-label fw-medium">Power Limit, W</label>
+                                <input type="number" class="form-control bg-dark-input" id="nvPl" name="pl" placeholder="e.g. 130">
+                            </div>
+                            <div class="col-6 mb-3">
+                                <label for="nvFan" class="form-label fw-medium">Fan Speed (%)</label>
+                                <input type="number" class="form-control bg-dark-input" id="nvFan" name="fan" min="0" max="100" placeholder="e.g. 60">
+                                <div class="form-text small">0 = Auto Fan control.</div>
                             </div>
                         </div>
 
                         <div class="mb-3">
-                            <label for="nvPl" class="form-label fw-medium">Power Limit (Watts)</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvPl" name="pl" placeholder="e.g. 220">
-                            <div class="form-text small">
-                                Maximum power cap. Set to 0 to use card defaults.
-                            </div>
+                            <label for="nvDelay" class="form-label fw-medium">Delay before applying OC, s</label>
+                            <input type="number" class="form-control bg-dark-input" id="nvDelay" name="delay" placeholder="e.g. 30">
                         </div>
 
-                        <div class="mb-3">
-                            <label for="nvFan" class="form-label fw-medium">Fan Speed (%)</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvFan" name="fan" min="0" max="100" placeholder="e.g. 60">
-                            <div class="form-text small">
-                                Set fan speed percentage. Set to 0 or leave blank for Auto Fan control.
+                        <hr class="border-secondary-subtle">
+                        <div class="row g-2 small">
+                            <div class="col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvLed" name="led">
+                                    <label class="form-check-label" for="nvLed">Disable LEDs</label>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvPill" name="pill" title="OhGodAnETHlargementPill for GDDR5X cards (1080 Ti)">
+                                    <label class="form-check-label" for="nvPill">"Tablet" for GDDR5X</label>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvP0" name="p0">
+                                    <label class="form-check-label" for="nvP0">Force P0 mode</label>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvIdle" name="idle">
+                                    <label class="form-check-label" for="nvIdle">Idle power reduction</label>
+                                </div>
                             </div>
                         </div>
                     </div>

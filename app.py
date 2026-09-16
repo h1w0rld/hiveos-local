@@ -928,6 +928,25 @@ def validate_overclock_ranges(brand, data):
                 val = int(data["fan"])
                 if not (0 <= val <= 100):
                     return False, "NVIDIA fan speed must be between 0 and 100%."
+
+            if "lcore" in data and str(data["lcore"]).strip() not in ("", "0"):
+                val = int(data["lcore"])
+                if not (500 <= val <= 3000):
+                    return False, "NVIDIA fixed core clock must be between 500 and 3000 MHz."
+
+            if "lmem" in data and str(data["lmem"]).strip() not in ("", "0"):
+                val = int(data["lmem"])
+                if not (0 <= val <= 20000):
+                    return False, "NVIDIA lock memory clock must be between 0 and 20000 MHz."
+
+            if "delay" in data and str(data["delay"]).strip() not in ("", "0"):
+                val = int(data["delay"])
+                if not (0 <= val <= 3600):
+                    return False, "NVIDIA OC apply delay must be between 0 and 3600 seconds."
+
+            for flag in ("led", "p0", "idle", "pill"):
+                if flag in data and str(data[flag]).strip() not in ("", "0", "1"):
+                    return False, f"NVIDIA {flag} flag must be 0 or 1."
                     
         elif brand == "AMD":
             if "core" in data and data["core"] != "":
@@ -1563,7 +1582,13 @@ def get_overclocks_formatted():
             "pl": nv_data.get("PLIMIT", nv_data.get("PL", "")).split(),
             "fan": nv_data.get("FAN", "").split(),
             "lcore": nv_data.get("LCLOCK", "").split(),
-            "lmem": nv_data.get("LMEM", "").split()
+            "lmem": nv_data.get("LMEM", "").split(),
+            # Rig-wide HiveOS flags (cloud OC modal parity)
+            "delay": nv_data.get("RUNNING_DELAY", ""),
+            "led": "1" if nv_data.get("LOGO_BRIGHTNESS", "") == "0" else "0",
+            "p0": "1" if nv_data.get("FORCESTATE", "") == "1" else "0",
+            "idle": "1" if nv_data.get("POWERMIZER", "") == "2" else "0",
+            "pill": "1" if nv_data.get("OHGODAPILL_ENABLED", "") == "1" else "0"
         },
         "amd": {
             "core": amd_data.get("CORE", "").split(),
@@ -1800,10 +1825,27 @@ def save_overclock():
             fan[gpu_index] = str(data["fan"])
         # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM)
         if "lcore" in data:
-            lclock[gpu_index] = str(data["lcore"]).strip()
+            lclock[gpu_index] = "" if str(data["lcore"]).strip() == "0" else str(data["lcore"]).strip()
         if "lmem" in data:
-            lmem[gpu_index] = str(data["lmem"]).strip()
-            
+            lmem[gpu_index] = "" if str(data["lmem"]).strip() == "0" else str(data["lmem"]).strip()
+
+        # Rig-wide flags, HiveOS nvidia-oc.conf semantics (cloud OC modal parity):
+        # RUNNING_DELAY = apply delay, LOGO_BRIGHTNESS 0 = LEDs off,
+        # FORCESTATE 1 = force P0, POWERMIZER 2 = idle power reduction,
+        # OHGODAPILL_* = "tablet" for GDDR5X cards
+        if "delay" in data:
+            config["RUNNING_DELAY"] = "" if str(data["delay"]).strip() in ("", "0") else str(data["delay"]).strip()
+        if "led" in data:
+            config["LOGO_BRIGHTNESS"] = "0" if str(data["led"]).strip() == "1" else ""
+        if "p0" in data:
+            config["FORCESTATE"] = "1" if str(data["p0"]).strip() == "1" else ""
+        if "idle" in data:
+            config["POWERMIZER"] = "2" if str(data["idle"]).strip() == "1" else "1"
+        if "pill" in data:
+            config["OHGODAPILL_ENABLED"] = "1" if str(data["pill"]).strip() == "1" else ""
+            config["OHGODAPILL_START_TIMEOUT"] = ""
+            config["OHGODAPILL_ARGS"] = ""
+
         config.pop("CORE", None)  # legacy key written by older versions
         config.pop("PL", None)
         config["CLOCK"] = " ".join(clock)
@@ -1814,7 +1856,7 @@ def save_overclock():
         config["LMEM"] = " ".join(lmem)
         
         write_shell_config(filepath, config)
-        logging.info(f"NVIDIA GPU {gpu_index} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}")
+        logging.info(f"NVIDIA GPU {gpu_index} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
         
         stdout, stderr, code = run_command("sudo /hive/sbin/nvidia-oc")
         if code != 0:
@@ -3064,7 +3106,14 @@ def reset_overclock():
         "MEM": "",
         "LMEM": "",
         "PLIMIT": "",
-        "FAN": ""
+        "FAN": "",
+        "RUNNING_DELAY": "",
+        "LOGO_BRIGHTNESS": "",
+        "FORCESTATE": "",
+        "POWERMIZER": "",
+        "OHGODAPILL_ENABLED": "",
+        "OHGODAPILL_START_TIMEOUT": "",
+        "OHGODAPILL_ARGS": ""
     }
     amd_stock = {
         "CORE": "",
