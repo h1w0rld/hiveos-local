@@ -3714,6 +3714,18 @@ function afValueTds(item, rowKey) {
         '</div></td>';
 }
 
+// The set-all row mirrors the per-GPU field rules: in auto mode its Static input
+// is blanked+disabled, in static mode Min/Max/Target/MEM are (Critical stays editable)
+function afSyncSetAllRow(mode) {
+    const rules = { static_fan: mode === 'static', min_fan: mode === 'auto', max_fan: mode === 'auto',
+                    target_temp: mode === 'auto', target_mem_temp: mode === 'auto', critical_temp: true };
+    document.querySelectorAll('#afTableBody tr[data-gpu-row="all"] input[data-field]').forEach(el => {
+        const show = rules[el.dataset.field];
+        el.disabled = !show;
+        if (!show) el.value = '';
+    });
+}
+
 function renderAfTable() {
     const body = document.getElementById('afTableBody');
     const af = window._af;
@@ -3778,6 +3790,7 @@ function renderAfTable() {
     }).join('');
 
     body.innerHTML = labelsRow + setAllRow + rows;
+    afSyncSetAllRow('auto');
     bindAfTableEvents();
 }
 
@@ -3831,6 +3844,7 @@ function bindRowInputEvents(scope) {
                     afSyncRow(String(it.index));
                 });
                 afUpdateModeIcon(sel);
+                afSyncSetAllRow(sel.value);
             } else {
                 const item = (window._af.items || []).find(x => String(x.index) === rowKey);
                 if (item) item.mode = sel.value;
