@@ -477,6 +477,77 @@
                 </div>
             </div>
             
+            <!-- All-GPU overclock: shown in the GPU Cards sub-view -->
+            <div id="ocAllContainer" class="d-none mb-1">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-sliders text-primary"></i> Set settings for all GPUs
+                            </h2>
+                            <button id="ocAllApplyBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Apply the filled values to every NVIDIA GPU (empty fields are left unchanged)">Apply</button>
+                        </div>
+                        <div class="row g-2">
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllCore" class="form-label small fw-medium mb-1">Core Clock Offset, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllCore" placeholder="e.g. 280">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllLcore" class="form-label small fw-medium mb-1">Fixed Core Clock, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllLcore" placeholder="e.g. 1410">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllMem" class="form-label small fw-medium mb-1">Memory Clock Offset, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllMem" placeholder="e.g. 2000">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllLmem" class="form-label small fw-medium mb-1">Lock Memory Clock, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllLmem" placeholder="e.g. 5000">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllPl" class="form-label small fw-medium mb-1">Power Limit, W</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllPl" placeholder="e.g. 130">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllFan" class="form-label small fw-medium mb-1">Fan Speed, %</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllFan" min="0" max="100" placeholder="0 = auto">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvAllDelay" class="form-label small fw-medium mb-1">Delay before applying OC, s</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvAllDelay" placeholder="e.g. 30">
+                            </div>
+                        </div>
+                        <div class="row g-2 mt-1 align-items-center small">
+                            <div class="col-md-3 col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvAllLed">
+                                    <label class="form-check-label" for="nvAllLed">Disable LEDs</label>
+                                </div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvAllPill" title="OhGodAnETHlargementPill for GDDR5X cards (1080 Ti)">
+                                    <label class="form-check-label" for="nvAllPill">"Tablet" for GDDR5X</label>
+                                </div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvAllP0">
+                                    <label class="form-check-label" for="nvAllP0">Force P0 mode</label>
+                                </div>
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="nvAllIdle">
+                                    <label class="form-check-label" for="nvAllIdle">Idle power reduction</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged. Delay, flags and LEDs apply rig-wide (same as the HiveOS OC modal).</div>
+                    </div>
+                </div>
+            </div>
+
             <div id="gpuContainer" class="row g-3">
                 <!-- Cards injected dynamically via JS -->
                 <div class="col-12 text-center py-4">

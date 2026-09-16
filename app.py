@@ -1767,20 +1767,24 @@ def save_overclock():
         return jsonify({"success": False, "message": "Invalid JSON payload"}), 400
         
     brand = data.get("brand", "").upper()
-    try:
-        gpu_index = int(data.get("index", 0))
-    except (ValueError, TypeError):
-        return jsonify({"success": False, "message": "GPU index must be an integer."}), 400
-        
-    if not (0 <= gpu_index < 64):
-        return jsonify({"success": False, "message": "GPU index out of acceptable bounds (0-63)."}), 400
-    
+    # gpu:"all" = apply the same values to every NVIDIA GPU (like the fan "all" row)
+    apply_all = str(data.get("gpu", "")).strip().lower() == "all"
+    gpu_index = None
+    if not apply_all:
+        try:
+            gpu_index = int(data.get("index", 0))
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "message": "GPU index must be an integer."}), 400
+
+        if not (0 <= gpu_index < 64):
+            return jsonify({"success": False, "message": "GPU index out of acceptable bounds (0-63)."}), 400
+
     if brand not in ["NVIDIA", "AMD"]:
         return jsonify({"success": False, "message": "Invalid brand specification"}), 400
 
     # 1. Strict Shell-Injection checks
     for key, val in data.items():
-        if key not in ["brand", "index"]:
+        if key not in ["brand", "index", "gpu"]:
             if not is_safe_parameter_value(val):
                 logging.warning(f"Security Alert: Blocked shell injection signature on parameter {key}='{val}' from {request.remote_addr}")
                 return jsonify({"success": False, "message": f"Security Alert: Malicious character detected inside value '{val}'"}), 400
@@ -1807,27 +1811,47 @@ def save_overclock():
         lclock = config.get("LCLOCK", "").split()
         lmem = config.get("LMEM", "").split()
         
-        max_idx = max(3, gpu_index)
+        if apply_all:
+            # Target every NVIDIA GPU on this rig (fallback: current conf length)
+            try:
+                gpus = get_gpu_stats().get("gpus", [])
+                n = sum(1 for g in gpus if g.get("brand") == "NVIDIA")
+            except Exception:
+                n = 0
+            if n == 0:
+                n = max(len(clock), len(mem), len(plimit), len(fan), 1)
+            max_idx = max(3, n - 1)
+        else:
+            max_idx = max(3, gpu_index)
         clock += ["0"] * (max_idx + 1 - len(clock))
         mem += ["0"] * (max_idx + 1 - len(mem))
         plimit += ["0"] * (max_idx + 1 - len(plimit))
         fan += ["0"] * (max_idx + 1 - len(fan))
         lclock += [""] * (max_idx + 1 - len(lclock))
         lmem += [""] * (max_idx + 1 - len(lmem))
-        
-        if "core" in data:
-            clock[gpu_index] = str(data["core"])
-        if "mem" in data:
-            mem[gpu_index] = str(data["mem"])
-        if "pl" in data:
-            plimit[gpu_index] = str(data["pl"])
-        if "fan" in data:
-            fan[gpu_index] = str(data["fan"])
+
+        def _apply_values(field_key, lst, transform=None):
+            """Single-GPU mode: set one index. All-GPUs mode: empty values are skipped
+            (per-GPU differences are preserved), filled values go to every GPU."""
+            if field_key not in data:
+                return
+            raw = str(data[field_key]).strip()
+            if apply_all:
+                if raw == "":
+                    return
+                val = transform(raw) if transform else raw
+                for i in range(len(lst)):
+                    lst[i] = val
+            else:
+                lst[gpu_index] = transform(raw) if transform else raw
+
+        _apply_values("core", clock)
+        _apply_values("mem", mem)
+        _apply_values("pl", plimit)
+        _apply_values("fan", fan)
         # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM)
-        if "lcore" in data:
-            lclock[gpu_index] = "" if str(data["lcore"]).strip() == "0" else str(data["lcore"]).strip()
-        if "lmem" in data:
-            lmem[gpu_index] = "" if str(data["lmem"]).strip() == "0" else str(data["lmem"]).strip()
+        _apply_values("lcore", lclock, lambda v: "" if v == "0" else v)
+        _apply_values("lmem", lmem, lambda v: "" if v == "0" else v)
 
         # Rig-wide flags, HiveOS nvidia-oc.conf semantics (cloud OC modal parity):
         # RUNNING_DELAY = apply delay, LOGO_BRIGHTNESS 0 = LEDs off,
@@ -1856,7 +1880,8 @@ def save_overclock():
         config["LMEM"] = " ".join(lmem)
         
         write_shell_config(filepath, config)
-        logging.info(f"NVIDIA GPU {gpu_index} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
+        target_label = "all GPUs" if apply_all else f"GPU {gpu_index}"
+        logging.info(f"NVIDIA {target_label} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
         
         stdout, stderr, code = run_command("sudo /hive/sbin/nvidia-oc")
         if code != 0:
@@ -1889,7 +1914,7 @@ def save_overclock():
             logging.error(f"AMD OC script failed: {stderr}")
             return jsonify({"success": False, "message": "AMD overclock script failed to apply settings."})
                 
-    return jsonify({"success": True, "message": f"Overclock parameters successfully saved and applied to {brand} GPU {gpu_index}!"})
+    return jsonify({"success": True, "message": f"Overclock parameters successfully saved and applied to {brand} {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"})
 
 @app.route('/api/revert', methods=['POST'])
 def revert_overclock():

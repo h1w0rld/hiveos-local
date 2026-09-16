@@ -442,6 +442,10 @@ document.addEventListener('DOMContentLoaded', function() {
         submitOverclock(this, 'amdOcModal');
     });
 
+    document.getElementById('ocAllApplyBtn').addEventListener('click', function() {
+        submitAllOverclock();
+    });
+
     // Apply update trigger
     const applyUpdateBtn = document.getElementById('applyUpdateBtn');
     applyUpdateBtn.addEventListener('click', async function() {
@@ -1204,6 +1208,7 @@ async function fetchStats() {
         // Render GPU cards + integrated graphics tab
         renderGpus(data.gpus);
         renderIgpus(data.igpus || [], data.system);
+        prefillAllOc();
         lastStatsData = data;
 
     } catch (error) {
@@ -1537,6 +1542,73 @@ async function submitOverclock(formElement, modalId) {
     } finally {
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalText;
+    }
+}
+
+// Prefill the "Set settings for all GPUs" card: a value is shown only when
+// every GPU has the same one (mixed/empty -> left blank = unchanged on apply)
+function prefillAllOc() {
+    const nv = activeOverclocks?.nvidia;
+    if (!nv) return;
+    const uniform = (list) => {
+        if (!Array.isArray(list) || list.length === 0) return "";
+        const vals = [...new Set(list.map(v => String(v).trim() === "0" ? "" : String(v).trim()))];
+        return vals.length === 1 ? vals[0] : "";
+    };
+    document.getElementById('nvAllCore').value = uniform(nv.core);
+    document.getElementById('nvAllLcore').value = uniform(nv.lcore);
+    document.getElementById('nvAllMem').value = uniform(nv.mem);
+    document.getElementById('nvAllLmem').value = uniform(nv.lmem);
+    document.getElementById('nvAllPl').value = uniform(nv.pl);
+    document.getElementById('nvAllFan').value = uniform(nv.fan);
+    const delay = String(nv.delay ?? "").trim();
+    document.getElementById('nvAllDelay').value = delay === "0" ? "" : delay;
+    document.getElementById('nvAllLed').checked = nv.led === "1";
+    document.getElementById('nvAllPill').checked = nv.pill === "1";
+    document.getElementById('nvAllP0').checked = nv.p0 === "1";
+    document.getElementById('nvAllIdle').checked = nv.idle === "1";
+}
+
+// Apply the all-GPU overclock card: only filled clock/power fields are sent,
+// flags/delay/LEDs always reflect the checkbox states (rig-wide in HiveOS)
+async function submitAllOverclock() {
+    const fields = {
+        core: 'nvAllCore', lcore: 'nvAllLcore', mem: 'nvAllMem', lmem: 'nvAllLmem',
+        pl: 'nvAllPl', fan: 'nvAllFan', delay: 'nvAllDelay'
+    };
+    const payload = { brand: 'NVIDIA', gpu: 'all' };
+    for (const [key, id] of Object.entries(fields)) {
+        const v = document.getElementById(id).value.trim();
+        if (v !== '') payload[key] = v;
+    }
+    payload.led = document.getElementById('nvAllLed').checked ? '1' : '0';
+    payload.pill = document.getElementById('nvAllPill').checked ? '1' : '0';
+    payload.p0 = document.getElementById('nvAllP0').checked ? '1' : '0';
+    payload.idle = document.getElementById('nvAllIdle').checked ? '1' : '0';
+
+    const btn = document.getElementById('ocAllApplyBtn');
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving...`;
+    try {
+        const response = await apiFetch('/api/overclock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToast(data.message, true);
+            fetchStats();
+        } else {
+            showToast(data.message || "Failed to apply overclock parameters.", false);
+        }
+    } catch (error) {
+        console.error("Error applying all-GPU overclock:", error);
+        showToast("Network error. Failed to reach the rig API.", false);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
     }
 }
 
@@ -3883,6 +3955,7 @@ function showDashTab(tab) {
     // CPU Mining card lives in the CPU iGPU sub-view, OC guide in the GPU Cards sub-view
     document.getElementById('cpuCardContainer').classList.toggle('d-none', !isIgpu);
     document.getElementById('ocGuideContainer').classList.toggle('d-none', !isGpusCards);
+    document.getElementById('ocAllContainer').classList.toggle('d-none', !isGpusCards);
     document.getElementById('walletsTabContainer').classList.toggle('d-none', tab !== 'wallets');
     document.getElementById('fansTabContainer').classList.toggle('d-none', tab !== 'fans');
     document.getElementById('presetsTabContainer').classList.toggle('d-none', tab !== 'presets');
