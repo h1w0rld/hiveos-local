@@ -2565,6 +2565,8 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
         wallet_conf.clear()
         if fs_name:
             wallet_conf["FS_NAME"] = fs_name
+        if str(extra.get("fs_id", "")).strip():
+            wallet_conf["FS_ID"] = str(extra["fs_id"]).strip()
         wallet_conf["CUSTOM_MINER"] = miner_alt
         if install_url:
             wallet_conf["CUSTOM_INSTALL_URL"] = install_url
@@ -2593,6 +2595,11 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
     wallet_conf["COIN"] = coin
     wallet_conf["WAL"] = wallet
     wallet_conf["POOL_URL"] = pool
+    if extra:
+        if str(extra.get("name", "")).strip():
+            wallet_conf["FS_NAME"] = str(extra["name"]).strip()
+        if str(extra.get("fs_id", "")).strip():
+            wallet_conf["FS_ID"] = str(extra["fs_id"]).strip()
     if not write_shell_config(WALLET_CONF_PATH, wallet_conf):
         return False, "Failed to write wallet.conf"
 
@@ -2604,6 +2611,52 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
     logging.info(f"Flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
     run_command(MINER_RESTART_CMD)
     return True, "Flight sheet applied successfully! Miner daemon restarting..."
+
+def _fsheet_is_active(fsheet):
+    """True when this flight sheet is the one currently applied on the rig.
+    Primary check: the FS_ID/FS_NAME marker written into wallet.conf on apply;
+    fallback: compare the sheet's first item against the live mining config."""
+    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+    fs_id = (wallet_conf.get("FS_ID") or "").strip()
+    fs_name = (wallet_conf.get("FS_NAME") or "").strip()
+    if fs_id:
+        return str(fsheet.get("id", "")) == fs_id
+    if fs_name:
+        return str(fsheet.get("name", "")) == fs_name
+    active = _read_active_mining_config()
+    live_coin = str(active.get("coin") or "").lower()
+    if not live_coin:
+        return False
+    item = _pick_apply_item(fsheet)
+    wallet = str(item.get("wallet", "")).strip()
+    w = next((x for x in _load_wallets_store() if x.get("id") == wallet), None)
+    if w:
+        wallet = w.get("address", "")
+    return (str(item.get("coin", "")).lower() == live_coin and
+            str(item.get("pool", "")) == active.get("pool") and
+            str(item.get("miner", "")).lower() == str(active.get("miner") or "").lower() and
+            wallet == active.get("wallet"))
+
+@app.route('/api/fsheets/unset', methods=['POST'])
+def unset_fsheet():
+    """Hive 'Unset': leave the rig without a flight sheet — clear the mining
+    config and stop the miner."""
+    try:
+        if os.path.exists(WALLET_CONF_PATH):
+            shutil.copy2(WALLET_CONF_PATH, WALLET_CONF_PATH + ".bak")
+        if os.path.exists(RIG_CONF_PATH):
+            shutil.copy2(RIG_CONF_PATH, RIG_CONF_PATH + ".bak")
+    except Exception as e:
+        logging.error(f"Backup configurations failed: {e}")
+    if not write_shell_config(WALLET_CONF_PATH, {}):
+        return jsonify({"success": False, "message": "Failed to clear wallet.conf"}), 500
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    rig_conf["MINER"] = "none"
+    if not write_shell_config(RIG_CONF_PATH, rig_conf):
+        return jsonify({"success": False, "message": "Failed to update rig.conf"}), 500
+    logging.info(f"Flight sheet unset by IP: {request.remote_addr} (miner stopped)")
+    run_command(MINER_STOP_CMD)
+    return jsonify({"success": True, "message": "Flight sheet unset. The rig has no active flight sheet; miner stopped."})
 
 def _read_active_mining_config():
     """Summarize the mining setup currently applied on this rig (wallet.conf / rig.conf).
@@ -2658,6 +2711,7 @@ def _read_active_mining_config():
         "wallet": wallet,
         "pool": pool,
         "miner": miner,
+        "fs_id": (wallet_conf.get("FS_ID") or "").strip(),
     }
 
 def _load_json_store(path, default):
@@ -2909,7 +2963,9 @@ def list_fsheets():
             "coin": wallet_conf.get("COIN", ""),
             "wallet": wallet_conf.get("WAL", ""),
             "pool": wallet_conf.get("POOL_URL", ""),
-            "miner": rig_conf.get("MINER", "none")
+            "miner": rig_conf.get("MINER", "none"),
+            "fs_id": (wallet_conf.get("FS_ID") or "").strip(),
+            "fs_name": (wallet_conf.get("FS_NAME") or "").strip()
         },
         # Live mining setup parsed from the rig's own configs (works even when
         # the wallet/flight sheet libraries are empty)
@@ -2938,6 +2994,11 @@ def delete_fsheet():
         return jsonify({"success": False, "message": "Invalid payload"}), 400
     fid = str(data.get("id", "")).strip()
     fsheets = _load_fsheets_store()
+    fsheet = next((f for f in fsheets if f.get("id") == fid), None)
+    if fsheet is None:
+        return jsonify({"success": False, "message": "Flight sheet not found."}), 404
+    if _fsheet_is_active(fsheet):
+        return jsonify({"success": False, "message": "This flight sheet is active on the rig. Unset it first."}), 400
     before = len(fsheets)
     fsheets = [f for f in fsheets if f.get("id") != fid]
     if len(fsheets) == before:
@@ -2963,7 +3024,8 @@ def apply_fsheet():
     if w:
         wallet = w.get("address", "")
     ok, msg = _apply_flight_sheet(item.get("coin"), wallet, item.get("pool"), item.get("miner"),
-                                  extra={"name": fsheet.get("name", ""), "miner_alt": item.get("miner_alt", ""),
+                                  extra={"name": fsheet.get("name", ""), "fs_id": fsheet.get("id", ""),
+                                         "miner_alt": item.get("miner_alt", ""),
                                          "install_url": item.get("install_url", ""), "algo": item.get("algo", ""),
                                          "user_config": item.get("user_config", ""), "template": item.get("template", ""),
                                          "pass": item.get("pass", "")})

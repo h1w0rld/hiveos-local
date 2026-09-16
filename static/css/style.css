@@ -1019,6 +1019,72 @@ tr.af-sep td {
     background: rgba(255, 255, 255, 0.02);
 }
 
+/* Active flight sheet: Hive expanded card */
+.fs-active { display: flex; align-items: stretch; gap: 10px; }
+.fs-active-side {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.fs-active-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+.fs-active-grid {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.55fr) minmax(200px, 1.4fr) minmax(150px, 0.9fr) minmax(230px, 1.5fr);
+    gap: 8px 18px;
+    align-items: start;
+}
+.fs-act-name { font-weight: 600; font-size: 0.86rem; margin-bottom: 2px; }
+.fs-act-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 3px;
+}
+.fs-act-val {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 0.8rem;
+    line-height: 1.35;
+    word-break: break-all;
+}
+.fs-act-val .font-monospace { color: #c9d1d9; }
+.fs-copy {
+    background: none;
+    border: none;
+    color: #6c757d;
+    padding: 0 2px;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+.fs-copy:hover { color: #fbbf24; }
+.fs-act-details {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.12);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.fs-act-line { word-break: break-all; }
+.fs-act-k { font-weight: 700; color: #c9d1d9; margin-right: 4px; }
+.fs-act-v { color: #8b949e; }
+.fs-active-foot { font-size: 0.82rem; color: #8b949e; }
+@media (max-width: 1199.98px) {
+    .fs-active-grid { grid-template-columns: minmax(90px, 0.6fr) minmax(0, 1.5fr) minmax(0, 1.4fr); }
+    .fs-active-grid .fs-act-col:nth-child(4) { grid-column: 1 / -1; }
+}
+@media (max-width: 767.98px) {
+    .fs-active-grid { grid-template-columns: 1fr; }
+}
+
 /* List title */
 .fs-list-title { font-size: 0.95rem; font-weight: 700; }
 
@@ -1043,3 +1109,5 @@ tr.af-sep td {
 hr {
     opacity: 0.15;
 }
+
+.fs-active-star { display: flex; align-items: flex-start; padding-top: 10px; flex-shrink: 0; }

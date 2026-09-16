@@ -3166,6 +3166,10 @@ function resolveItemWallet(item, wallets) {
 }
 
 function fsMatchesLive(f, wallets, active, rc) {
+    // Applied sheets are attached by id (FS_ID in wallet.conf, like the Hive worker FS);
+    // fall back to the name marker, then to the live config comparison
+    if (active.fs_id) return String(f.id || '') === String(active.fs_id);
+    if (active.fs_name) return String(f.name || '') === String(active.fs_name);
     const it = (f.items && f.items[0]) || {};
     const liveCoin = String(active.coin || rc.coin || '').toLowerCase();
     const liveWallet = active.wallet || rc.wallet || '';
@@ -3275,40 +3279,112 @@ function renderFsChips(entries) {
     fill(boxes.pool, 'pool', byPool, null, 8, 'more pools');
 }
 
-// One flight sheet row (Hive worker page style)
+// One flight sheet row (Hive worker page style).
+// The ACTIVE sheet renders as the Hive expanded card: wallet address with copy,
+// pool URLs, miner config details (Url/Algo/Pass/Miner/Template/Install/User Config).
 function fsRowHtml({ f, applied, live }) {
     const items = (f.items && f.items.length ? f.items : [{}]);
     const wallets = (window._fsData && window._fsData.wallets) || [];
     const coins = Array.from(new Set(items.map(x => String(x.coin || '').toUpperCase()).filter(Boolean)));
     const it0 = items[0] || {};
-    const walletLabel = live ? (it0.wallet || '—') : (it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner');
-    const poolLabel = it0.pool || 'Configured in miner';
-    const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
-    const minerBadges = minerBadgesHtml(it0.miner);
-    const extra = items.length > 1 ? ' <span class="fs-multi" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
-    const expanded = window._fsExpandedId === f.id;
     const fid = escapeHtml(f.id);
+    const extra = items.length > 1 ? ' <span class="fs-multi" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
     const star = live ? '' :
         '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + fid + '" title="To favorites">' +
         '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
-    const run = live ? '' :
-        '<button type="button" class="fs-run' + (applied ? ' active' : '') + '" data-action="apply" data-id="' + fid + '" title="Run this flight sheet">' +
-        '<i class="bi bi-rocket-takeoff' + (applied ? '-fill' : '') + '"></i></button>';
-    const details = live ? '' :
-        '<button type="button" class="fs-details' + (expanded ? ' open' : '') + '" data-action="details" data-id="' + fid + '" title="Details">' +
+
+    if (applied) {
+        // ---- Hive expanded active card ----
+        const walletW = resolveItemWallet(it0, wallets);
+        const walletName = live ? 'Configured in miner' : (it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner');
+        const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
+        const isCustom = it0.miner === 'custom';
+        const tpl = it0.template || '%WAL%.%WORKER_NAME%';
+        const pass = it0.pass || 'x';
+        const details = [];
+        if (it0.pool) details.push(['Url', it0.pool]);
+        if (it0.algo) details.push(['Algo', it0.algo]);
+        if (isCustom || it0.pass) details.push(['Pass', pass]);
+        details.push(['Miner', it0.miner_alt || minerLabel]);
+        if (isCustom) details.push(['Template', tpl]);
+        if (it0.install_url) details.push(['Install Url', it0.install_url]);
+        if (it0.user_config) details.push(['User Config', it0.user_config]);
+        const detailsHtml = details.map(([k, v]) =>
+            '<div class="fs-act-line"><span class="fs-act-k">' + k + '</span> <span class="fs-act-v font-monospace">' + escapeHtml(v) + '</span></div>'
+        ).join('');
+        const kebabItems = live
+            ? '<li><button type="button" class="dropdown-item text-warning" data-action="unset"><i class="bi bi-eject me-2"></i>Unset</button></li>'
+            : '<li><button type="button" class="dropdown-item" data-action="details" data-id="' + fid + '"><i class="bi bi-pencil me-2"></i>Edit</button></li>' +
+              '<li><button type="button" class="dropdown-item" data-action="duplicate" data-id="' + fid + '"><i class="bi bi-copy me-2"></i>Duplicate</button></li>' +
+              '<li><button type="button" class="dropdown-item" data-action="export" data-id="' + fid + '"><i class="bi bi-download me-2"></i>Export</button></li>' +
+              '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + fid + '"><i class="bi bi-clipboard me-2"></i>To clipboard</button></li>' +
+              '<li><hr class="dropdown-divider"></li>' +
+              '<li><button type="button" class="dropdown-item text-warning" data-action="unset"><i class="bi bi-eject me-2"></i>Unset</button></li>';
+        return '<div class="fsheet-row2 fs-row fs-active is-active">' +
+            '<div class="fs-active-star">' + star + '</div>' +
+            '<div class="fs-active-main min-w-0">' +
+                '<div class="fs-active-grid">' +
+                    '<div class="fs-act-col fs-act-coins">' +
+                        (coins.length
+                            ? coins.map(c => coinAvatarHtml(c) + '<span class="fs-ticker">' + escapeHtml(c) + '</span>').join('<span class="fs-plus">+</span>')
+                            : coinAvatarHtml('') + '<span class="fs-ticker text-muted">—</span>') +
+                    '</div>' +
+                    '<div class="fs-act-col min-w-0">' +
+                        '<div class="fs-act-name text-truncate">' + escapeHtml(walletName) + extra + '</div>' +
+                        '<div class="fs-act-label">Wallet address</div>' +
+                        (walletW
+                            ? '<div class="fs-act-val"><span class="font-monospace">' + escapeHtml(walletW) + '</span>' +
+                              '<button type="button" class="fs-copy" data-action="copy-wallet" data-wallet="' + escapeHtml(walletW) + '" title="Copy wallet address"><i class="bi bi-copy"></i></button></div>'
+                            : '<div class="fs-act-val text-muted">—</div>') +
+                    '</div>' +
+                    '<div class="fs-act-col min-w-0">' +
+                        '<div class="fs-act-label">' + (it0.pool ? 'Pool URLs' : 'Configured in miner') + '</div>' +
+                        (it0.pool
+                            ? '<div class="fs-act-val"><span class="font-monospace">' + escapeHtml(it0.pool) + '</span></div>'
+                            : '<div class="fs-act-val text-muted">Configured in miner</div>') +
+                    '</div>' +
+                    '<div class="fs-act-col min-w-0">' +
+                        '<div class="fs-act-name text-truncate"><span class="font-monospace">' + escapeHtml(it0.miner_alt || minerLabel) +
+                            (isCustom ? ' (c)' : '') + '</span>' + minerBadgesHtml(it0.miner) +
+                            (live ? ' <span class="badge bg-secondary small ms-1" title="Running from the rig config, not saved in the library">live</span>' : '') +
+                        '</div>' +
+                        (details.length ? '<div class="fs-act-details">' + detailsHtml + '</div>' : '') +
+                    '</div>' +
+                '</div>' +
+                '<div class="fs-active-foot">' + escapeHtml(f.name) + '</div>' +
+            '</div>' +
+            '<div class="fs-active-side">' +
+                '<button type="button" class="fs-run active" data-action="apply" data-id="' + fid + '" title="Re-apply this flight sheet">' +
+                '<i class="bi bi-rocket-takeoff-fill"></i></button>' +
+                '<div class="dropdown">' +
+                    '<button type="button" class="fs-kebab" data-bs-toggle="dropdown" aria-expanded="false" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>' +
+                    '<ul class="dropdown-menu dropdown-menu-end">' + kebabItems + '</ul>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    }
+
+    // ---- compact row for non-active sheets ----
+    const walletLabel = it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner';
+    const poolLabel = it0.pool || 'Configured in miner';
+    const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
+    const expanded = window._fsExpandedId === f.id;
+    const run = '<button type="button" class="fs-run" data-action="apply" data-id="' + fid + '" title="Run this flight sheet">' +
+        '<i class="bi bi-rocket-takeoff"></i></button>';
+    const detailsBtn = '<button type="button" class="fs-details' + (expanded ? ' open' : '') + '" data-action="details" data-id="' + fid + '" title="Details">' +
         '<i class="bi bi-chevron-down"></i></button>';
-    const kebab = live ? '' :
-        '<div class="dropdown">' +
+    const kebab = '<div class="dropdown">' +
             '<button type="button" class="fs-kebab" data-bs-toggle="dropdown" aria-expanded="false" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>' +
             '<ul class="dropdown-menu dropdown-menu-end">' +
+                '<li><button type="button" class="dropdown-item" data-action="details" data-id="' + fid + '"><i class="bi bi-pencil me-2"></i>Edit</button></li>' +
                 '<li><button type="button" class="dropdown-item" data-action="duplicate" data-id="' + fid + '"><i class="bi bi-copy me-2"></i>Duplicate</button></li>' +
                 '<li><button type="button" class="dropdown-item" data-action="export" data-id="' + fid + '"><i class="bi bi-download me-2"></i>Export</button></li>' +
-                '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + fid + '"><i class="bi bi-clipboard me-2"></i>Copy</button></li>' +
+                '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + fid + '"><i class="bi bi-clipboard me-2"></i>To clipboard</button></li>' +
                 '<li><hr class="dropdown-divider"></li>' +
                 '<li><button type="button" class="dropdown-item text-danger" data-action="delete" data-id="' + fid + '"><i class="bi bi-trash me-2"></i>Delete</button></li>' +
             '</ul>' +
         '</div>';
-    let html = '<div class="fsheet-row2 fs-row' + (applied ? ' is-active' : '') + '">' +
+    let html = '<div class="fsheet-row2 fs-row">' +
         '<div class="fs-row-left">' +
             '<div class="fs-row-coins">' +
                 (coins.length
@@ -3318,19 +3394,15 @@ function fsRowHtml({ f, applied, live }) {
             '<div class="fs-row-info min-w-0">' +
                 '<div class="fs-info-line fw-semibold text-truncate" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
                 '<div class="fs-info-line text-muted text-truncate" title="' + escapeHtml(poolLabel) + '">' + escapeHtml(poolLabel) + '</div>' +
-                '<div class="fs-info-line text-truncate"><span class="font-monospace small">' + escapeHtml(minerLabel) + '</span>' + minerBadges + '</div>' +
+                '<div class="fs-info-line text-truncate"><span class="font-monospace small">' + escapeHtml(minerLabel) + '</span>' + minerBadgesHtml(it0.miner) + '</div>' +
             '</div>' +
         '</div>' +
         '<div class="fs-row-right">' +
-            '<div class="fs-name text-end text-truncate">' + escapeHtml(f.name) +
-                (applied ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
-                (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
-                extra +
-            '</div>' +
-            '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + details + star + kebab + '</div>' +
+            '<div class="fs-name text-end text-truncate">' + escapeHtml(f.name) + extra + '</div>' +
+            '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + detailsBtn + star + kebab + '</div>' +
         '</div>' +
     '</div>';
-    if (expanded && !live) html += fsExpandHtml(f);
+    if (expanded) html += fsExpandHtml(f);
     return html;
 }
 
@@ -3379,6 +3451,39 @@ function walletAddressLabel(walletRef, wallets) {
     if (w) return w.name;
     if (!walletRef) return 'Configured in miner';
     return walletRef.length > 18 ? walletRef.slice(0, 18) + '…' : walletRef;
+}
+
+// Hive 'Unset': leave the rig without a flight sheet (miner stopped)
+window.unsetFsheet = async function() {
+    if (!confirm('Unset the active flight sheet? The rig will have no flight sheet and the miner will be stopped.')) return;
+    try {
+        const response = await apiFetch('/api/fsheets/unset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({})
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Flight sheet unset.' : 'Failed to unset flight sheet.'), !!data.success);
+        if (data.success) setTimeout(() => { fetchStats(); loadFsheets(); }, 1500);
+    } catch (e) {
+        showToast('Network error unsetting flight sheet.', false);
+    }
+};
+
+async function copyWalletAddress(addr) {
+    if (!addr) return;
+    let ok = false;
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(addr);
+            ok = true;
+        } else {
+            ok = copyTextFallback(addr);
+        }
+    } catch (e) {
+        ok = copyTextFallback(addr);
+    }
+    showToast(ok ? 'Wallet address copied.' : 'Copy failed.', ok);
 }
 
 window.applyFsheet = async function(fid) {
@@ -3519,14 +3624,19 @@ function setupFsheetsContainer() {
         const action = target.dataset.action;
         const fid = target.dataset.id;
         if (action === 'fav' || action === 'apply' || action === 'duplicate' ||
-            action === 'export' || action === 'copy' || action === 'delete') {
-            if (!fid) return;
+            action === 'export' || action === 'copy' || action === 'delete' || action === 'unset') {
+            if (!fid && action !== 'unset') return;
             if (action === 'fav') toggleFsheetFav(fid);
             else if (action === 'apply') applyFsheet(fid);
             else if (action === 'duplicate') duplicateFsheet(fid);
             else if (action === 'export') exportFsheet(fid);
             else if (action === 'copy') copyFsheet(fid);
             else if (action === 'delete') deleteFsheet(fid);
+            else if (action === 'unset') unsetFsheet();
+            return;
+        }
+        if (action === 'copy-wallet') {
+            copyWalletAddress(target.dataset.wallet || '');
             return;
         }
         if (action === 'details') {
