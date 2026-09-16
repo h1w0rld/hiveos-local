@@ -4227,39 +4227,47 @@ function renderMknet(mk) {
         ? ui[k] : ((cfg[k] !== undefined && cfg[k] !== null) ? cfg[k] : d);
     const fans = st.casefan || [];
     const sensor = (st.thermosensors && st.thermosensors.length) ? st.thermosensors[0] : null;
+    // Speed color: green -> yellow -> red (hue 130 -> 0)
+    const speedColor = v => {
+        const h = Math.round(130 - v * 1.3);
+        return ' style="color:hsl(' + h + ',85%,70%);border-color:hsla(' + h + ',85%,60%,0.45);background:hsla(' + h + ',85%,60%,0.08);"';
+    };
     const chips = (sensor !== null
             ? '<span class="mk-chip mk-temp" title="Controller thermosensor"><i class="bi bi-thermometer-half"></i> ' + sensor + '°C</span>'
             : '')
         + fans.map((v, i) =>
-            '<span class="mk-chip' + (v > 0 ? '' : ' mk-off') + '" title="Fan channel ' + (i + 1) + ' speed">F' + (i + 1) + ' ' + (v > 0 ? v + '%' : '—') + '</span>'
+            '<span class="mk-chip' + (v > 0 ? '' : ' mk-off') + '"' + (v > 0 ? speedColor(v) : '') +
+            ' title="Fan channel ' + (i + 1) + ' speed">F' + (i + 1) + ' ' + (v > 0 ? v + '%' : '—') + '</span>'
         ).join('');
     const num = (v, d) => (v === null || v === undefined || v === '' || isNaN(v)) ? d : v;
-    return '<div class="border border-secondary-subtle rounded p-2 mb-2" id="mknetBlock" data-mode="' + mode + '">' +
-        '<div class="d-flex justify-content-between align-items-center mb-2">' +
+    const fld = (id, label, v, def, extra) =>
+        '<div><label class="form-label small text-muted mb-1" for="' + id + '">' + label + '</label>' +
+        '<input type="number" class="form-control form-control-sm bg-dark-input" style="width: 88px;" id="' + id + '" value="' + num(v, def) + '"' + (extra || '') + '></div>';
+    return '<div class="border border-secondary-subtle rounded p-3 mb-2" id="mknetBlock" data-mode="' + mode + '">' +
+        '<div class="d-flex justify-content-between align-items-center mb-3">' +
             '<span class="fw-semibold small"><i class="bi bi-usb-plug text-info"></i> 8MK_NET USB controller</span>' +
-            '<span class="small text-muted">regulation runs in the controller firmware</span>' +
         '</div>' +
         (chips
-            ? '<div class="d-flex flex-wrap gap-1 mb-2">' + chips + '</div>'
-            : '<div class="text-muted small mb-2">No data from the controller yet (it reports every ~2 min).</div>') +
-        '<div class="d-flex align-items-center gap-2 mb-2">' +
+            ? '<div class="d-flex flex-wrap gap-2 mb-3">' + chips + '</div>'
+            : '<div class="text-muted small mb-3">No data from the controller yet (it reports every ~2 min).</div>') +
+        '<div class="d-flex align-items-center gap-3 mb-3">' +
             '<div class="btn-group btn-group-sm" role="group">' +
                 '<button type="button" class="btn btn-xs py-0 px-2" id="mkAutoBtn">Auto</button>' +
                 '<button type="button" class="btn btn-xs py-0 px-2" id="mkStaticBtn">Static</button>' +
             '</div>' +
             '<span class="small text-muted">Auto keeps the lowest speed within the range to hold the target temperature.</span>' +
         '</div>' +
-        '<div class="d-flex align-items-center gap-2 flex-wrap mk-auto-field">' +
-            '<label class="small text-muted mb-0">Target temp, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetTemp" value="' + num(val('target_temp', 60), 60) + '"></label>' +
-            '<label class="small text-muted mb-0">Target MEM, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetMem" value="' + num(val('target_mem_temp', 90), 90) + '"></label>' +
-            '<label class="small text-muted mb-0">Min fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMinFan" value="' + num(val('min_fan', 30), 30) + '"></label>' +
-            '<label class="small text-muted mb-0">Max fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMaxFan" value="' + num(val('max_fan', 100), 100) + '"></label>' +
+        '<div class="d-flex flex-wrap gap-3 mb-3 mk-auto-field">' +
+            fld('mkTargetTemp', 'Target temp, °C', val('target_temp'), 60) +
+            fld('mkTargetMem', 'Target MEM, °C', val('target_mem_temp'), 90) +
+            fld('mkMinFan', 'Min fan, %', val('min_fan'), 30) +
+            fld('mkMaxFan', 'Max fan, %', val('max_fan'), 100) +
         '</div>' +
-        '<div class="d-flex align-items-center gap-2 flex-wrap mk-static-field">' +
-            '<label class="small text-muted mb-0">Static speed, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkStaticSpeed" min="0" max="100" value="' + num(val('static_speed', 50), 50) + '"></label>' +
+        '<div class="d-flex flex-wrap gap-3 mb-3 mk-static-field">' +
+            fld('mkStaticSpeed', 'Static speed, %', val('static_speed'), 50, ' min="0" max="100"') +
         '</div>' +
-        '<div class="d-flex justify-content-end mt-2">' +
-            '<button type="button" class="btn btn-sm btn-primary px-3" id="mkApplyBtn">Apply</button>' +
+        '<div class="d-flex justify-content-end">' +
+            '<button type="button" class="btn btn-sm btn-primary px-4" id="mkApplyBtn">Apply</button>' +
         '</div>' +
     '</div>';
 }
