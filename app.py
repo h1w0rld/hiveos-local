@@ -1184,6 +1184,30 @@ def run_command(cmd):
     except Exception as e:
         return "", str(e), -1
 
+# Serialize nvidia-oc invocations: the hive script kills any concurrently running
+# instance, so overlapping applies (rapid Apply clicks, autofan + OC in the same
+# cycle) interrupt each other mid-run and locked clocks silently never take effect
+nvidia_oc_lock = threading.Lock()
+
+def run_nvidia_oc():
+    """Run /hive/sbin/nvidia-oc exclusively; returns (stdout, stderr, returncode)."""
+    with nvidia_oc_lock:
+        return run_command("sudo /hive/sbin/nvidia-oc")
+
+def verify_locked_clocks(expected):
+    """Check actual SM clocks against {gpu_index: locked_mhz}. Returns a dict of
+    {gpu_index: (expected, actual)} mismatches. Empty dict on verification failure
+    (no nvidia-smi output) so callers can skip gracefully."""
+    stdout, _, _ = run_command("nvidia-smi --query-gpu=index,clocks.sm --format=csv,noheader,nounits")
+    actual = {}
+    for line in stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit():
+            actual[int(parts[0])] = safe_int(parts[1])
+    if not actual:
+        return {}
+    return {i: (v, actual.get(i)) for i, v in expected.items() if actual.get(i) != v}
+
 # Safe numeric parsers for nvidia-smi output ([N/A] or empty values are treated as 0)
 def safe_int(value, default=0):
     try:
@@ -1882,12 +1906,35 @@ def save_overclock():
         write_shell_config(filepath, config)
         target_label = "all GPUs" if apply_all else f"GPU {gpu_index}"
         logging.info(f"NVIDIA {target_label} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
-        
-        stdout, stderr, code = run_command("sudo /hive/sbin/nvidia-oc")
+
+        stdout, stderr, code = run_nvidia_oc()
         if code != 0:
             logging.error(f"NVIDIA OC script failed: {stderr}")
             return jsonify({"success": False, "message": "NVIDIA overclock script failed to apply settings."})
-        
+
+        # Verify locked clocks actually took effect: under full mining load nvtool
+        # calls can silently fail, so retry the whole apply up to 2 more times
+        expected_locks = {}
+        for i, v in enumerate(lclock):
+            try:
+                if int(str(v).strip()) > 0:
+                    expected_locks[i] = int(str(v).strip())
+            except ValueError:
+                continue
+        if expected_locks:
+            mismatch = verify_locked_clocks(expected_locks)
+            for _ in range(2):
+                if not mismatch:
+                    break
+                logging.warning(f"Locked clocks not confirmed {mismatch}, retrying nvidia-oc")
+                time.sleep(3)
+                run_nvidia_oc()
+                mismatch = verify_locked_clocks(expected_locks)
+            if mismatch:
+                bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
+                logging.warning(f"NVIDIA locked clock verification failed: {bad}")
+                return jsonify({"success": True, "message": f"Saved, but locked clock not confirmed on: {bad}. Try applying again or check nvidia-smi."})
+
     elif brand == "AMD":
         filepath = AMD_OC_CONF
         config = parse_shell_config(filepath)
@@ -1932,7 +1979,7 @@ def revert_overclock():
                 shutil.copy2(amd_bak, AMD_OC_CONF)
                 
         if os.path.exists(nv_bak):
-            run_command("sudo /hive/sbin/nvidia-oc")
+            run_nvidia_oc()
         if os.path.exists(amd_bak):
             run_command("sudo /hive/sbin/amd-oc")
                      
@@ -2293,7 +2340,7 @@ def autofan_save_all():
                          (order.get(i) or {"mode": "auto", "static": 0} for i in range(n)))
     if not write_shell_config(NVIDIA_OC_CONF, oc):
         return jsonify({"success": False, "message": "Failed to write nvidia-oc.conf"}), 500
-    run_command("sudo /hive/sbin/nvidia-oc")
+    run_nvidia_oc()
 
     static_cnt = sum(1 for p in parsed if p["mode"] == "static")
     logging.info(f"AutoFan saved: enabled={enabled}, action={critical_action or 'stop'}, "
@@ -2377,7 +2424,7 @@ def autofan_gpu_set():
     if not write_shell_config(NVIDIA_OC_CONF, oc):
         return jsonify({"success": False, "message": "Failed to write nvidia-oc.conf"}), 500
     if static_speed is not None or mode == "auto":
-        run_command("sudo /hive/sbin/nvidia-oc")
+        run_nvidia_oc()
 
     label = "all GPUs" if gpu_index is None else f"GPU #{gpu_index}"
     logging.info(f"AutoFan {label} -> {mode}" +
@@ -3155,7 +3202,7 @@ def reset_overclock():
     if write_shell_config(NVIDIA_OC_CONF, nv_stock) and write_shell_config(AMD_OC_CONF, amd_stock):
         logging.info(f"Emergency overclock reset to stock by request from {request.remote_addr}")
         # Apply clean stock settings immediately on hardware
-        run_command("sudo /hive/sbin/nvidia-oc")
+        run_nvidia_oc()
         run_command("sudo /hive/sbin/amd-oc")
         return jsonify({"success": True, "message": "Emergency reset completed! All overclock profiles reset to safe factory stock limits."})
     else:
