@@ -345,12 +345,15 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('afAdvancedModeView').classList.add('d-none');
         document.getElementById('afTableModeBtn').classList.replace('btn-outline-primary', 'btn-primary');
         document.getElementById('afAdvancedModeBtn').classList.replace('btn-primary', 'btn-outline-primary');
+        // both views share one state - re-render so unsaved edits stay visible
+        renderAfTable();
     });
     document.getElementById('afAdvancedModeBtn').addEventListener('click', () => {
         document.getElementById('afAdvancedModeView').classList.remove('d-none');
         document.getElementById('afTableModeView').classList.add('d-none');
         document.getElementById('afAdvancedModeBtn').classList.replace('btn-outline-primary', 'btn-primary');
         document.getElementById('afTableModeBtn').classList.replace('btn-primary', 'btn-outline-primary');
+        renderAfAdvanced();
     });
     document.getElementById('afEnabledSwitch').addEventListener('change', afSetEnabledVisibility);
     document.getElementById('afCriticalAction').addEventListener('change', function() {
@@ -3873,8 +3876,10 @@ function updateAfCaret(input) {
     const { tokens, idx } = afCaretTokenIndex(input.value, input.selectionStart || 0);
     const singleValue = tokens.length < 2;
     // Hive warns only when the token at the caret has no value while the list
-    // already ends with a number ("fewer values than GPUs")
-    const warn = count > 0 && (tokens[idx] === undefined || tokens[idx] === '') &&
+    // already ends with a number ("fewer values than GPUs"); a single non-empty
+    // value applies to all GPUs, so there is nothing "missed" in that case
+    const nonEmptyCount = tokens.filter(t => t !== '').length;
+    const warn = count > 0 && nonEmptyCount > 1 && (tokens[idx] === undefined || tokens[idx] === '') &&
         tokens.length >= 1 && tokens[tokens.length - 1] !== '' &&
         !Number.isNaN(parseInt(tokens[tokens.length - 1], 10));
     let html = '';
@@ -3904,10 +3909,16 @@ function bindAfAdvancedEvents() {
         if (!el) return;
         el.addEventListener('input', () => {
             const tokens = el.value.split(' ').map(t => t.replace(/[^\d]/g, ''));
+            const nonEmpty = tokens.filter(t => t !== '');
             (af.items || []).forEach((it, i) => {
-                if (i < tokens.length) {
-                    // Extra tokens beyond the GPU count are dropped (our backend
-                    // rejects unknown GPU indices); the caret helper warns about it
+                if (nonEmpty.length === 1) {
+                    // "150 - one value for all GPUs" (the documented Hive hint):
+                    // a single typed value applies to every card
+                    it[key] = nonEmpty[0];
+                } else if (i < tokens.length) {
+                    // per-GPU list: token index maps to GPU index; tokens beyond
+                    // the GPU count are dropped (our backend rejects unknown
+                    // GPU indices, the caret helper warns about them)
                     it[key] = tokens[i];
                 }
             });
