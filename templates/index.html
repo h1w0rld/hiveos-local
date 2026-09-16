@@ -909,7 +909,15 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-motherboard text-info"></i> Extra Fans
                             </h2>
-                            <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Reload motherboard fans"><i class="bi bi-arrow-clockwise"></i></button>
+                            <div class="btn-group" role="group">
+                                <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload extra fans (8MK_NET controller + motherboard fans)">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                    <span class="visually-hidden">Auto-refresh interval</span>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="fans"></ul>
+                            </div>
                         </div>
                         <div id="fansContainer" class="small">
                             <div class="text-muted small">Detecting controllable fans...</div>

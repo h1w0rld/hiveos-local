@@ -1122,3 +1122,24 @@ hr {
     opacity: 0.15;
 }
 
+/* 8MK_NET controller status chips (thermosensor + fan channels) */
+.mk-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    padding: 1px 8px;
+    font-size: 0.78rem;
+    font-family: var(--bs-font-monospace);
+    color: #adb5bd;
+    background: rgba(255, 255, 255, 0.03);
+}
+.mk-chip.mk-temp {
+    color: #67e8f9;
+    border-color: rgba(103, 232, 249, 0.35);
+    background: rgba(103, 232, 249, 0.07);
+}
+.mk-chip.mk-off { opacity: 0.45; }
+
+
