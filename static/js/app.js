@@ -389,9 +389,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     document.getElementById('afResetBtn').addEventListener('click', () => {
-        // Hive reset: restore the values as they were when the page was loaded
-        if (!window._afInitial) { loadAutofan(); return; }
-        afApplyState(JSON.parse(window._afInitial));
+        // Re-fetch the saved values from the rig (as it worked before v1.9):
+        // this also picks up conf changes made outside the dashboard
+        loadAutofan();
     });
 
     // CPU mining settings modal save handler
@@ -3907,10 +3907,20 @@ function bindAfAdvancedEvents() {
     AF_ADV_FIELDS.forEach(({ id, key }) => {
         const el = document.getElementById(id);
         if (!el) return;
-        el.addEventListener('input', () => {
+        // The advanced inputs are static DOM nodes rendered once - drop the
+        // previous event bundle before re-binding, otherwise listeners pile up
+        if (el._afHandlers) {
+            el.removeEventListener('input', el._afHandlers.input);
+            el.removeEventListener('focus', el._afHandlers.focus);
+            el.removeEventListener('click', el._afHandlers.click);
+            el.removeEventListener('keyup', el._afHandlers.keyup);
+            el.removeEventListener('blur', el._afHandlers.blur);
+        }
+        const h = {};
+        h.input = () => {
             const tokens = el.value.split(' ').map(t => t.replace(/[^\d]/g, ''));
             const nonEmpty = tokens.filter(t => t !== '');
-            (af.items || []).forEach((it, i) => {
+            (window._af.items || []).forEach((it, i) => {
                 if (nonEmpty.length === 1) {
                     // "150 - one value for all GPUs" (the documented Hive hint):
                     // a single typed value applies to every card
@@ -3922,14 +3932,20 @@ function bindAfAdvancedEvents() {
                     it[key] = tokens[i];
                 }
             });
-        });
-        el.addEventListener('focus', () => updateAfCaret(el));
-        el.addEventListener('click', () => updateAfCaret(el));
-        el.addEventListener('keyup', () => updateAfCaret(el));
-        el.addEventListener('blur', () => {
+        };
+        h.focus = () => updateAfCaret(el);
+        h.click = h.focus;
+        h.keyup = h.focus;
+        h.blur = () => {
             const helper = document.querySelector('.af-caret[data-caret-for="' + id + '"]');
             if (helper) helper.classList.add('d-none');
-        });
+        };
+        el._afHandlers = h;
+        el.addEventListener('input', h.input);
+        el.addEventListener('focus', h.focus);
+        el.addEventListener('click', h.click);
+        el.addEventListener('keyup', h.keyup);
+        el.addEventListener('blur', h.blur);
     });
 }
 
