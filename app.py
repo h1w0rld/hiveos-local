@@ -2059,62 +2059,120 @@ def handle_autofan():
         "gpus": pergpu
     })
 
-@app.route('/api/autofan', methods=['POST'])
-def save_autofan():
+@app.route('/api/autofan/save-all', methods=['POST'])
+def autofan_save_all():
+    """HiveOS-style single save: global switches + full per-GPU fan table.
+
+    Writes global switches to autofan.conf and the per-GPU columns as CUSTOM_*
+    lists (0/None = use the global default). Static speeds go to the FAN list
+    of nvidia-oc.conf (the daemon reads them for CUSTOM_MODE=1 rows)."""
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
 
     enabled = str(data.get("enabled", "0")).strip()
-    target_temp = str(data.get("target_temp", "60")).strip()
-    target_mem_temp = str(data.get("target_mem_temp", "80")).strip()
-    min_fan = str(data.get("min_fan", "30")).strip()
-    max_fan = str(data.get("max_fan", "100")).strip()
-    critical_temp = str(data.get("critical_temp", "85")).strip()
     critical_action = str(data.get("critical_action", "")).strip().lower()
-    smart_mode = str(data.get("smart_mode", "0")).strip()
     reboot_on_errors = str(data.get("reboot_on_errors", "0")).strip()
+    smart_mode = str(data.get("smart_mode", "0")).strip()
     no_amd = str(data.get("no_amd", "0")).strip()
-
-    for val in [enabled, target_temp, target_mem_temp, min_fan, max_fan, critical_temp,
-                smart_mode, reboot_on_errors, no_amd]:
-        if not re.match(r'^-?[0-9]+$', val):
-            return jsonify({"success": False, "message": "AutoFan values must be integers."}), 400
-    if enabled not in ("0", "1"):
-        return jsonify({"success": False, "message": "enabled must be 0 or 1."}), 400
-    for val, name, lo, hi in [(smart_mode, "Smart mode", 0, 1), (reboot_on_errors, "Reboot on errors", 0, 1),
-                              (no_amd, "Without AMD", 0, 1)]:
-        if val not in ("0", "1"):
-            return jsonify({"success": False, "message": f"{name} must be 0 or 1."}), 400
+    if enabled not in ("0", "1") or reboot_on_errors not in ("0", "1") \
+            or smart_mode not in ("0", "1") or no_amd not in ("0", "1"):
+        return jsonify({"success": False, "message": "Switch values must be 0 or 1."}), 400
     if critical_action not in ("", "reboot", "shutdown"):
         return jsonify({"success": False, "message": "Critical action must be empty, 'reboot' or 'shutdown'."}), 400
-    if not (5 <= int(target_temp) <= 120):
-        return jsonify({"success": False, "message": "Target core temperature must be between 5 and 120 C."}), 400
-    if not (0 <= int(target_mem_temp) <= 120):
-        return jsonify({"success": False, "message": "Target memory temperature must be between 0 and 120 C."}), 400
-    if not (0 <= int(min_fan) <= 100) or not (0 <= int(max_fan) <= 100):
-        return jsonify({"success": False, "message": "Fan speed limits must be between 0 and 100%."}), 400
-    if int(min_fan) > int(max_fan):
-        return jsonify({"success": False, "message": "Minimum fan speed cannot be greater than maximum fan speed."}), 400
-    if not (30 <= int(critical_temp) <= 120):
-        return jsonify({"success": False, "message": "Critical temperature must be between 30 and 120 C."}), 400
 
-    config = parse_shell_config(AUTOFAN_CONF)
-    config["ENABLED"] = enabled
-    config["TARGET_TEMP"] = target_temp
-    config["TARGET_MEM_TEMP"] = target_mem_temp
-    config["MIN_FAN"] = min_fan
-    config["MAX_FAN"] = max_fan
-    config["CRITICAL_TEMP"] = critical_temp
-    config["CRITICAL_TEMP_ACTION"] = critical_action
-    config["SMART_MODE"] = smart_mode
-    config["REBOOT_ON_ERROR"] = reboot_on_errors
-    config["NO_AMD"] = no_amd
+    gpus_in = data.get("gpus")
+    if not isinstance(gpus_in, list) or not gpus_in:
+        return jsonify({"success": False, "message": "Per-GPU fan settings are required."}), 400
+    if len(gpus_in) > 64:
+        return jsonify({"success": False, "message": "Too many GPUs."}), 400
 
-    if not write_shell_config(AUTOFAN_CONF, config):
-        return jsonify({"success": False, "message": "Failed to save autofan.conf"}), 500
-    # The daemon re-sources autofan.conf every cycle — no restart needed
-    logging.info(f"AutoFan configuration updated by IP: {request.remote_addr}")
+    ranges = {"min": (0, 99), "max": (1, 100), "target_core": (5, 120),
+              "target_mem": (10, 120), "critical": (30, 120)}
+    parsed = []
+    seen = set()
+    for g in gpus_in:
+        if not isinstance(g, dict):
+            return jsonify({"success": False, "message": "Invalid GPU entry."}), 400
+        try:
+            idx = int(g.get("index"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "GPU index must be an integer."}), 400
+        if not (0 <= idx < 64) or idx in seen:
+            return jsonify({"success": False, "message": f"Invalid or duplicate GPU index {idx}."}), 400
+        seen.add(idx)
+        mode = str(g.get("mode", "auto")).strip().lower()
+        if mode not in ("auto", "static"):
+            return jsonify({"success": False, "message": f"GPU {idx}: fan mode must be 'auto' or 'static'."}), 400
+        static = None
+        if mode == "static":
+            try:
+                static = int(g.get("static"))
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "message": f"GPU {idx}: static fan speed is required."}), 400
+            if not (1 <= static <= 100):
+                return jsonify({"success": False, "message": f"GPU {idx}: static fan speed must be 1-100%."}), 400
+        overrides = {}
+        for key in ("min", "max", "target_core", "target_mem", "critical"):
+            v = g.get(key)
+            if v in (None, "", 0, "0"):
+                overrides[key] = 0  # 0 = global default in hive semantics
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "message": f"GPU {idx}: invalid {key} value."}), 400
+            lo, hi = ranges[key]
+            if not (lo <= v <= hi):
+                return jsonify({"success": False, "message": f"GPU {idx}: {key} must be between {lo} and {hi}."}), 400
+            overrides[key] = v
+        if mode == "auto" and overrides.get("min") and overrides.get("max") \
+                and overrides["min"] > overrides["max"]:
+            return jsonify({"success": False, "message": f"GPU {idx}: min fan speed cannot be greater than max."}), 400
+        parsed.append({"index": idx, "mode": mode, "static": static, **overrides})
+
+    gpus_live = get_gpu_stats().get("gpus", [])
+    live_idx = {g.get("index") for g in gpus_live}
+    unknown = [p["index"] for p in parsed if p["index"] not in live_idx]
+    if unknown:
+        return jsonify({"success": False, "message": f"GPU index(es) not present on this rig: {unknown}"}), 400
+    amd_idx = {g.get("index") for g in gpus_live if g.get("brand") != "NVIDIA"}
+    bad = [p["index"] for p in parsed if p["index"] in amd_idx]
+    if bad:
+        return jsonify({"success": False, "message": f"Fan control is only supported for NVIDIA GPUs: {bad}"}), 400
+
+    n = len(gpus_live) or max([p["index"] for p in parsed]) + 1
+    conf = parse_shell_config(AUTOFAN_CONF)
+    conf["ENABLED"] = enabled
+    conf["CRITICAL_TEMP_ACTION"] = critical_action
+    conf["REBOOT_ON_ERROR"] = reboot_on_errors
+    conf["SMART_MODE"] = smart_mode
+    conf["NO_AMD"] = no_amd
+
+    order = {p["index"]: p for p in parsed}
+    def gpu_values(key, default):
+        return [str((order.get(i, {}).get(key) if order.get(i, {}).get(key) is not None else default)) for i in range(n)]
+
+    conf["CUSTOM_MODE"] = " ".join("1" if order.get(i, {}).get("mode") == "static" else "0" for i in range(n))
+    conf["CUSTOM_MIN_FAN"] = " ".join(gpu_values("min", 0))
+    conf["CUSTOM_MAX_FAN"] = " ".join(gpu_values("max", 0))
+    conf["CUSTOM_TARGET_TEMP"] = " ".join(gpu_values("target_core", 0))
+    conf["CUSTOM_TARGET_MEM_TEMP"] = " ".join(gpu_values("target_mem", 0))
+    conf["CUSTOM_CRITICAL_TEMP"] = " ".join(gpu_values("critical", 0))
+    if not write_shell_config(AUTOFAN_CONF, conf):
+        return jsonify({"success": False, "message": "Failed to write autofan.conf"}), 500
+
+    oc = parse_shell_config(NVIDIA_OC_CONF)
+    oc["FAN"] = " ".join(str(p["static"] if p["mode"] == "static" else 0) for p in
+                         (order.get(i) or {"mode": "auto", "static": 0} for i in range(n)))
+    if not write_shell_config(NVIDIA_OC_CONF, oc):
+        return jsonify({"success": False, "message": "Failed to write nvidia-oc.conf"}), 500
+    run_command("sudo /hive/sbin/nvidia-oc")
+
+    static_cnt = sum(1 for p in parsed if p["mode"] == "static")
+    logging.info(f"AutoFan saved: enabled={enabled}, action={critical_action or 'stop'}, "
+                 f"smart={smart_mode}, reboot_on_error={reboot_on_errors}, no_amd={no_amd}, "
+                 f"static GPUs={static_cnt} by IP: {request.remote_addr}")
     return jsonify({"success": True, "message": "AutoFan settings saved."})
 
 @app.route('/api/autofan/gpu', methods=['POST'])

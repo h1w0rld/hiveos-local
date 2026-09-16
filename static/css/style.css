@@ -141,6 +141,32 @@ body {
     border-color: rgba(99, 102, 241, 0.3);
 }
 
+/* Hive-style autofan table: stacked inputs inside table cells */
+.af-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.af-table .af-subhead th > div {
+    line-height: 1.2;
+}
+
+.af-table td,
+.af-table th {
+    vertical-align: top;
+}
+
+tr.af-sep td {
+    height: 10px;
+    border-bottom: 1px solid var(--border-color);
+    padding: 0;
+}
+
+.af-adv-card .af-adv-head:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
 /* No hover animation on Cluster tab cards (removed per customer request):
    reset the generic .glass-card:hover shadow/border so cards stay still */
 #view-cluster .glass-card:hover {
