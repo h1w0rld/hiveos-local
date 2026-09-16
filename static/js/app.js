@@ -446,6 +446,12 @@ document.addEventListener('DOMContentLoaded', function() {
         submitAllOverclock();
     });
 
+    // Any manual edit marks the card dirty — auto-refresh stops overwriting fields
+    document.querySelectorAll('#ocAllContainer input').forEach(el => {
+        el.addEventListener('input', () => { window._ocAllDirty = true; });
+        el.addEventListener('change', () => { window._ocAllDirty = true; });
+    });
+
     // Apply update trigger
     const applyUpdateBtn = document.getElementById('applyUpdateBtn');
     applyUpdateBtn.addEventListener('click', async function() {
@@ -650,7 +656,18 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     document.getElementById('fsheetImportClipboardBtn').addEventListener('click', importFromClipboard);
     document.getElementById('fsheetImportSaveBtn').addEventListener('click', importFsheets);
-    document.getElementById('fansRefreshBtn').addEventListener('click', loadFans);
+    document.getElementById('fansRefreshBtn').addEventListener('click', function() {
+        const btn = this;
+        const icon = btn.querySelector('i');
+        btn.disabled = true;
+        icon.className = 'bi bi-arrow-clockwise spin-animation';
+        loadFans().finally(() => {
+            setTimeout(() => {
+                btn.disabled = false;
+                icon.className = 'bi bi-arrow-clockwise';
+            }, 600);
+        });
+    });
 
     // Diagnostics modal bindings
     const diagModalEl = document.getElementById('diagModal');
@@ -883,7 +900,8 @@ const AUTO_REFRESH_LOADERS = {
     jumps: () => loadAccessList({jumps: true}),
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
     wallets: () => renderWallets(),
-    fsheets: () => loadFsheets()
+    fsheets: () => loadFsheets(),
+    fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); }
 };
 
 function autoRefreshDefault(target) {
@@ -1002,6 +1020,8 @@ function switchRig(rigId) {
     if (rigId === currentRigId) return;
     currentRigId = rigId;
     activeOverclocks = {};
+    window._ocAllDirty = false; // new rig -> the all-GPU OC card can re-prefill
+    window._mknetUI = null; // new rig -> the 8MK_NET form reloads its config
     lastStatsData = null;
     updateRigScopeUi();
     fetchStats();
@@ -1546,8 +1566,10 @@ async function submitOverclock(formElement, modalId) {
 }
 
 // Prefill the "Set settings for all GPUs" card: a value is shown only when
-// every GPU has the same one (mixed/empty -> left blank = unchanged on apply)
+// every GPU has the same one (mixed/empty -> left blank = unchanged on apply).
+// Skipped while the user is editing (dirty) so auto-refresh never wipes input.
 function prefillAllOc() {
+    if (window._ocAllDirty) return;
     const nv = activeOverclocks?.nvidia;
     if (!nv) return;
     const uniform = (list) => {
@@ -1599,6 +1621,7 @@ async function submitAllOverclock() {
         const data = await response.json();
         if (response.ok && data.success) {
             showToast(data.message, true);
+            window._ocAllDirty = false; // allow the next stats fetch to re-prefill saved values
             fetchStats();
         } else {
             showToast(data.message || "Failed to apply overclock parameters.", false);
@@ -1763,7 +1786,7 @@ async function deletePreset(name) {
         const data = await response.json();
         if (response.ok && data.success) {
             showToast(data.message, true);
-            loadPresetsList();
+            fetchStats();
         } else {
             showToast(data.message || "Failed to delete preset.", false);
         }
@@ -4184,37 +4207,56 @@ async function loadFans() {
 }
 
 // ---------------- 8MK_NET USB fan controller (auto/static with min/max/target) ----------------
+// Untyped edits survive re-renders (auto-refresh, tab entry, manual refresh):
+// they live in window._mknetUI and are dropped after a successful Apply or a rig switch.
+
+function mknetUi() {
+    if (!window._mknetUI) window._mknetUI = { mode: 'auto' };
+    return window._mknetUI;
+}
+
+const MKNET_FIELD_KEYS = { mkTargetTemp: 'target_temp', mkTargetMem: 'target_mem_temp',
+    mkMinFan: 'min_fan', mkMaxFan: 'max_fan', mkStaticSpeed: 'static_speed' };
 
 function renderMknet(mk) {
     const st = mk.stats || {};
     const cfg = mk.config || {};
+    const ui = window._mknetUI;
+    const mode = (ui && ui.mode) ? ui.mode : (cfg.auto === false ? 'static' : 'auto');
+    const val = (k, d) => (ui && ui[k] !== undefined && ui[k] !== null && ui[k] !== '')
+        ? ui[k] : ((cfg[k] !== undefined && cfg[k] !== null) ? cfg[k] : d);
     const fans = st.casefan || [];
     const sensor = (st.thermosensors && st.thermosensors.length) ? st.thermosensors[0] : null;
-    const stLine = sensor !== null
-        ? 'sensor ' + sensor + '°C · case ' + fans.map(v => v + '%').join(' · ')
-        : 'no data from controller';
-    const mode = cfg.auto === false ? 'static' : 'auto';
+    const chips = (sensor !== null
+            ? '<span class="mk-chip mk-temp" title="Controller thermosensor"><i class="bi bi-thermometer-half"></i> ' + sensor + '°C</span>'
+            : '')
+        + fans.map((v, i) =>
+            '<span class="mk-chip' + (v > 0 ? '' : ' mk-off') + '" title="Fan channel ' + (i + 1) + ' speed">F' + (i + 1) + ' ' + (v > 0 ? v + '%' : '—') + '</span>'
+        ).join('');
     const num = (v, d) => (v === null || v === undefined || v === '' || isNaN(v)) ? d : v;
     return '<div class="border border-secondary-subtle rounded p-2 mb-2" id="mknetBlock" data-mode="' + mode + '">' +
-        '<div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">' +
+        '<div class="d-flex justify-content-between align-items-center mb-2">' +
             '<span class="fw-semibold small"><i class="bi bi-usb-plug text-info"></i> 8MK_NET USB controller</span>' +
-            '<span class="small font-monospace text-muted">' + escapeHtml(stLine) + '</span>' +
+            '<span class="small text-muted">regulation runs in the controller firmware</span>' +
         '</div>' +
+        (chips
+            ? '<div class="d-flex flex-wrap gap-1 mb-2">' + chips + '</div>'
+            : '<div class="text-muted small mb-2">No data from the controller yet (it reports every ~2 min).</div>') +
         '<div class="d-flex align-items-center gap-2 mb-2">' +
             '<div class="btn-group btn-group-sm" role="group">' +
                 '<button type="button" class="btn btn-xs py-0 px-2" id="mkAutoBtn">Auto</button>' +
                 '<button type="button" class="btn btn-xs py-0 px-2" id="mkStaticBtn">Static</button>' +
             '</div>' +
-            '<span class="small text-muted">The controller keeps the lowest speed within the range to hold the target temperature.</span>' +
+            '<span class="small text-muted">Auto keeps the lowest speed within the range to hold the target temperature.</span>' +
         '</div>' +
         '<div class="d-flex align-items-center gap-2 flex-wrap mk-auto-field">' +
-            '<label class="small text-muted mb-0">Target temp, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetTemp" value="' + num(cfg.target_temp, 60) + '"></label>' +
-            '<label class="small text-muted mb-0">Target MEM, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetMem" value="' + num(cfg.target_mem_temp, 90) + '"></label>' +
-            '<label class="small text-muted mb-0">Min fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMinFan" value="' + num(cfg.min_fan, 30) + '"></label>' +
-            '<label class="small text-muted mb-0">Max fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMaxFan" value="' + num(cfg.max_fan, 100) + '"></label>' +
+            '<label class="small text-muted mb-0">Target temp, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetTemp" value="' + num(val('target_temp', 60), 60) + '"></label>' +
+            '<label class="small text-muted mb-0">Target MEM, °C <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkTargetMem" value="' + num(val('target_mem_temp', 90), 90) + '"></label>' +
+            '<label class="small text-muted mb-0">Min fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMinFan" value="' + num(val('min_fan', 30), 30) + '"></label>' +
+            '<label class="small text-muted mb-0">Max fan, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkMaxFan" value="' + num(val('max_fan', 100), 100) + '"></label>' +
         '</div>' +
         '<div class="d-flex align-items-center gap-2 flex-wrap mk-static-field">' +
-            '<label class="small text-muted mb-0">Static speed, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkStaticSpeed" min="0" max="100" value="' + num(cfg.static_speed, 50) + '"></label>' +
+            '<label class="small text-muted mb-0">Static speed, % <input type="number" class="form-control form-control-sm bg-dark-input d-inline-block" style="width: 72px;" id="mkStaticSpeed" min="0" max="100" value="' + num(val('static_speed', 50), 50) + '"></label>' +
         '</div>' +
         '<div class="d-flex justify-content-end mt-2">' +
             '<button type="button" class="btn btn-sm btn-primary px-3" id="mkApplyBtn">Apply</button>' +
@@ -4239,8 +4281,17 @@ function bindMknet() {
     const block = document.getElementById('mknetBlock');
     if (!block) return;
     mknetSyncModeUI();
-    document.getElementById('mkAutoBtn').addEventListener('click', () => { block.dataset.mode = 'auto'; mknetSyncModeUI(); });
-    document.getElementById('mkStaticBtn').addEventListener('click', () => { block.dataset.mode = 'static'; mknetSyncModeUI(); });
+    document.getElementById('mkAutoBtn').addEventListener('click', () => {
+        mknetUi().mode = 'auto'; block.dataset.mode = 'auto'; mknetSyncModeUI();
+    });
+    document.getElementById('mkStaticBtn').addEventListener('click', () => {
+        mknetUi().mode = 'static'; block.dataset.mode = 'static'; mknetSyncModeUI();
+    });
+    Object.keys(MKNET_FIELD_KEYS).forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => { mknetUi()[MKNET_FIELD_KEYS[id]] = el.value; });
+    });
     document.getElementById('mkApplyBtn').addEventListener('click', async function() {
         const mode = block.dataset.mode;
         const val = id => document.getElementById(id) ? document.getElementById(id).value : '';
@@ -4264,6 +4315,10 @@ function bindMknet() {
             });
             const data = await response.json();
             showToast(data.message || (data.success ? 'Applied.' : 'Failed to apply.'), !!data.success);
+            if (data.success) {
+                window._mknetUI = null; // config now matches the form - reload it
+                loadFans();
+            }
         } catch (e) {
             showToast('Network error applying 8MK_NET settings.', false);
         } finally {
