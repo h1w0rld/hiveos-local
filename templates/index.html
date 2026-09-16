@@ -617,18 +617,15 @@
                 </div>
             </div>
 
-            <!-- Flight Sheets tab content -->
+            <!-- Flight Sheets tab content (1:1 copy of the HiveOS worker Flight Sheets page) -->
             <div id="fsheetsTabContainer" class="d-none">
                 <div class="card glass-card">
                     <div class="card-body">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-1 gap-2">
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-folder2-open text-warning"></i> Flight Sheets
                             </h2>
                             <div class="d-flex gap-2">
-                                <button id="gotoWalletsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Open wallet library">
-                                    <i class="bi bi-wallet2"></i> Wallets
-                                </button>
                                 <button id="importFsheetsBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Import flight sheets from JSON">
                                     <i class="bi bi-box-arrow-in-down"></i> Import
                                 </button>
@@ -643,40 +640,46 @@
                                 </div>
                             </div>
                         </div>
-
-                        <!-- Cloud-style builder: numbered miner items -->
-                        <form id="saveFsheetForm" class="border border-secondary-subtle rounded p-3 mb-3 fs-builder">
-                            <div id="fsItemsContainer"></div>
-                            <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mt-2">
-                                <div class="d-flex gap-1">
-                                    <button type="button" id="fsAddMinerBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add another miner item (stored; the item matching this rig's GPUs is applied)">
-                                        <i class="bi bi-plus-lg me-1"></i>Add miner
-                                    </button>
-                                    <button type="button" id="fsResetBuilderBtn" class="btn btn-sm btn-outline-secondary fw-semibold" title="Reset the builder">
-                                        Reset
-                                    </button>
-                                </div>
-                                <div class="flex-grow-1" style="max-width: 380px;">
-                                    <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="fsName" placeholder="Flight sheet name" required>
-                                </div>
-                                <button type="submit" id="fsCreateBtn" class="btn btn-sm btn-warning fw-semibold px-3">
-                                    <i class="bi bi-magic me-1"></i>Create
-                                </button>
-                            </div>
-                        </form>
-
-                        <!-- Filter: all / applied / not applied -->
-                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
-                            <div class="btn-group btn-group-sm" role="group" id="fsFilterGroup">
-                                <button type="button" class="btn btn-outline-secondary active" data-filter="all">All</button>
-                                <button type="button" class="btn btn-outline-secondary" data-filter="applied">Applied</button>
-                                <button type="button" class="btn btn-outline-secondary" data-filter="not-applied">Not Applied</button>
-                            </div>
-                            <span class="small text-muted" id="fsheetsCount"></span>
+                        <div class="small text-muted mb-3">
+                            To manage your flight sheets or wallets, open the
+                            <button type="button" id="gotoWalletsBtn" class="btn btn-link btn-sm p-0 align-baseline link-warning text-decoration-none">Wallets</button>
+                            tab.
                         </div>
 
-                        <!-- Cloud-style list -->
-                        <div id="fsheetsContainer" style="max-height: 380px; overflow-y: auto;">
+                        <!-- Hive-style builder: coin -> wallet -> pool -> miner -->
+                        <form id="saveFsheetForm" class="border border-secondary-subtle rounded p-3 mb-3 fs-builder" autocomplete="off">
+                            <div id="fsItemsContainer"></div>
+                            <div class="d-flex align-items-center gap-2 mt-2">
+                                <span class="small text-muted">If you need several miners</span>
+                                <button type="button" id="fsAddMinerBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add another miner item (stored; the item matching this rig's GPUs is applied)">
+                                    Add miner
+                                </button>
+                            </div>
+                            <div class="fs-field fs-name-field mt-2">
+                                <label class="fs-flabel" for="fsName">Name</label>
+                                <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="fsName" placeholder="Enter flight sheet name" maxlength="60" required>
+                            </div>
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                                <button type="button" id="fsResetBuilderBtn" class="btn btn-sm btn-outline-secondary fw-semibold">Cancel</button>
+                                <button type="submit" id="fsCreateBtn" class="btn btn-sm btn-warning fw-semibold px-4">Add</button>
+                            </div>
+                            <datalist id="fsPoolList"></datalist>
+                        </form>
+
+                        <!-- Cloud-style chips: coins / wallets / pools used by the sheets -->
+                        <div class="fs-chips mb-3">
+                            <div id="fsChipsCoins" class="fs-chip-row"></div>
+                            <div id="fsChipsWallets" class="fs-chip-row"></div>
+                            <div id="fsChipsPools" class="fs-chip-row"></div>
+                        </div>
+
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+                            <h4 class="fs-list-title mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-list-ul text-muted"></i> Flight Sheets
+                            </h4>
+                            <span class="small text-muted" id="fsheetsCount"></span>
+                        </div>
+                        <div id="fsheetsContainer" class="fs-scroll">
                             <div class="text-center text-muted small py-3">Loading flight sheets...</div>
                         </div>
                     </div>

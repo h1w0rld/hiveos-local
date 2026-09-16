@@ -873,15 +873,17 @@ tr.af-sep td {
 .wallet-table td, .wallet-table th { border-color: rgba(255, 255, 255, 0.06); }
 .wallet-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 
-/* Flight sheet builder */
+/* Flight sheet builder (HiveOS worker page style) */
 .fs-builder { background: rgba(255, 255, 255, 0.02); }
-.fs-item-row { position: relative; }
+.fs-item-row { position: relative; padding: 2px 0; }
+.fs-item-row + .fs-item-row { margin-top: 12px; }
+.fs-item-row.has-remove { padding-right: 22px; }
 .fs-item-num {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     background: rgba(245, 158, 11, 0.15);
     color: #fbbf24;
@@ -890,34 +892,135 @@ tr.af-sep td {
 }
 .fs-item-remove {
     position: absolute;
-    top: -7px;
-    right: -5px;
+    top: -2px;
+    right: -6px;
     z-index: 2;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     padding: 0;
     border-radius: 50%;
     line-height: 1;
     font-size: 0.7rem;
 }
+/* Hive builder grid: step | coin | wallet | pool | miner */
+.fs-grid {
+    display: grid;
+    grid-template-columns: 26px minmax(96px, 0.9fr) minmax(210px, 1.5fr) minmax(150px, 1.1fr) minmax(200px, 1.4fr);
+    gap: 8px 10px;
+    align-items: start;
+}
+.fs-cell-num { padding-top: 20px; }
+.fs-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fs-flabel {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 0;
+}
+.fs-inline { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.fs-inline select { min-width: 0; flex: 1 1 auto; }
+.fs-coin-wrap { display: flex; gap: 6px; align-items: center; }
+.fs-coin-wrap .fs-coin-av { width: 28px; height: 28px; }
+.fs-coin-wrap input { min-width: 0; flex: 1 1 auto; }
+.fs-name-field { max-width: 420px; }
+/* Miner setup section (EXPERT SECTION) */
+.fs-miner-cfg {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border: 1px dashed rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.015);
+}
+.fs-expert-title {
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: #fbbf24;
+    margin-bottom: 8px;
+}
+@media (max-width: 1199.98px) {
+    .fs-grid { grid-template-columns: 26px minmax(90px, 1fr) minmax(180px, 1.4fr); }
+    .fs-grid .fs-field:nth-child(4), .fs-grid .fs-field:nth-child(5) { grid-column: 2 / -1; }
+}
+@media (max-width: 575.98px) {
+    .fs-grid { grid-template-columns: 26px 1fr; }
+    .fs-grid .fs-field:nth-child(n+3) { grid-column: 2 / -1; }
+}
 
-/* Cloud-style fsheet list rows */
+/* Flight Sheets chips (coins / wallets / pools) */
+.fs-chip-row { display: flex; flex-wrap: wrap; gap: 6px; min-height: 10px; }
+.fs-chip-row + .fs-chip-row { margin-top: 6px; }
+
+/* Cloud-style fsheet list rows (Hive layout) */
 .fsheet-row2 {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 8px;
-    padding: 7px 10px;
+    padding: 8px 12px;
     margin-bottom: 6px;
     transition: border-color 0.15s ease, background 0.15s ease;
 }
 .fsheet-row2:hover { background: rgba(255, 255, 255, 0.03); border-color: rgba(255, 255, 255, 0.16); }
 .fsheet-row2.is-active { border-color: rgba(245, 158, 11, 0.45); background: var(--warning-glow); }
+.fs-row { display: flex; align-items: center; gap: 14px; }
+.fs-row-left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+.fs-row-coins { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.fs-row-coins .coin-av { width: 28px; height: 28px; }
+.fs-ticker { font-weight: 700; font-size: 0.82rem; letter-spacing: 0.02em; }
+.fs-plus { color: #6c757d; font-weight: 700; }
+.fs-row-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.fs-info-line { font-size: 0.8rem; line-height: 1.25; max-width: 340px; }
+.fs-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; max-width: 46%; }
 .fsheet-row2 .fs-name { font-weight: 600; font-size: 0.86rem; }
-.fsheet-row2 .fs-sub { font-size: 0.75rem; color: #8b949e; }
+.fs-multi {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #adb5bd;
+}
+.fs-actions .btn, .fs-actions .fs-run, .fs-actions .fs-details {
+    --bs-btn-padding-y: 0.1rem;
+}
+.fs-run, .fs-details {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    color: #adb5bd;
+    width: 28px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 0.9rem;
+    transition: all 0.15s ease;
+}
+.fs-run:hover { color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); }
+.fs-run.active { color: #fbbf24; border-color: rgba(245, 158, 11, 0.6); }
+.fs-details:hover { color: #fff; border-color: rgba(255, 255, 255, 0.35); }
+.fs-details i { transition: transform 0.15s ease; }
+.fs-details.open i { transform: rotate(180deg); }
 .fs-star { background: none; border: none; padding: 0 2px; color: #6c757d; font-size: 0.95rem; }
 .fs-star.on { color: #fbbf24; }
 .fs-star:hover { color: #fbbf24; }
 .fs-kebab { border: none; color: #adb5bd; padding: 0 6px; }
 .fs-kebab:hover { color: #fff; }
+
+/* Inline editor expanded under a row (Hive Details) */
+.fs-expand {
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+/* List title */
+.fs-list-title { font-size: 0.95rem; font-weight: 700; }
 
 /* Dropdowns inside the scrollable fsheet list need visible overflow while open */
 .fs-scroll { overflow-y: auto; max-height: 380px; }

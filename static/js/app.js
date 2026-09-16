@@ -600,30 +600,36 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('saveFsheetForm').addEventListener('submit', saveFsheetFromBuilder);
     document.getElementById('fsAddMinerBtn').addEventListener('click', () => builderAddRow({}));
     document.getElementById('fsResetBuilderBtn').addEventListener('click', resetFsheetBuilder);
-    setupFsFilter();
+    setupFsChips();
     setupFsheetsContainer();
     setupWalletsContainer();
     const fsItems = document.getElementById('fsItemsContainer');
-    fsItems.addEventListener('change', function(e) {
-        const row = e.target.closest('.fs-item-row');
-        if (!row) return;
-        if (e.target.classList.contains('fs-wallet')) {
-            row.querySelector('.fs-wallet-custom').classList.toggle('d-none', e.target.value !== '__custom__');
-        } else if (e.target.classList.contains('fs-miner')) {
-            row.querySelector('.fs-custom-extra').classList.toggle('d-none', e.target.value !== 'custom');
-        }
-    });
+    fsItems.addEventListener('change', onFsRowChange);
+    fsItems.addEventListener('input', onFsCoinInput);
     fsItems.addEventListener('focusin', function(e) {
         if (e.target.classList.contains('fs-pool')) updatePoolDatalist();
     });
     fsItems.addEventListener('click', function(e) {
-        const btn = e.target.closest('[data-action="remove-item"]');
+        const btn = e.target.closest('[data-action]');
         if (!btn) return;
-        const row = btn.closest('.fs-item-row');
-        const idx = parseInt(row.dataset.idx, 10);
-        (window._fsBuilderItems || []).splice(idx, 1);
-        if (!window._fsBuilderItems.length) window._fsBuilderItems = [{}];
-        rebuildFsItemsContainer();
+        if (btn.dataset.action === 'remove-item') {
+            const row = btn.closest('.fs-item-row');
+            const idx = parseInt(row.dataset.idx, 10);
+            (window._fsBuilderItems || []).splice(idx, 1);
+            if (!window._fsBuilderItems.length) window._fsBuilderItems = [{}];
+            rebuildFsItemsContainer();
+        } else if (btn.dataset.action === 'wallet-add') {
+            const row = btn.closest('.fs-item-row');
+            const coin = row ? row.querySelector('.fs-coin').value.trim().toUpperCase() : '';
+            showWalletModal({ coin: coin });
+        } else if (btn.dataset.action === 'miner-setup') {
+            const row = btn.closest('.fs-item-row');
+            const cfg = row && row.querySelector('.fs-miner-cfg');
+            if (cfg) {
+                cfg.classList.toggle('d-none');
+                applyMinerCfgMode(row);
+            }
+        }
     });
     document.getElementById('walletAddBtn').addEventListener('click', () => showWalletModal(null));
     document.getElementById('walletEditSaveBtn').addEventListener('click', saveWalletFromModal);
@@ -2782,12 +2788,25 @@ function coinAvatarHtml(coin, extraCls) {
     return '<span class="coin-av ' + (extraCls || '') + '" style="--h:' + coinHue(c) + '" title="' + escapeHtml(c || 'no coin') + '">' + label + '</span>';
 }
 
-// ---------------- Flight sheet builder (cloud-style numbered items) ----------------
+// ---------------- Flight sheet builder (HiveOS worker page style) ----------------
 
-function walletOptionsHtml(selected) {
+function walletOptionsHtml(selected, coin) {
     const wallets = (window._fsData && window._fsData.wallets) || [];
+    const c = String(coin || '').trim().toUpperCase();
+    let list = wallets;
+    if (c) {
+        const matched = wallets.filter(w => String(w.coin || '').toUpperCase() === c);
+        if (matched.length) list = matched;
+    }
     const isRef = wallets.some(w => w.id === selected);
-    let opts = wallets.map(w =>
+    let opts = '';
+    // Keep a wallet that is filtered out by the coin selectable instead of silently switching
+    if (selected && isRef && !list.some(w => w.id === selected)) {
+        const w = wallets.find(x => x.id === selected);
+        opts += '<option value="' + escapeHtml(w.id) + '" selected>' +
+            escapeHtml(w.name) + (w.coin ? ' · ' + escapeHtml(w.coin) : '') + '</option>';
+    }
+    opts += list.map(w =>
         '<option value="' + escapeHtml(w.id) + '"' + (selected === w.id ? ' selected' : '') + '>' +
         escapeHtml(w.name) + (w.coin ? ' · ' + escapeHtml(w.coin) : '') + '</option>').join('');
     opts += '<option value="__custom__"' + (!isRef ? ' selected' : '') + '>Custom address...</option>';
@@ -2807,33 +2826,66 @@ function minerOptionsHtml(selected) {
     return opts;
 }
 
+// EXPERT SECTION: HiveOS custom-miner fields (hidden for standard packages)
+function minerCfgHtml(item) {
+    item = item || {};
+    return '<div class="fs-cfg-note small text-muted d-none">Default package config is used. Pick <em>Custom miner...</em> and press Setup to set the install URL, hash algorithm and extra arguments.</div>' +
+        '<div class="fs-cfg-fields d-none">' +
+            '<div class="fs-expert-title">EXPERT SECTION <span class="fw-normal text-muted">— use a ready-made miner package or create your own.</span></div>' +
+            '<div class="row g-2">' +
+                '<div class="col-md-4"><label class="fs-flabel">Miner name</label>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-alt" placeholder="e.g. srbminer_custom" value="' + escapeHtml(item.miner_alt || '') + '"></div>' +
+                '<div class="col-md-8"><label class="fs-flabel">Install URL</label>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-url" placeholder="https://github.com/.../releases/download/..." value="' + escapeHtml(item.install_url || '') + '"></div>' +
+                '<div class="col-md-4"><label class="fs-flabel">Hash algorithm</label>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-algo" placeholder="e.g. pearlhash" value="' + escapeHtml(item.algo || '') + '"></div>' +
+                '<div class="col-md-8"><label class="fs-flabel">Extra config arguments</label>' +
+                    '<textarea class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-uc" rows="2" placeholder="--algorithm-gpu pearlhash --pool ...">' + escapeHtml(item.user_config || '') + '</textarea></div>' +
+            '</div>' +
+        '</div>';
+}
+
 function builderRowHtml(idx, item) {
     item = item || {};
     const isRef = ((window._fsData && window._fsData.wallets) || []).some(w => w.id === item.wallet);
     const removable = idx > 0;
-    const isCustom = (item.miner || 'none') === 'custom';
-    return '<div class="row g-2 fs-item-row align-items-start mb-2" data-idx="' + idx + '">' +
-        (removable ? '<button type="button" class="btn btn-outline-danger fs-item-remove" data-action="remove-item" title="Remove this miner item">&times;</button>' : '') +
-        '<div class="col-auto pt-1"><span class="fs-item-num">' + (idx + 1) + '</span></div>' +
-        '<div class="col-md-2">' +
-            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle text-uppercase fs-coin" list="walletCoinList" placeholder="Coin" value="' + escapeHtml(item.coin || '') + '">' +
-        '</div>' +
-        '<div class="col-md-3">' +
-            '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-wallet">' + walletOptionsHtml(item.wallet) + '</select>' +
-            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace mt-1 fs-wallet-custom' + (!isRef ? '' : ' d-none') + '" placeholder="Custom wallet address" value="' + escapeHtml(isRef ? '' : (item.wallet || '')) + '">' +
-        '</div>' +
-        '<div class="col-md-3">' +
-            '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-pool" list="fsPoolList" placeholder="pool:port" value="' + escapeHtml(item.pool || '') + '">' +
-        '</div>' +
-        '<div class="col-md-4">' +
-            '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-miner">' + minerOptionsHtml(item.miner) + '</select>' +
-            '<div class="row g-1 mt-1 fs-custom-extra' + (isCustom ? '' : ' d-none') + '">' +
-                '<div class="col-6"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-alt" placeholder="package" value="' + escapeHtml(item.miner_alt || '') + '"></div>' +
-                '<div class="col-6"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-algo" placeholder="algo" value="' + escapeHtml(item.algo || '') + '"></div>' +
-                '<div class="col-12"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-url" placeholder="install URL (https://...)" value="' + escapeHtml(item.install_url || '') + '"></div>' +
-                '<div class="col-12"><input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle fs-uc" placeholder="user config" value="' + escapeHtml(item.user_config || '') + '"></div>' +
+    const isCustom = (item.miner || '') === 'custom';
+    const hasExtra = !!(item.miner_alt || item.install_url || item.algo || item.user_config);
+    let cfg = minerCfgHtml(item);
+    if (isCustom || hasExtra) cfg = cfg.replace('fs-cfg-fields d-none', 'fs-cfg-fields');
+    if (!isCustom && !hasExtra) cfg = cfg.replace('fs-cfg-note small text-muted d-none', 'fs-cfg-note small text-muted');
+    return '<div class="fs-item-row' + (removable ? ' has-remove' : '') + '" data-idx="' + idx + '">' +
+        (removable ? '<button type="button" class="btn btn-outline-danger btn-sm fs-item-remove" data-action="remove-item" title="Remove this miner item">&times;</button>' : '') +
+        '<div class="fs-grid">' +
+            '<div class="fs-cell-num"><span class="fs-item-num">' + (idx + 1) + '</span></div>' +
+            '<div class="fs-field">' +
+                '<label class="fs-flabel">Coin</label>' +
+                '<div class="fs-coin-wrap">' +
+                    '<span class="coin-av fs-coin-av" style="--h:' + coinHue(item.coin) + '">' + escapeHtml((item.coin || '').slice(0, 3) || '—') + '</span>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle text-uppercase fs-coin" list="walletCoinList" placeholder="Coin" value="' + escapeHtml(item.coin || '') + '">' +
+                '</div>' +
+            '</div>' +
+            '<div class="fs-field">' +
+                '<label class="fs-flabel">Wallet</label>' +
+                '<div class="fs-inline">' +
+                    '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-wallet">' + walletOptionsHtml(item.wallet, item.coin) + '</select>' +
+                    '<button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" data-action="wallet-add" title="Add a new wallet to the library">Add</button>' +
+                '</div>' +
+                '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace mt-1 fs-wallet-custom' + (!isRef ? '' : ' d-none') + '" placeholder="Custom wallet address" value="' + escapeHtml(isRef ? '' : (item.wallet || '')) + '">' +
+            '</div>' +
+            '<div class="fs-field">' +
+                '<label class="fs-flabel">Pool</label>' +
+                '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-pool" list="fsPoolList" placeholder="pool:port" value="' + escapeHtml(item.pool || '') + '">' +
+            '</div>' +
+            '<div class="fs-field">' +
+                '<label class="fs-flabel">Miner</label>' +
+                '<div class="fs-inline">' +
+                    '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-miner">' + minerOptionsHtml(item.miner) + '</select>' +
+                    '<button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0" data-action="miner-setup" title="Miner setup">Setup</button>' +
+                '</div>' +
             '</div>' +
         '</div>' +
+        '<div class="fs-miner-cfg' + (isCustom ? '' : ' d-none') + '">' + cfg + '</div>' +
     '</div>';
 }
 
@@ -2842,7 +2894,7 @@ function rebuildFsItemsContainer() {
     if (!container) return;
     const rows = window._fsBuilderItems || [{}];
     container.innerHTML = rows.map((it, i) => builderRowHtml(i, it)).join('');
-    updatePoolDatalist();
+    updatePoolDatalist('');
 }
 
 function builderAddRow(item) {
@@ -2859,7 +2911,7 @@ function resetFsheetBuilder() {
     window._fsBuilderItems = [{}];
     window._editingFsheetId = null;
     document.getElementById('fsName').value = '';
-    document.getElementById('fsCreateBtn').innerHTML = '<i class="bi bi-magic me-1"></i>Create';
+    document.getElementById('fsCreateBtn').textContent = 'Add';
     rebuildFsItemsContainer();
 }
 
@@ -2880,9 +2932,10 @@ function updatePoolDatalist(coinFilter) {
     dl.innerHTML = pools.slice(0, 400).map(p => '<option value="' + escapeHtml(p.name) + '"></option>').join('');
 }
 
-function collectBuilderItems() {
+function collectBuilderItems(root) {
+    const scope = root || document;
     const items = [];
-    document.querySelectorAll('#fsItemsContainer .fs-item-row').forEach(row => {
+    scope.querySelectorAll('.fs-item-row').forEach(row => {
         const walletSel = row.querySelector('.fs-wallet').value;
         const wallet = walletSel === '__custom__' ? row.querySelector('.fs-wallet-custom').value.trim() : walletSel;
         const miner = row.querySelector('.fs-miner').value;
@@ -2893,7 +2946,7 @@ function collectBuilderItems() {
             miner: miner,
             miner_alt: '', install_url: '', algo: '', user_config: ''
         };
-        const extra = row.querySelector('.fs-custom-extra');
+        const extra = row.querySelector('.fs-cfg-fields');
         if (extra && (miner === 'custom' || extra.querySelector('.fs-alt').value.trim() || extra.querySelector('.fs-url').value.trim())) {
             item.miner_alt = extra.querySelector('.fs-alt').value.trim().toLowerCase();
             item.install_url = extra.querySelector('.fs-url').value.trim();
@@ -2905,17 +2958,9 @@ function collectBuilderItems() {
     return items;
 }
 
-function fillBuilderFromFsheet(f) {
-    window._fsBuilderItems = (f.items && f.items.length ? JSON.parse(JSON.stringify(f.items)) : [{}]);
-    window._editingFsheetId = f.id;
-    document.getElementById('fsName').value = f.name || '';
-    document.getElementById('fsCreateBtn').innerHTML = '<i class="bi bi-save2 me-1"></i>Save';
-    rebuildFsItemsContainer();
-}
-
 async function saveFsheetFromBuilder(e) {
     e.preventDefault();
-    const items = collectBuilderItems();
+    const items = collectBuilderItems(document.getElementById('fsItemsContainer'));
     if (!items.length) { showToast('Add at least one miner item.', false); return; }
     const payload = {
         fsheet: {
@@ -2926,7 +2971,6 @@ async function saveFsheetFromBuilder(e) {
         }
     };
     const submitBtn = document.getElementById('fsCreateBtn');
-    const origHTML = submitBtn.innerHTML;
     submitBtn.disabled = true;
     try {
         const response = await apiFetch('/api/fsheets/save', {
@@ -2944,8 +2988,77 @@ async function saveFsheetFromBuilder(e) {
         showToast("Network error saving flight sheet.", false);
     } finally {
         submitBtn.disabled = false;
-        submitBtn.innerHTML = origHTML;
     }
+}
+
+// ---- shared per-row behavior (used by the top builder and inline edit panels) ----
+
+function applyMinerCfgMode(row) {
+    const sel = row.querySelector('.fs-miner');
+    const cfg = row.querySelector('.fs-miner-cfg');
+    if (!sel || !cfg) return;
+    const isCustom = sel.value === 'custom';
+    const hasExtra = ['fs-alt', 'fs-url', 'fs-algo', 'fs-uc'].some(c => {
+        const el = row.querySelector('.' + c);
+        return el && el.value.trim();
+    });
+    const fields = cfg.querySelector('.fs-cfg-fields');
+    const note = cfg.querySelector('.fs-cfg-note');
+    if (fields) fields.classList.toggle('d-none', !isCustom && !hasExtra);
+    if (note) note.classList.toggle('d-none', isCustom || hasExtra);
+    if (isCustom) cfg.classList.remove('d-none');
+    const setupBtn = row.querySelector('[data-action="miner-setup"]');
+    if (setupBtn) {
+        const open = !cfg.classList.contains('d-none');
+        setupBtn.classList.toggle('btn-warning', open);
+        setupBtn.classList.toggle('btn-outline-secondary', !open);
+    }
+}
+
+function updateFsCoinUi(coinInput) {
+    const row = coinInput.closest('.fs-item-row');
+    if (!row) return;
+    const coin = coinInput.value.trim().toUpperCase();
+    const av = row.querySelector('.fs-coin-av');
+    if (av) {
+        av.style.setProperty('--h', coinHue(coin));
+        av.textContent = coin.slice(0, 3) || '—';
+    }
+    const sel = row.querySelector('.fs-wallet');
+    if (sel) {
+        const cur = sel.value;
+        const isRef = ((window._fsData && window._fsData.wallets) || []).some(w => w.id === cur);
+        sel.innerHTML = walletOptionsHtml(cur, coin);
+        if (isRef) sel.value = cur;
+        const custom = row.querySelector('.fs-wallet-custom');
+        if (custom) custom.classList.toggle('d-none', sel.value !== '__custom__');
+    }
+    updatePoolDatalist(coin);
+}
+
+function onFsRowChange(e) {
+    const row = e.target.closest('.fs-item-row');
+    if (!row) return;
+    if (e.target.classList.contains('fs-wallet')) {
+        const custom = row.querySelector('.fs-wallet-custom');
+        if (custom) custom.classList.toggle('d-none', e.target.value !== '__custom__');
+    } else if (e.target.classList.contains('fs-miner')) {
+        applyMinerCfgMode(row);
+    }
+}
+
+function onFsCoinInput(e) {
+    if (e.target.classList && e.target.classList.contains('fs-coin')) updateFsCoinUi(e.target);
+}
+
+function renumberFsRows(scope) {
+    scope.querySelectorAll('.fs-item-row').forEach((row, i) => {
+        row.dataset.idx = i;
+        const num = row.querySelector('.fs-item-num');
+        if (num) num.textContent = String(i + 1);
+        const rem = row.querySelector('[data-action="remove-item"]');
+        if (rem) rem.classList.toggle('d-none', i === 0);
+    });
 }
 
 async function loadFsheets() {
@@ -2973,9 +3086,10 @@ async function loadFsheets() {
                 pool: active.pool || rc.pool || '',
                 miner: active.miner || rc.miner || 'none'
             }];
+            rebuildFsItemsContainer();
         }
-        renderFsheets();
-        if (!window._editingFsheetId) rebuildFsItemsContainer();
+        // While an inline editor is open, keep its unsaved edits on screen
+        if (!window._fsExpandedId) renderFsheets();
     } catch (e) {
         console.error('Failed to load flight sheets:', e);
     }
@@ -3020,10 +3134,11 @@ function renderFsheets() {
         }, applied: true, live: true });
     }
 
-    // Filter: all / applied / not-applied
-    const filter = window._fsFilter || 'all';
-    const shown = entries.filter(e =>
-        filter === 'all' || (filter === 'applied') === e.applied);
+    renderFsChips(entries);
+
+    // Chip filters (coins / wallets / pools)
+    const chips = window._fsChips || {};
+    const shown = entries.filter(e => fsMatchesChips(e, chips));
     // Favorites first, then by name
     shown.sort((a, b) => (b.f.fav ? 1 : 0) - (a.f.fav ? 1 : 0) ||
         String(a.f.name).localeCompare(String(b.f.name)));
@@ -3037,53 +3152,166 @@ function renderFsheets() {
         return;
     }
 
-    container.innerHTML = shown.map(({ f, applied, live }) => {
-        const items = (f.items && f.items.length ? f.items : [{}]);
+    container.innerHTML = shown.map(fsRowHtml).join('');
+}
+
+function fsMatchesChips(entry, chips) {
+    if (!chips) return true;
+    const wallets = (window._fsData && window._fsData.wallets) || [];
+    const items = entry.f.items || [];
+    if (chips.coin &&
+        !items.some(x => String(x.coin || '').toUpperCase() === chips.coin) &&
+        String(entry.f.coin || '').toUpperCase() !== chips.coin) return false;
+    if (chips.wallet && !items.some(x => walletAddressLabel(x.wallet, wallets) === chips.wallet)) return false;
+    if (chips.pool && !items.some(x => String(x.pool || '') === chips.pool)) return false;
+    return true;
+}
+
+// Chip filter rows: coins / wallets / pools used by the sheets (Hive cloud style)
+function renderFsChips(entries) {
+    const boxes = {
+        coin: document.getElementById('fsChipsCoins'),
+        wallet: document.getElementById('fsChipsWallets'),
+        pool: document.getElementById('fsChipsPools')
+    };
+    const wallets = (window._fsData && window._fsData.wallets) || [];
+    const byCoin = {}, byWallet = {}, byPool = {};
+    entries.forEach(({ f }) => {
+        const items = f.items || [];
+        new Set(items.map(x => String(x.coin || '').toUpperCase()).filter(Boolean)
+            .concat(f.coin ? [String(f.coin).toUpperCase()] : []))
+            .forEach(c => { byCoin[c] = (byCoin[c] || 0) + 1; });
         const it = items[0] || {};
-        const walletLabel = live ? (it.wallet || '—') : (walletAddressLabel(it.wallet, wallets));
-        const coins = Array.from(new Set(items.map(x => (x.coin || '').toUpperCase()).filter(Boolean)));
-        const minerBadges = items.map(x => minerBadgesHtml(x.miner)).join('');
-        const extra = items.length > 1 ? ' <span class="badge bg-secondary text-dark" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
-        const star = live ? '' :
-            '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + escapeHtml(f.id) + '" title="Favorite">' +
-            '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
-        const actions = live ? '' :
-            '<div class="d-flex gap-1 align-items-center flex-shrink-0">' +
-                '<button type="button" class="btn btn-xs btn-outline-warning py-0 px-2" data-action="apply" data-id="' + escapeHtml(f.id) + '" title="Apply"><i class="bi bi-lightning-charge-fill"></i></button>' +
-                '<button type="button" class="btn btn-xs btn-outline-primary py-0 px-2" data-action="edit" data-id="' + escapeHtml(f.id) + '" title="Edit"><i class="bi bi-pencil"></i></button>' +
-                '<div class="dropdown">' +
-                    '<button type="button" class="fs-kebab" data-bs-toggle="dropdown" aria-expanded="false" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>' +
-                    '<ul class="dropdown-menu dropdown-menu-end">' +
-                        '<li><button type="button" class="dropdown-item" data-action="duplicate" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-copy me-2"></i>Duplicate</button></li>' +
-                        '<li><button type="button" class="dropdown-item" data-action="export" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-download me-2"></i>Export</button></li>' +
-                        '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-clipboard me-2"></i>Copy</button></li>' +
-                        '<li><hr class="dropdown-divider"></li>' +
-                        '<li><button type="button" class="dropdown-item text-danger" data-action="delete" data-id="' + escapeHtml(f.id) + '"><i class="bi bi-trash me-2"></i>Delete</button></li>' +
-                    '</ul>' +
-                '</div>' +
-            '</div>';
-        return '<div class="fsheet-row2 d-flex align-items-center gap-2' + (applied ? ' is-active' : '') + '">' +
-            star +
-            coinAvatarHtml(coins[0] || it.coin) +
-            '<div class="min-w-0 flex-grow-1">' +
-                '<div class="fs-name text-truncate">' + escapeHtml(f.name) +
-                    (applied ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
-                    (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
-                '</div>' +
-                '<div class="fs-sub text-truncate" title="' + escapeHtml([coins.join(' + '), walletLabel, it.pool, it.miner].join(' • ')) + '">' +
-                    escapeHtml((coins.join(' + ') || '—') + ' • ' + walletLabel + ' • ' + (it.pool || '—') + ' • ' + (it.miner || 'none')) +
-                '</div>' +
-            '</div>' +
-            '<span class="flex-shrink-0">' + minerBadges + '</span>' + extra +
-            actions +
+        if (it.wallet) {
+            const l = walletAddressLabel(it.wallet, wallets);
+            if (l) byWallet[l] = (byWallet[l] || 0) + 1;
+        }
+        if (it.pool) byPool[it.pool] = (byPool[it.pool] || 0) + 1;
+    });
+    window._fsChipsExp = window._fsChipsExp || {};
+    window._fsChips = window._fsChips || {};
+    const chip = (kind, value, label, count, av) =>
+        '<button type="button" class="chip-btn' + (window._fsChips[kind] === value ? ' active' : '') + '" data-chip="' + kind + '" data-value="' + escapeHtml(value) + '" title="Filter flight sheets">' +
+        (av || '') + '<span>' + escapeHtml(label) + '</span>' + (count !== undefined ? ' <span class="chip-count">' + count + '</span>' : '') + '</button>';
+    const fill = (box, kind, dict, avFn, limit, moreLabel) => {
+        if (!box) return;
+        const keys = Object.keys(dict).sort();
+        if (!keys.length) { box.innerHTML = ''; return; }
+        let shown = keys;
+        let html = '';
+        if (keys.length > limit && !window._fsChipsExp[kind]) shown = keys.slice(0, limit);
+        html = shown.map(k => chip(kind, k, k, dict[k], avFn ? avFn(k) : '')).join('');
+        if (keys.length > shown.length) {
+            html += '<button type="button" class="chip-btn" data-chip="' + kind + '" data-action="more" title="Show all">… ' + (keys.length - shown.length) + ' ' + moreLabel + '</button>';
+        }
+        box.innerHTML = html;
+    };
+    fill(boxes.coin, 'coin', byCoin, c => coinAvatarHtml(c), 10, 'more coins');
+    fill(boxes.wallet, 'wallet', byWallet, null, 8, 'more wallets');
+    fill(boxes.pool, 'pool', byPool, null, 8, 'more pools');
+}
+
+// One flight sheet row (Hive worker page style)
+function fsRowHtml({ f, applied, live }) {
+    const items = (f.items && f.items.length ? f.items : [{}]);
+    const wallets = (window._fsData && window._fsData.wallets) || [];
+    const coins = Array.from(new Set(items.map(x => String(x.coin || '').toUpperCase()).filter(Boolean)));
+    const it0 = items[0] || {};
+    const walletLabel = live ? (it0.wallet || '—') : (it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner');
+    const poolLabel = it0.pool || 'Configured in miner';
+    const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
+    const minerBadges = minerBadgesHtml(it0.miner);
+    const extra = items.length > 1 ? ' <span class="fs-multi" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
+    const expanded = window._fsExpandedId === f.id;
+    const fid = escapeHtml(f.id);
+    const star = live ? '' :
+        '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + fid + '" title="To favorites">' +
+        '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
+    const run = live ? '' :
+        '<button type="button" class="fs-run' + (applied ? ' active' : '') + '" data-action="apply" data-id="' + fid + '" title="Run this flight sheet">' +
+        '<i class="bi bi-rocket-takeoff' + (applied ? '-fill' : '') + '"></i></button>';
+    const details = live ? '' :
+        '<button type="button" class="fs-details' + (expanded ? ' open' : '') + '" data-action="details" data-id="' + fid + '" title="Details">' +
+        '<i class="bi bi-chevron-down"></i></button>';
+    const kebab = live ? '' :
+        '<div class="dropdown">' +
+            '<button type="button" class="fs-kebab" data-bs-toggle="dropdown" aria-expanded="false" title="More actions"><i class="bi bi-three-dots-vertical"></i></button>' +
+            '<ul class="dropdown-menu dropdown-menu-end">' +
+                '<li><button type="button" class="dropdown-item" data-action="duplicate" data-id="' + fid + '"><i class="bi bi-copy me-2"></i>Duplicate</button></li>' +
+                '<li><button type="button" class="dropdown-item" data-action="export" data-id="' + fid + '"><i class="bi bi-download me-2"></i>Export</button></li>' +
+                '<li><button type="button" class="dropdown-item" data-action="copy" data-id="' + fid + '"><i class="bi bi-clipboard me-2"></i>Copy</button></li>' +
+                '<li><hr class="dropdown-divider"></li>' +
+                '<li><button type="button" class="dropdown-item text-danger" data-action="delete" data-id="' + fid + '"><i class="bi bi-trash me-2"></i>Delete</button></li>' +
+            '</ul>' +
         '</div>';
-    }).join('');
+    let html = '<div class="fsheet-row2 fs-row' + (applied ? ' is-active' : '') + '">' +
+        '<div class="fs-row-left">' +
+            '<div class="fs-row-coins">' +
+                (coins.length
+                    ? coins.map(c => coinAvatarHtml(c) + '<span class="fs-ticker">' + escapeHtml(c) + '</span>').join('<span class="fs-plus">+</span>')
+                    : coinAvatarHtml('') + '<span class="fs-ticker text-muted">—</span>') +
+            '</div>' +
+            '<div class="fs-row-info min-w-0">' +
+                '<div class="fs-info-line fw-semibold text-truncate" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
+                '<div class="fs-info-line text-muted text-truncate" title="' + escapeHtml(poolLabel) + '">' + escapeHtml(poolLabel) + '</div>' +
+                '<div class="fs-info-line text-truncate"><span class="font-monospace small">' + escapeHtml(minerLabel) + '</span>' + minerBadges + '</div>' +
+            '</div>' +
+        '</div>' +
+        '<div class="fs-row-right">' +
+            '<div class="fs-name text-end text-truncate">' + escapeHtml(f.name) +
+                (applied ? ' <span class="badge bg-warning-glow text-warning small">ACTIVE</span>' : '') +
+                (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
+                extra +
+            '</div>' +
+            '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + details + star + kebab + '</div>' +
+        '</div>' +
+    '</div>';
+    if (expanded && !live) html += fsExpandHtml(f);
+    return html;
+}
+
+// Inline edit panel revealed by the Details chevron (Hive expands the row in place)
+function fsExpandHtml(f) {
+    const fid = escapeHtml(f.id);
+    const items = (f.items && f.items.length ? f.items : [{}]);
+    return '<div class="fs-expand" data-expand="' + fid + '">' +
+        '<div class="fs-expand-items">' + items.map((it, i) => builderRowHtml(i, it)).join('') + '</div>' +
+        '<div class="d-flex justify-content-end gap-2 mt-2">' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="expand-clear" data-id="' + fid + '">Clear</button>' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="expand-cancel" data-id="' + fid + '">Cancel</button>' +
+            '<button type="button" class="btn btn-sm btn-warning fw-semibold px-3" data-action="expand-save" data-id="' + fid + '">Apply changes</button>' +
+        '</div>' +
+    '</div>';
+}
+
+async function saveExpandedFsheet(fid) {
+    const f = findFsheet(fid);
+    const container = document.getElementById('fsheetsContainer');
+    const panel = container && container.querySelector('[data-expand="' + fid + '"]');
+    if (!f || !panel) return;
+    const items = collectBuilderItems(panel);
+    if (!items.length) { showToast('Add at least one miner item.', false); return; }
+    try {
+        const response = await apiFetch('/api/fsheets/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ fsheet: { id: f.id, name: f.name, coin: items[0].coin, fav: f.fav, items: items } })
+        });
+        const data = await response.json();
+        showToast(data.message || (data.success ? 'Flight sheet updated.' : 'Failed to save flight sheet.'), !!data.success);
+        if (data.success) {
+            window._fsExpandedId = null;
+            loadFsheets();
+        }
+    } catch (e) {
+        showToast('Network error saving flight sheet.', false);
+    }
 }
 
 function walletAddressLabel(walletRef, wallets) {
     const w = (wallets || []).find(x => x.id === walletRef);
     if (w) return w.name;
-    if (!walletRef) return 'In miner config';
+    if (!walletRef) return 'Configured in miner';
     return walletRef.length > 18 ? walletRef.slice(0, 18) + '…' : walletRef;
 }
 
@@ -3106,15 +3334,6 @@ function findFsheet(fid) {
     const data = window._fsData;
     return data ? (data.fsheets || []).find(x => x.id === fid) : null;
 }
-
-window.editFsheet = function(fid) {
-    const f = findFsheet(fid);
-    if (!f) return;
-    fillBuilderFromFsheet(f);
-    const form = document.getElementById('saveFsheetForm');
-    form.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    document.getElementById('fsName').focus();
-};
 
 window.deleteFsheet = async function(fid) {
     if (!confirm('Delete this flight sheet?')) return;
@@ -3223,7 +3442,7 @@ window.toggleFsheetFav = async function(fid) {
     }
 };
 
-// One delegated click handler for all flight sheet row actions
+// Delegated handlers for all flight sheet row + inline editor actions
 function setupFsheetsContainer() {
     const container = document.getElementById('fsheetsContainer');
     if (!container) return;
@@ -3233,14 +3452,58 @@ function setupFsheetsContainer() {
         if (!target || !container.contains(target)) return;
         const action = target.dataset.action;
         const fid = target.dataset.id;
-        if (!fid) return;
-        if (action === 'fav') toggleFsheetFav(fid);
-        else if (action === 'apply') applyFsheet(fid);
-        else if (action === 'edit') editFsheet(fid);
-        else if (action === 'duplicate') duplicateFsheet(fid);
-        else if (action === 'export') exportFsheet(fid);
-        else if (action === 'copy') copyFsheet(fid);
-        else if (action === 'delete') deleteFsheet(fid);
+        if (action === 'fav' || action === 'apply' || action === 'duplicate' ||
+            action === 'export' || action === 'copy' || action === 'delete') {
+            if (!fid) return;
+            if (action === 'fav') toggleFsheetFav(fid);
+            else if (action === 'apply') applyFsheet(fid);
+            else if (action === 'duplicate') duplicateFsheet(fid);
+            else if (action === 'export') exportFsheet(fid);
+            else if (action === 'copy') copyFsheet(fid);
+            else if (action === 'delete') deleteFsheet(fid);
+            return;
+        }
+        if (action === 'details') {
+            if (!fid) return;
+            window._fsExpandedId = (window._fsExpandedId === fid) ? null : fid;
+            renderFsheets();
+        } else if (action === 'expand-cancel') {
+            window._fsExpandedId = null;
+            renderFsheets();
+        } else if (action === 'expand-save') {
+            if (fid) saveExpandedFsheet(fid);
+        } else if (action === 'expand-clear') {
+            const panel = container.querySelector('[data-expand="' + fid + '"]');
+            if (panel) panel.querySelectorAll('.fs-alt, .fs-url, .fs-algo, .fs-uc').forEach(i => { i.value = ''; });
+        } else if (action === 'wallet-add') {
+            const row = target.closest('.fs-item-row');
+            const coin = row ? row.querySelector('.fs-coin').value.trim().toUpperCase() : '';
+            showWalletModal({ coin: coin });
+        } else if (action === 'miner-setup') {
+            const row = target.closest('.fs-item-row');
+            const cfg = row && row.querySelector('.fs-miner-cfg');
+            if (cfg) {
+                cfg.classList.toggle('d-none');
+                applyMinerCfgMode(row);
+            }
+        } else if (action === 'remove-item') {
+            const panel = target.closest('.fs-expand');
+            const row = target.closest('.fs-item-row');
+            if (panel && row) {
+                if (panel.querySelectorAll('.fs-item-row').length <= 1) {
+                    row.outerHTML = builderRowHtml(0, {});
+                } else {
+                    row.remove();
+                }
+                renumberFsRows(panel);
+            }
+        }
+    });
+    // Inline editor rows behave like the builder rows
+    container.addEventListener('change', onFsRowChange);
+    container.addEventListener('input', onFsCoinInput);
+    container.addEventListener('focusin', function(e) {
+        if (e.target.classList.contains('fs-pool')) updatePoolDatalist();
     });
     // Keep dropdown menus visible above the scroll container while open
     document.addEventListener('show.bs.dropdown', (e) => {
@@ -3251,19 +3514,22 @@ function setupFsheetsContainer() {
     });
 }
 
-// Filter switch: All / Applied / Not Applied
-function setupFsFilter() {
-    const group = document.getElementById('fsFilterGroup');
-    if (!group) return;
-    group.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-filter]');
+// Chip filter clicks: coins / wallets / pools
+function setupFsChips() {
+    const wrap = document.querySelector('.fs-chips');
+    if (!wrap) return;
+    wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-chip]');
         if (!btn) return;
-        window._fsFilter = btn.dataset.filter;
-        group.querySelectorAll('button').forEach(b => {
-            b.classList.toggle('active', b === btn);
-            b.classList.toggle('btn-secondary', b === btn);
-            b.classList.toggle('btn-outline-secondary', b !== btn);
-        });
+        const kind = btn.dataset.chip;
+        if (btn.dataset.action === 'more') {
+            window._fsChipsExp = window._fsChipsExp || {};
+            window._fsChipsExp[kind] = true;
+            renderFsheets();
+            return;
+        }
+        window._fsChips = window._fsChips || {};
+        window._fsChips[kind] = (window._fsChips[kind] === btn.dataset.value) ? '' : btn.dataset.value;
         renderFsheets();
     });
 }
@@ -3401,13 +3667,14 @@ function openWalletModal() {
 }
 
 function showWalletModal(entry) {
-    window._editingWalletId = entry ? entry.id : '';
-    document.getElementById('walletEditTitle').innerHTML = entry
+    const isEdit = !!(entry && entry.id);
+    window._editingWalletId = isEdit ? entry.id : '';
+    document.getElementById('walletEditTitle').innerHTML = isEdit
         ? '<i class="bi bi-wallet2 text-warning me-2"></i>Edit Wallet'
         : '<i class="bi bi-wallet2 text-warning me-2"></i>New Wallet';
     document.getElementById('walletCoinInput').value = entry ? (entry.coin || '') : '';
-    document.getElementById('walletAddressInput2').value = entry ? (entry.address || '') : '';
-    document.getElementById('walletNameInput2').value = entry ? (entry.name || '') : '';
+    document.getElementById('walletAddressInput2').value = isEdit ? (entry.address || '') : '';
+    document.getElementById('walletNameInput2').value = isEdit ? (entry.name || '') : '';
     bootstrap.Modal.getOrCreateInstance(document.getElementById('walletEditModal')).show();
 }
 
