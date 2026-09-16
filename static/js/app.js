@@ -1000,6 +1000,7 @@ function switchRig(rigId) {
     loadTuningSettings();
     loadPresetsList();
     loadFsheets();
+    renderWallets();
     loadFans();
     showToast('Switched to ' + getRigName(rigId), true);
 }
