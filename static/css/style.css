@@ -982,33 +982,46 @@ tr.af-sep td {
     background: rgba(255, 255, 255, 0.08);
     color: #adb5bd;
 }
-.fs-actions .btn, .fs-actions .fs-run, .fs-actions .fs-details {
-    --bs-btn-padding-y: 0.1rem;
-}
 .fs-run, .fs-details {
     background: none;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
     color: #adb5bd;
-    width: 28px;
-    height: 26px;
+    width: 34px;
+    height: 32px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     padding: 0;
-    font-size: 0.9rem;
+    font-size: 1.05rem;
     transition: all 0.15s ease;
 }
-.fs-run:hover { color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); }
-.fs-run.active { color: #fbbf24; border-color: rgba(245, 158, 11, 0.6); }
-.fs-details:hover { color: #fff; border-color: rgba(255, 255, 255, 0.35); }
+.fs-run:hover, .fs-run.active { color: #fbbf24; border-color: rgba(245, 158, 11, 0.55); background: rgba(245, 158, 11, 0.08); }
+.fs-details:hover { color: #fff; border-color: rgba(255, 255, 255, 0.4); background: rgba(255, 255, 255, 0.05); }
 .fs-details i { transition: transform 0.15s ease; }
 .fs-details.open i { transform: rotate(180deg); }
-.fs-star { background: none; border: none; padding: 0 2px; color: #6c757d; font-size: 0.95rem; }
+.fs-star { background: none; border: none; padding: 0 4px; color: #6c757d; font-size: 1.1rem; }
 .fs-star.on { color: #fbbf24; }
 .fs-star:hover { color: #fbbf24; }
-.fs-kebab { border: none; color: #adb5bd; padding: 0 6px; }
-.fs-kebab:hover { color: #fff; }
+.fs-kebab {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    color: #adb5bd;
+    width: 34px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 1.05rem;
+    transition: all 0.15s ease;
+}
+.fs-kebab:hover { color: #fff; border-color: rgba(255, 255, 255, 0.4); background: rgba(255, 255, 255, 0.05); }
+.fs-row { align-items: center; }
+.fs-row-right { justify-content: flex-end; }
+.fs-actions { gap: 6px; }
+.fs-actions .fs-star { font-size: 1.1rem; }
 
 /* Inline editor expanded under a row (Hive Details) */
 .fs-expand {
@@ -1019,23 +1032,22 @@ tr.af-sep td {
     background: rgba(255, 255, 255, 0.02);
 }
 
-/* Active flight sheet: Hive expanded card */
-.fs-active { display: flex; align-items: stretch; gap: 10px; }
-.fs-active-side {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    flex-shrink: 0;
+/* Expanded sheet details (Hive info card, click on a row toggles it) */
+.fs-info-card {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.02);
 }
-.fs-active-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+.fsheet-row2.is-active + .fs-info-card { border-color: rgba(245, 158, 11, 0.35); }
 .fs-active-grid {
     display: grid;
     grid-template-columns: minmax(90px, 0.55fr) minmax(200px, 1.4fr) minmax(150px, 0.9fr) minmax(230px, 1.5fr);
     gap: 8px 18px;
     align-items: start;
 }
+.fs-act-coins { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .fs-act-name { font-weight: 600; font-size: 0.86rem; margin-bottom: 2px; }
 .fs-act-label {
     font-size: 0.72rem;
@@ -1076,7 +1088,7 @@ tr.af-sep td {
 .fs-act-line { word-break: break-all; }
 .fs-act-k { font-weight: 700; color: #c9d1d9; margin-right: 4px; }
 .fs-act-v { color: #8b949e; }
-.fs-active-foot { font-size: 0.82rem; color: #8b949e; }
+.fs-active-foot { margin-top: 10px; font-size: 0.82rem; color: #8b949e; }
 @media (max-width: 1199.98px) {
     .fs-active-grid { grid-template-columns: minmax(90px, 0.6fr) minmax(0, 1.5fr) minmax(0, 1.4fr); }
     .fs-active-grid .fs-act-col:nth-child(4) { grid-column: 1 / -1; }
@@ -1110,4 +1122,3 @@ hr {
     opacity: 0.15;
 }
 
-.fs-active-star { display: flex; align-items: flex-start; padding-top: 10px; flex-shrink: 0; }
