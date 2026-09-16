@@ -2537,6 +2537,8 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
         install_url = str(extra.get("install_url", "")).strip()
         algo = str(extra.get("algo", "")).strip().lower()
         user_config = str(extra.get("user_config", "")).strip()
+        template = str(extra.get("template", "")).strip()
+        pool_pass = str(extra.get("pass", "")).strip()
         fs_name = str(extra.get("name", "")).strip()
         if miner_alt and not re.match(r'^[a-z0-9_\-]+$', miner_alt):
             return False, "Invalid custom miner package name."
@@ -2546,12 +2548,18 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
             return False, "Invalid hash algorithm name."
         if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
             return False, "Invalid miner configuration arguments."
+        if template and not re.match(r'^[A-Za-z0-9_\-\.\@\:%]*$', template):
+            return False, "Invalid wallet and worker template."
+        if pool_pass and not re.match(r'^[A-Za-z0-9_\-\.\:\%\@\#\+\/\s\=\,]*$', pool_pass):
+            return False, "Invalid pool password."
         if not wallet:
             return False, "Wallet address is required for a custom miner flight sheet."
 
         worker_name = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
         # HiveOS resolves %WAL%/%WORKER_NAME% server-side; our local apply must do it
         # itself or the miner would literally mine to "%WAL%.%WORKER_NAME%"
+        custom_template = template or (wallet + "." + worker_name)
+        custom_template = custom_template.replace("%WAL%", wallet).replace("%worker_name%", worker_name).replace("%WORKER_NAME%", worker_name)
         user_config = user_config.replace("%WAL%", wallet).replace("%worker_name%", worker_name).replace("%WORKER_NAME%", worker_name)
         wallet_conf = parse_shell_config(WALLET_CONF_PATH)
         wallet_conf.clear()
@@ -2562,9 +2570,9 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
             wallet_conf["CUSTOM_INSTALL_URL"] = install_url
         if algo:
             wallet_conf["CUSTOM_ALGO"] = algo
-        wallet_conf["CUSTOM_TEMPLATE"] = wallet + "." + worker_name
+        wallet_conf["CUSTOM_TEMPLATE"] = custom_template
         wallet_conf["CUSTOM_URL"] = pool
-        wallet_conf["CUSTOM_PASS"] = "x"
+        wallet_conf["CUSTOM_PASS"] = pool_pass or "x"
         if user_config:
             wallet_conf["CUSTOM_USER_CONFIG"] = user_config
         if coin:
@@ -2721,6 +2729,8 @@ def _validate_fsheet_item(item):
     install_url = str(item.get("install_url", "")).strip()
     algo = str(item.get("algo", "")).strip().lower()
     user_config = str(item.get("user_config", "")).strip()
+    template = str(item.get("template", "")).strip()
+    pool_pass = str(item.get("pass", "")).strip()
     if miner_alt and not re.match(r'^[a-z0-9_\-]+$', miner_alt):
         return None, "Invalid custom miner package name."
     if install_url and not re.match(r'^https://[A-Za-z0-9\.\-/_]+$', install_url):
@@ -2729,12 +2739,17 @@ def _validate_fsheet_item(item):
         return None, "Invalid hash algorithm name."
     if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
         return None, "Invalid miner configuration arguments."
+    if template and not re.match(r'^[A-Za-z0-9_\-\.\@\:%]*$', template):
+        return None, "Invalid wallet and worker template."
+    if pool_pass and not re.match(r'^[A-Za-z0-9_\-\.\:\%\@\#\+\/\s\=\,]*$', pool_pass):
+        return None, "Invalid pool password."
     return {
         "coin": coin, "wallet": wallet, "pool": pool, "miner": miner,
         "miner_alt": miner_alt, "install_url": install_url, "algo": algo, "user_config": user_config,
+        "template": template, "pass": pool_pass,
     }, ""
 
-FSHEET_ITEM_FIELDS = ["coin", "wallet", "pool", "miner", "miner_alt", "install_url", "algo", "user_config"]
+FSHEET_ITEM_FIELDS = ["coin", "wallet", "pool", "miner", "miner_alt", "install_url", "algo", "user_config", "template", "pass"]
 
 def _validate_fsheet_entry(entry):
     """Validate a flight sheet: {id, name, coin, fav, items[]}.
@@ -2950,7 +2965,8 @@ def apply_fsheet():
     ok, msg = _apply_flight_sheet(item.get("coin"), wallet, item.get("pool"), item.get("miner"),
                                   extra={"name": fsheet.get("name", ""), "miner_alt": item.get("miner_alt", ""),
                                          "install_url": item.get("install_url", ""), "algo": item.get("algo", ""),
-                                         "user_config": item.get("user_config", "")})
+                                         "user_config": item.get("user_config", ""), "template": item.get("template", ""),
+                                         "pass": item.get("pass", "")})
     return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/flightsheet', methods=['GET', 'POST'])

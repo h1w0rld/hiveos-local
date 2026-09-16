@@ -605,7 +605,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setupWalletsContainer();
     const fsItems = document.getElementById('fsItemsContainer');
     fsItems.addEventListener('change', onFsRowChange);
-    fsItems.addEventListener('input', onFsCoinInput);
+    fsItems.addEventListener('input', onFsRowInput);
     fsItems.addEventListener('focusin', function(e) {
         if (e.target.classList.contains('fs-pool')) updatePoolDatalist();
     });
@@ -629,6 +629,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 cfg.classList.toggle('d-none');
                 applyMinerCfgMode(row);
             }
+        } else if (btn.dataset.action === 'cfg-clear') {
+            clearFsExpertFields(btn.closest('.fs-item-row'));
         }
     });
     document.getElementById('walletAddBtn').addEventListener('click', () => showWalletModal(null));
@@ -2790,23 +2792,11 @@ function coinAvatarHtml(coin, extraCls) {
 
 // ---------------- Flight sheet builder (HiveOS worker page style) ----------------
 
-function walletOptionsHtml(selected, coin) {
+// Hive: the Wallet dropdown lists the wallets from the Wallets page (all of them)
+function walletOptionsHtml(selected) {
     const wallets = (window._fsData && window._fsData.wallets) || [];
-    const c = String(coin || '').trim().toUpperCase();
-    let list = wallets;
-    if (c) {
-        const matched = wallets.filter(w => String(w.coin || '').toUpperCase() === c);
-        if (matched.length) list = matched;
-    }
     const isRef = wallets.some(w => w.id === selected);
-    let opts = '';
-    // Keep a wallet that is filtered out by the coin selectable instead of silently switching
-    if (selected && isRef && !list.some(w => w.id === selected)) {
-        const w = wallets.find(x => x.id === selected);
-        opts += '<option value="' + escapeHtml(w.id) + '" selected>' +
-            escapeHtml(w.name) + (w.coin ? ' · ' + escapeHtml(w.coin) : '') + '</option>';
-    }
-    opts += list.map(w =>
+    let opts = wallets.map(w =>
         '<option value="' + escapeHtml(w.id) + '"' + (selected === w.id ? ' selected' : '') + '>' +
         escapeHtml(w.name) + (w.coin ? ' · ' + escapeHtml(w.coin) : '') + '</option>').join('');
     opts += '<option value="__custom__"' + (!isRef ? ' selected' : '') + '>Custom address...</option>';
@@ -2826,12 +2816,12 @@ function minerOptionsHtml(selected) {
     return opts;
 }
 
-// EXPERT SECTION: HiveOS custom-miner fields (hidden for standard packages)
+// EXPERT SECTION: HiveOS custom-miner config fields (hidden for standard packages)
 function minerCfgHtml(item) {
     item = item || {};
-    return '<div class="fs-cfg-note small text-muted d-none">Default package config is used. Pick <em>Custom miner...</em> and press Setup to set the install URL, hash algorithm and extra arguments.</div>' +
+    return '<div class="fs-cfg-note small text-muted d-none">Default package config is used. Pick <em>Custom miner...</em> and press Setup to edit the miner config.</div>' +
         '<div class="fs-cfg-fields d-none">' +
-            '<div class="fs-expert-title">EXPERT SECTION <span class="fw-normal text-muted">— use a ready-made miner package or create your own.</span></div>' +
+            '<div class="fs-expert-title">Custom config <span class="fw-normal text-muted">— EXPERT SECTION. You can use a ready-made miner package or create your own.</span></div>' +
             '<div class="row g-2">' +
                 '<div class="col-md-4"><label class="fs-flabel">Miner name</label>' +
                     '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-alt" placeholder="e.g. srbminer_custom" value="' + escapeHtml(item.miner_alt || '') + '"></div>' +
@@ -2839,8 +2829,17 @@ function minerCfgHtml(item) {
                     '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-url" placeholder="https://github.com/.../releases/download/..." value="' + escapeHtml(item.install_url || '') + '"></div>' +
                 '<div class="col-md-4"><label class="fs-flabel">Hash algorithm</label>' +
                     '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-algo" placeholder="e.g. pearlhash" value="' + escapeHtml(item.algo || '') + '"></div>' +
-                '<div class="col-md-8"><label class="fs-flabel">Extra config arguments</label>' +
-                    '<textarea class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-uc" rows="2" placeholder="--algorithm-gpu pearlhash --pool ...">' + escapeHtml(item.user_config || '') + '</textarea></div>' +
+                '<div class="col-md-8"><label class="fs-flabel">Wallet and worker template</label>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-template" placeholder="%WAL%.%WORKER_NAME%" value="' + escapeHtml(item.template || '%WAL%.%WORKER_NAME%') + '"></div>' +
+                '<div class="col-md-6"><label class="fs-flabel">Pool URL</label>' +
+                    '<textarea class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-poolcfg" rows="1" placeholder="pool:port">' + escapeHtml(item.pool || '') + '</textarea></div>' +
+                '<div class="col-md-6"><label class="fs-flabel">Password</label>' +
+                    '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-pass" placeholder="x" value="' + escapeHtml(item.pass || 'x') + '"></div>' +
+                '<div class="col-12"><label class="fs-flabel">Extra config arguments</label>' +
+                    '<textarea class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace fs-uc" rows="2" placeholder="--algorithm-gpu pearlhash --wallet %WAL%.%WORKER_NAME% --pool ... --tls true">' + escapeHtml(item.user_config || '') + '</textarea></div>' +
+            '</div>' +
+            '<div class="d-flex justify-content-end mt-2">' +
+                '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="cfg-clear">Clear</button>' +
             '</div>' +
         '</div>';
 }
@@ -2868,7 +2867,7 @@ function builderRowHtml(idx, item) {
             '<div class="fs-field">' +
                 '<label class="fs-flabel">Wallet</label>' +
                 '<div class="fs-inline">' +
-                    '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-wallet">' + walletOptionsHtml(item.wallet, item.coin) + '</select>' +
+                    '<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle fs-wallet">' + walletOptionsHtml(item.wallet) + '</select>' +
                     '<button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" data-action="wallet-add" title="Add a new wallet to the library">Add</button>' +
                 '</div>' +
                 '<input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle font-monospace mt-1 fs-wallet-custom' + (!isRef ? '' : ' d-none') + '" placeholder="Custom wallet address" value="' + escapeHtml(isRef ? '' : (item.wallet || '')) + '">' +
@@ -2939,12 +2938,18 @@ function collectBuilderItems(root) {
         const walletSel = row.querySelector('.fs-wallet').value;
         const wallet = walletSel === '__custom__' ? row.querySelector('.fs-wallet-custom').value.trim() : walletSel;
         const miner = row.querySelector('.fs-miner').value;
+        const cfg = row.querySelector('.fs-miner-cfg');
+        const cfgOpen = cfg && !cfg.classList.contains('d-none');
+        // Pool can be edited in the expert section (Hive pool URL) — it wins while the section is open
+        const poolCfg = row.querySelector('.fs-poolcfg');
+        let pool = row.querySelector('.fs-pool').value.trim();
+        if (poolCfg && cfgOpen) pool = poolCfg.value.trim();
         const item = {
             coin: row.querySelector('.fs-coin').value.trim().toUpperCase(),
             wallet: wallet,
-            pool: row.querySelector('.fs-pool').value.trim(),
+            pool: pool,
             miner: miner,
-            miner_alt: '', install_url: '', algo: '', user_config: ''
+            miner_alt: '', install_url: '', algo: '', user_config: '', template: '', pass: ''
         };
         const extra = row.querySelector('.fs-cfg-fields');
         if (extra && (miner === 'custom' || extra.querySelector('.fs-alt').value.trim() || extra.querySelector('.fs-url').value.trim())) {
@@ -2952,6 +2957,10 @@ function collectBuilderItems(root) {
             item.install_url = extra.querySelector('.fs-url').value.trim();
             item.algo = extra.querySelector('.fs-algo').value.trim().toLowerCase();
             item.user_config = extra.querySelector('.fs-uc').value.trim();
+            const tpl = extra.querySelector('.fs-template').value.trim();
+            const pass = extra.querySelector('.fs-pass').value.trim();
+            item.template = tpl === '%WAL%.%WORKER_NAME%' ? '' : tpl;
+            item.pass = pass === 'x' ? '' : pass;
         }
         items.push(item);
     });
@@ -3007,6 +3016,10 @@ function applyMinerCfgMode(row) {
     if (fields) fields.classList.toggle('d-none', !isCustom && !hasExtra);
     if (note) note.classList.toggle('d-none', isCustom || hasExtra);
     if (isCustom) cfg.classList.remove('d-none');
+    // Pool URL box mirrors the grid pool input while the section is open
+    const pool = row.querySelector('.fs-pool');
+    const poolCfg = row.querySelector('.fs-poolcfg');
+    if (pool && poolCfg && !cfg.classList.contains('d-none')) poolCfg.value = pool.value;
     const setupBtn = row.querySelector('[data-action="miner-setup"]');
     if (setupBtn) {
         const open = !cfg.classList.contains('d-none');
@@ -3024,16 +3037,21 @@ function updateFsCoinUi(coinInput) {
         av.style.setProperty('--h', coinHue(coin));
         av.textContent = coin.slice(0, 3) || '—';
     }
-    const sel = row.querySelector('.fs-wallet');
-    if (sel) {
+    updatePoolDatalist(coin);
+}
+
+// Refresh every Wallet dropdown in place (called after the wallet library changes,
+// keeping the current selections)
+function refreshFsWalletOptions() {
+    document.querySelectorAll('.fs-wallet').forEach(sel => {
         const cur = sel.value;
         const isRef = ((window._fsData && window._fsData.wallets) || []).some(w => w.id === cur);
-        sel.innerHTML = walletOptionsHtml(cur, coin);
+        sel.innerHTML = walletOptionsHtml(cur);
         if (isRef) sel.value = cur;
-        const custom = row.querySelector('.fs-wallet-custom');
+        const row = sel.closest('.fs-item-row');
+        const custom = row && row.querySelector('.fs-wallet-custom');
         if (custom) custom.classList.toggle('d-none', sel.value !== '__custom__');
-    }
-    updatePoolDatalist(coin);
+    });
 }
 
 function onFsRowChange(e) {
@@ -3047,8 +3065,30 @@ function onFsRowChange(e) {
     }
 }
 
-function onFsCoinInput(e) {
-    if (e.target.classList && e.target.classList.contains('fs-coin')) updateFsCoinUi(e.target);
+// Pool edits stay in sync between the grid input and the expert-section URL box
+function onFsRowInput(e) {
+    const row = e.target.closest('.fs-item-row');
+    if (!row) return;
+    if (e.target.classList.contains('fs-poolcfg')) {
+        const pool = row.querySelector('.fs-pool');
+        if (pool) pool.value = e.target.value;
+    } else if (e.target.classList.contains('fs-pool')) {
+        const poolCfg = row.querySelector('.fs-poolcfg');
+        if (poolCfg) poolCfg.value = e.target.value;
+    } else if (e.target.classList.contains('fs-coin')) {
+        updateFsCoinUi(e.target);
+    }
+}
+
+// Hive 'Clear': reset the expert config fields of one miner item to defaults
+function clearFsExpertFields(row) {
+    if (!row) return;
+    const set = (cls, val) => { const el = row.querySelector(cls); if (el) el.value = val; };
+    set('.fs-alt', ''); set('.fs-url', ''); set('.fs-algo', ''); set('.fs-uc', '');
+    set('.fs-template', '%WAL%.%WORKER_NAME%'); set('.fs-pass', 'x');
+    const pool = row.querySelector('.fs-pool');
+    const poolCfg = row.querySelector('.fs-poolcfg');
+    if (pool && poolCfg) poolCfg.value = pool.value;
 }
 
 function renumberFsRows(scope) {
@@ -3474,7 +3514,9 @@ function setupFsheetsContainer() {
             if (fid) saveExpandedFsheet(fid);
         } else if (action === 'expand-clear') {
             const panel = container.querySelector('[data-expand="' + fid + '"]');
-            if (panel) panel.querySelectorAll('.fs-alt, .fs-url, .fs-algo, .fs-uc').forEach(i => { i.value = ''; });
+            if (panel) panel.querySelectorAll('.fs-item-row').forEach(clearFsExpertFields);
+        } else if (action === 'cfg-clear') {
+            clearFsExpertFields(target.closest('.fs-item-row'));
         } else if (action === 'wallet-add') {
             const row = target.closest('.fs-item-row');
             const coin = row ? row.querySelector('.fs-coin').value.trim().toUpperCase() : '';
@@ -3501,7 +3543,7 @@ function setupFsheetsContainer() {
     });
     // Inline editor rows behave like the builder rows
     container.addEventListener('change', onFsRowChange);
-    container.addEventListener('input', onFsCoinInput);
+    container.addEventListener('input', onFsRowInput);
     container.addEventListener('focusin', function(e) {
         if (e.target.classList.contains('fs-pool')) updatePoolDatalist();
     });
@@ -3700,6 +3742,7 @@ async function saveWalletFromModal() {
         if (data.success) {
             bootstrap.Modal.getOrCreateInstance(document.getElementById('walletEditModal')).hide();
             renderWallets();
+            refreshFsWalletOptions();
             loadFsheets();
         }
     } catch (err) {
@@ -3719,7 +3762,7 @@ window.deleteWallet = async function(wid) {
         });
         const data = await response.json();
         showToast(data.message || (data.success ? 'Wallet removed.' : 'Failed to delete wallet.'), !!data.success);
-        if (data.success) { renderWallets(); loadFsheets(); }
+        if (data.success) { renderWallets(); refreshFsWalletOptions(); loadFsheets(); }
     } catch (e) {
         showToast('Network error deleting wallet.', false);
     }
