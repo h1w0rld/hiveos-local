@@ -2201,14 +2201,17 @@ def handle_autofan():
             "target_mem": _af_per_gpu(conf, "CUSTOM_TARGET_MEM_TEMP", n)[i],
             "critical": _af_per_gpu(conf, "CUSTOM_CRITICAL_TEMP", n)[i],
         })
+    # Empty scalars fall back to defaults: the key may exist with "" in a conf
+    # that was never pushed from the Hive cloud (e.g. RIG9) — the read-only
+    # Critical temp field would otherwise show blank
     return jsonify({
         "success": True,
         "enabled": conf.get("ENABLED", "0"),
-        "target_temp": conf.get("TARGET_TEMP", "60"),
-        "target_mem_temp": conf.get("TARGET_MEM_TEMP", "90"),
-        "min_fan": conf.get("MIN_FAN", "30"),
-        "max_fan": conf.get("MAX_FAN", "100"),
-        "critical_temp": conf.get("CRITICAL_TEMP", "70"),
+        "target_temp": conf.get("TARGET_TEMP") or "60",
+        "target_mem_temp": conf.get("TARGET_MEM_TEMP") or "90",
+        "min_fan": conf.get("MIN_FAN") or "30",
+        "max_fan": conf.get("MAX_FAN") or "100",
+        "critical_temp": conf.get("CRITICAL_TEMP") or "70",
         "critical_action": conf.get("CRITICAL_TEMP_ACTION", ""),
         "smart_mode": conf.get("SMART_MODE", "0"),
         "reboot_on_errors": conf.get("REBOOT_ON_ERROR", "0"),
@@ -2330,6 +2333,18 @@ def autofan_save_all():
     # typed in the advanced editor for ALL GPUs so the values stick even for
     # GPUs currently in auto mode and are re-used when a GPU switches to static
     conf["CUSTOM_STATIC_FAN"] = " ".join(str((order.get(i) or {"static": 0}).get("static", 0) or 0) for i in range(n))
+    # Backfill empty global scalars when every GPU uses the same value: a rig
+    # whose autofan.conf was never pushed from the Hive cloud has them blank
+    # (the save path only writes CUSTOM_* lists) and the read-only global
+    # fields would keep showing empty no matter how often the config is saved
+    for key, conf_key in (("min", "MIN_FAN"), ("max", "MAX_FAN"),
+                          ("target_core", "TARGET_TEMP"), ("target_mem", "TARGET_MEM_TEMP"),
+                          ("critical", "CRITICAL_TEMP")):
+        if str(conf.get(conf_key, "")).strip():
+            continue  # existing global wins (cloud-synced value must survive)
+        vals = [order.get(i, {}).get(key, 0) for i in range(n)]
+        if vals and all(v == vals[0] and v != 0 for v in vals):
+            conf[conf_key] = str(vals[0])
     if not write_shell_config(AUTOFAN_CONF, conf):
         return jsonify({"success": False, "message": "Failed to write autofan.conf"}), 500
 
