@@ -863,11 +863,16 @@ tr.af-sep td {
 .chip-count { opacity: 0.65; font-weight: 500; }
 
 /* Wallet table */
-.wallet-table .table { --bs-table-bg: transparent; }
+.wallet-table .table { --bs-table-bg: transparent; table-layout: fixed; }
 .wallet-table td, .wallet-table th { border-color: rgba(255, 255, 255, 0.06); }
 .wallet-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 /* Edit/delete icons in the wallets table — slightly larger, easier to hit */
 .wallet-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; }
+/* Cell breathing room: coin icon off the left edge, actions off the right edge,
+   small gap between the edit and delete buttons */
+.wallet-table td:first-child { padding-left: 12px; }
+.wallet-table td:last-child { padding-right: 12px; }
+.wallet-table .btn-xs + .btn-xs { margin-left: 6px; }
 /* Active wallet row — same amber highlight as the active flight sheet */
 .wallet-table tr.wallet-row-active td,
 .wallet-table tr.wallet-row-active:hover td {
