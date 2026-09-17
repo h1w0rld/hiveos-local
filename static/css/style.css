@@ -872,6 +872,33 @@ tr.af-sep td {
 .wallet-table .table { --bs-table-bg: transparent; }
 .wallet-table td, .wallet-table th { border-color: rgba(255, 255, 255, 0.06); }
 .wallet-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+/* Active wallet row — same amber highlight as the active flight sheet */
+.wallet-table tr.wallet-row-active td,
+.wallet-table tr.wallet-row-active:hover td {
+    background: var(--warning-glow);
+    border-color: rgba(245, 158, 11, 0.35);
+}
+
+/* Flight sheet usage badge in the wallets table */
+.fs-used-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1.6;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.10);
+    border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.fs-used-badge .bi { font-size: 0.78rem; }
+.fs-used-badge.fs-used-none {
+    color: rgba(255, 255, 255, 0.38);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.12);
+}
 
 /* Flight sheet builder (HiveOS worker page style) */
 .fs-builder { background: rgba(255, 255, 255, 0.02); }

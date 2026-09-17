@@ -4109,25 +4109,48 @@ function renderWalletTable() {
     const rc = data.rig_config || {};
     const filter = window._walletCoinFilter || '';
     // Live wallet currently used by the rig's mining config (may not exist in the library)
-    const liveWallet = (rc.wallet && !wallets.some(w => w.address === rc.wallet))
-        ? [{ id: '__rig__', coin: rc.coin || '', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true }]
+    const liveWallet = (rc.wallet && !wallets.some(w => walletMatchesLive(w.address, rc.wallet)))
+        ? [{ id: '__rig__', coin: rc.coin || '', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true, active: true }]
         : [];
     const rows = liveWallet.concat(wallets.filter(w => !filter || (w.coin || '').toUpperCase() === filter));
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">' +
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted small py-3">' +
             (wallets.length ? 'No wallets for this coin.' : 'No wallets saved yet. Click Add.') + '</td></tr>';
         return;
     }
-    tbody.innerHTML = rows.map(w =>
-        '<tr class="' + (w.live ? 'border-warning-subtle' : '') + '">' +
-            '<td>' + (w.live ? '<span class="badge bg-warning-glow text-warning small me-1">ACTIVE</span>' : '') + coinAvatarHtml(w.coin) + '</td>' +
+    tbody.innerHTML = rows.map(w => {
+        const isActive = !!(w.active || w.live);
+        const used = w.used_in || 0;
+        const status = isActive
+            ? '<span class="badge bg-warning-glow text-warning small" title="Wallet of the active flight sheet / live mining config">ACTIVE</span>'
+            : '<span class="text-muted small">&mdash;</span>';
+        const sheets = used > 0
+            ? '<span class="fs-used-badge" title="Used in ' + used + ' flight sheet' + (used > 1 ? 's' : '') + '"><i class="bi bi-rocket-takeoff-fill"></i>' + used + '</span>'
+            : '<span class="fs-used-badge fs-used-none" title="Not referenced by any flight sheet"><i class="bi bi-rocket-takeoff"></i>0</span>';
+        return '<tr class="' + (isActive ? 'wallet-row-active' : '') + '">' +
+            '<td>' + coinAvatarHtml(w.coin) + '</td>' +
+            '<td>' + status + '</td>' +
             '<td><span class="small fw-semibold">' + escapeHtml(w.name) + '</span></td>' +
             '<td><span class="small font-monospace text-muted d-inline-block text-truncate align-middle" style="max-width: 100%;" title="' + escapeHtml(w.address) + '">' + escapeHtml(w.address) + '</span></td>' +
+            '<td>' + sheets + '</td>' +
             '<td class="text-end">' + (w.live ? '<span class="small text-muted">running</span>' :
                 '<button type="button" class="btn btn-xs btn-outline-primary py-0 px-2" data-action="wallet-edit" data-id="' + escapeHtml(w.id) + '" title="Edit"><i class="bi bi-pencil"></i></button> ' +
                 '<button type="button" class="btn btn-xs btn-outline-danger py-0 px-2" data-action="wallet-delete" data-id="' + escapeHtml(w.id) + '" title="Delete"><i class="bi bi-trash"></i></button>') +
             '</td>' +
-        '</tr>').join('');
+        '</tr>';
+    }).join('');
+}
+
+// Robust match of a library wallet address against the live mining wallet
+// (live templates may carry a worker suffix: 'addr.WORKER')
+function walletMatchesLive(addr, live) {
+    addr = String(addr || '').trim();
+    live = String(live || '').trim();
+    if (!addr || !live) return false;
+    if (addr === live) return true;
+    if (live.startsWith(addr + '.')) return true;
+    const base = live.split('.')[0];
+    return base.length >= 8 && addr.startsWith(base);
 }
 
 function setupWalletsContainer() {
