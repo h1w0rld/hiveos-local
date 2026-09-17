@@ -3251,21 +3251,23 @@ def save_fsheet():
     fsheets = _load_fsheets_store()
     prev = next((f for f in fsheets if f.get("id") == clean["id"]), None)
     was_active = prev is not None and _fsheet_is_active(prev)
-    # Only mining-relevant changes (items/coin) require a re-apply; fav toggles
-    # and renames of the active sheet must not restart the miner
-    apply_relevant = prev is None or _fsheet_apply_signature(prev) != _fsheet_apply_signature(clean)
     fsheets = [f for f in fsheets if f.get("id") != clean["id"]]
     fsheets.append(clean)
     if not _save_json_store(FSHEETS_PATH, fsheets):
         return jsonify({"success": False, "message": "Failed to save flight sheet."}), 500
-    if was_active and apply_relevant:
-        # The edited sheet is the one currently running — re-apply it so changes
-        # (e.g. a new miner version in the install URL) actually reach the rig
+    if was_active:
+        # The edited sheet is the one currently running — re-apply it whenever
+        # the rig's live config no longer matches the sheet content (e.g. a new
+        # miner version in the install URL). Covers both fresh edits and drift
+        # left by applies made before auto-re-apply existed; a save that already
+        # matches the live config (fav toggle, rename) never restarts the miner.
         item = _pick_apply_item(clean)
         wallet = str(item.get("wallet", "")).strip()
         w = next((x for x in _load_wallets_store() if x.get("id") == wallet), None)
         if w:
             wallet = w.get("address", "")
+        if _live_config_matches_item(item, wallet):
+            return jsonify({"success": True, "message": "Flight sheet saved."})
         ok, msg = _apply_flight_sheet(item.get("coin"), wallet, item.get("pool"), item.get("miner"),
                                       extra={"name": clean.get("name", ""), "fs_id": clean.get("id", ""),
                                              "miner_alt": item.get("miner_alt", ""),
@@ -3277,22 +3279,38 @@ def save_fsheet():
         return jsonify({"success": True, "message": f"Flight sheet saved, but re-apply failed: {msg}", "apply_error": msg})
     return jsonify({"success": True, "message": "Flight sheet saved."})
 
-def _fsheet_apply_signature(fsheet):
-    """Fingerprint of the apply-relevant part of a flight sheet (everything that
-    reaches wallet.conf/rig.conf on apply). Used to skip miner restarts when a
-    saved active sheet was only renamed or favourited."""
-    sig_items = []
-    for it in fsheet.get("items") or []:
-        if not isinstance(it, dict):
-            continue
-        sig_items.append({
-            k: (str(it.get(k, "")).strip().lower() if k != "user_config" else str(it.get(k, "")).strip())
-            for k in FSHEET_ITEM_FIELDS
-        })
-    return json.dumps({
-        "coin": str(fsheet.get("coin", "")).strip().lower(),
-        "items": sig_items,
-    }, sort_keys=True)
+def _live_config_matches_item(item, wallet_address):
+    """True when wallet.conf/rig.conf already reflect this flight sheet item's
+    apply-relevant content (miner, package, install URL/version, algo, pool,
+    user config, pass, coin, wallet)."""
+    wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    miner = str(item.get("miner", "")).strip().lower() or "none"
+    if (rig_conf.get("MINER") or "none").strip().lower() != miner:
+        return False
+    wc = lambda k: (wallet_conf.get(k) or "").strip()
+    if miner == "custom":
+        hostname = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+        user_config = str(item.get("user_config", "")).strip()
+        user_config = user_config.replace("%WAL%", wallet_address).replace("%worker_name%", hostname).replace("%WORKER_NAME%", hostname)
+        try:
+            meta = json.loads(wallet_conf.get("META", "") or "{}")
+            live_coin = str(meta.get("custom", {}).get("coin", "")).strip().lower()
+        except Exception:
+            live_coin = ""
+        if not live_coin:
+            live_coin = wc("COIN").lower()
+        return (wc("CUSTOM_MINER") == str(item.get("miner_alt", "")).strip().lower() and
+                wc("CUSTOM_INSTALL_URL") == str(item.get("install_url", "")).strip() and
+                wc("CUSTOM_ALGO") == str(item.get("algo", "")).strip().lower() and
+                wc("CUSTOM_URL") == str(item.get("pool", "")).strip() and
+                wc("CUSTOM_USER_CONFIG") == user_config and
+                wc("CUSTOM_PASS") == (str(item.get("pass", "")).strip() or "x") and
+                (wc("CUSTOM_TEMPLATE") or "").startswith(wallet_address) and
+                live_coin == str(item.get("coin", "")).strip().lower())
+    return (wc("COIN").lower() == str(item.get("coin", "")).strip().lower() and
+            wc("WAL") == wallet_address and
+            wc("POOL_URL") == str(item.get("pool", "")).strip())
 
 @app.route('/api/fsheets/delete', methods=['POST'])
 def delete_fsheet():
