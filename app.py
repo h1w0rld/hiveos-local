@@ -15,6 +15,7 @@ import logging
 import threading
 import random
 import time
+from collections import deque
 import urllib.request
 from flask import Flask, jsonify, request, render_template, session, Response, has_request_context
 
@@ -1605,8 +1606,11 @@ def get_overclocks_formatted():
             "mem": nv_data.get("MEM", "").split(),
             "pl": nv_data.get("PLIMIT", nv_data.get("PL", "")).split(),
             "fan": nv_data.get("FAN", "").split(),
-            "lcore": nv_data.get("LCLOCK", "").split(),
-            "lmem": nv_data.get("LMEM", "").split(),
+            # Locked clocks: explicit "0" is stored in the conf (cloud parity —
+            # keeps per-GPU positions in the space-separated list); the UI shows
+            # unlocked GPUs as blank
+            "lcore": [v if v != "0" else "" for v in nv_data.get("LCLOCK", "").split()],
+            "lmem": [v if v != "0" else "" for v in nv_data.get("LMEM", "").split()],
             # Rig-wide HiveOS flags (cloud OC modal parity)
             "delay": nv_data.get("RUNNING_DELAY", ""),
             "led": "1" if nv_data.get("LOGO_BRIGHTNESS", "") == "0" else "0",
@@ -1851,8 +1855,11 @@ def save_overclock():
         mem += ["0"] * (max_idx + 1 - len(mem))
         plimit += ["0"] * (max_idx + 1 - len(plimit))
         fan += ["0"] * (max_idx + 1 - len(fan))
-        lclock += [""] * (max_idx + 1 - len(lclock))
-        lmem += [""] * (max_idx + 1 - len(lmem))
+        # Locked clocks keep explicit "0" for unlocked GPUs (cloud parity):
+        # empty entries would vanish in hive's word-splitting of the conf list
+        # and shift every following per-GPU value one position left
+        lclock += ["0"] * (max_idx + 1 - len(lclock))
+        lmem += ["0"] * (max_idx + 1 - len(lmem))
 
         def _apply_values(field_key, lst, transform=None):
             """Single-GPU mode: set one index. All-GPUs mode: empty values are skipped
@@ -1873,9 +1880,10 @@ def save_overclock():
         _apply_values("mem", mem)
         _apply_values("pl", plimit)
         _apply_values("fan", fan)
-        # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM)
-        _apply_values("lcore", lclock, lambda v: "" if v == "0" else v)
-        _apply_values("lmem", lmem, lambda v: "" if v == "0" else v)
+        # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM);
+        # cleared locks are stored as explicit "0" to preserve list positions
+        _apply_values("lcore", lclock, lambda v: "0" if str(v).strip() in ("", "0") else v)
+        _apply_values("lmem", lmem, lambda v: "0" if str(v).strip() in ("", "0") else v)
 
         # Rig-wide flags, HiveOS nvidia-oc.conf semantics (cloud OC modal parity):
         # RUNNING_DELAY = apply delay, LOGO_BRIGHTNESS 0 = LEDs off,
@@ -1930,6 +1938,24 @@ def save_overclock():
                 time.sleep(3)
                 run_nvidia_oc()
                 mismatch = verify_locked_clocks(expected_locks)
+            if mismatch:
+                # nvtool (used inside hive's nvidia-oc) silently fails to move locked
+                # clocks while the miner runs at full load; plain nvidia-smi -lgc still
+                # works there (observed on laptop rigs) — last-resort fallback
+                def _smi_lock_fallback(bad):
+                    for i, (exp, _act) in sorted(bad.items()):
+                        run_command(f"sudo nvidia-smi -i {i} -lgc {exp},{exp}")
+
+                logging.warning(f"Locked clocks still unconfirmed {mismatch}, falling back to nvidia-smi -lgc")
+                _smi_lock_fallback(mismatch)
+                time.sleep(2)
+                mismatch = verify_locked_clocks(expected_locks)
+                for _ in range(2):
+                    if not mismatch:
+                        break
+                    time.sleep(3)
+                    _smi_lock_fallback(mismatch)
+                    mismatch = verify_locked_clocks(expected_locks)
             if mismatch:
                 bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
                 logging.warning(f"NVIDIA locked clock verification failed: {bad}")
@@ -2072,13 +2098,27 @@ def get_miner_log():
     miner = rig_conf.get("MINER", "").strip().lower()
     if not miner or miner == "none":
         return jsonify({"success": False, "message": "No active miner is configured on this rig."}), 404
-        
+
     log_candidates = [
         f"/var/log/miner/{miner}/{miner}.log",
         f"/var/log/miner/{miner}/lastrun_noappend.log",
         f"/var/log/miner/{miner}/lastrun.log",
     ]
-    
+
+    # Custom-miner flight sheets run as MINER=custom with the real package name
+    # in wallet.conf (CUSTOM_MINER); hive's wrapper logs to
+    # /var/log/miner/custom/<package>.log (CUSTOM_LOG_BASENAME.log)
+    if miner == "custom":
+        wallet_conf = parse_shell_config(WALLET_CONF_PATH)
+        custom = (wallet_conf.get("CUSTOM_MINER") or "").strip().lower()
+        if custom and re.match(r'^[a-z0-9_\-]{1,64}$', custom):
+            miner = custom  # show the real package name in the UI log title
+            log_candidates = [
+                f"/var/log/miner/custom/{custom}.log",
+                f"/var/log/miner/custom/{custom}/lastrun_noappend.log",
+                f"/var/log/miner/custom/{custom}/lastrun.log",
+            ] + log_candidates
+
     log_content = ""
     found_path = None
     allowed_base = os.path.abspath("/var/log/miner")
@@ -2086,21 +2126,44 @@ def get_miner_log():
         p_abs = os.path.abspath(p)
         # Verify candidate log resides strictly inside allowed log folder path to satisfy CodeQL
         if p_abs.startswith(allowed_base + os.sep):
-            if os.path.exists(p_abs):
+            if os.path.isfile(p_abs):
                 found_path = p_abs
                 break
-            
-    if found_path:
+
+    if not found_path and os.path.isdir(allowed_base):
+        # Fallback: newest .log file anywhere under /var/log/miner (custom
+        # wrappers may log to their own basename; rotated archives are .gz)
         try:
-            with open(found_path, 'r', errors='ignore') as f:
-                lines = f.readlines()[-150:]
-                log_content = "".join(lines)
+            newest = None
+            for root, _dirs, files in os.walk(allowed_base):
+                for fn in files:
+                    if not fn.endswith(".log"):
+                        continue
+                    fp = os.path.join(root, fn)
+                    try:
+                        mt = os.path.getmtime(fp)
+                    except OSError:
+                        continue
+                    if newest is None or mt > newest[0]:
+                        newest = (mt, fp)
+            if newest:
+                found_path = newest[1]
         except Exception as e:
-            logging.error(f"Error reading miner log {found_path}: {e}")
-            return jsonify({"success": False, "message": "Failed to read miner log file."}), 500
-    else:
+            logging.error(f"Miner log fallback scan failed: {e}")
+
+    if not found_path:
         return jsonify({"success": False, "message": f"Log file for miner '{miner}' not found. Verify miner is running."}), 404
-        
+
+    try:
+        tail_lines = deque(maxlen=150)
+        with open(found_path, 'r', errors='ignore') as f:
+            for line in f:
+                tail_lines.append(line)
+        log_content = "".join(tail_lines)
+    except Exception as e:
+        logging.error(f"Error reading miner log {found_path}: {e}")
+        return jsonify({"success": False, "message": "Failed to read miner log file."}), 500
+
     return jsonify({"success": True, "miner": miner, "log": log_content})
 
 # 3. Watchdog Config Management
@@ -3186,11 +3249,50 @@ def save_fsheet():
     if err:
         return jsonify({"success": False, "message": err}), 400
     fsheets = _load_fsheets_store()
+    prev = next((f for f in fsheets if f.get("id") == clean["id"]), None)
+    was_active = prev is not None and _fsheet_is_active(prev)
+    # Only mining-relevant changes (items/coin) require a re-apply; fav toggles
+    # and renames of the active sheet must not restart the miner
+    apply_relevant = prev is None or _fsheet_apply_signature(prev) != _fsheet_apply_signature(clean)
     fsheets = [f for f in fsheets if f.get("id") != clean["id"]]
     fsheets.append(clean)
-    if _save_json_store(FSHEETS_PATH, fsheets):
-        return jsonify({"success": True, "message": "Flight sheet saved."})
-    return jsonify({"success": False, "message": "Failed to save flight sheet."}), 500
+    if not _save_json_store(FSHEETS_PATH, fsheets):
+        return jsonify({"success": False, "message": "Failed to save flight sheet."}), 500
+    if was_active and apply_relevant:
+        # The edited sheet is the one currently running — re-apply it so changes
+        # (e.g. a new miner version in the install URL) actually reach the rig
+        item = _pick_apply_item(clean)
+        wallet = str(item.get("wallet", "")).strip()
+        w = next((x for x in _load_wallets_store() if x.get("id") == wallet), None)
+        if w:
+            wallet = w.get("address", "")
+        ok, msg = _apply_flight_sheet(item.get("coin"), wallet, item.get("pool"), item.get("miner"),
+                                      extra={"name": clean.get("name", ""), "fs_id": clean.get("id", ""),
+                                             "miner_alt": item.get("miner_alt", ""),
+                                             "install_url": item.get("install_url", ""), "algo": item.get("algo", ""),
+                                             "user_config": item.get("user_config", ""), "template": item.get("template", ""),
+                                             "pass": item.get("pass", "")})
+        if ok:
+            return jsonify({"success": True, "message": "Flight sheet saved and re-applied to the rig. Miner restarting..."})
+        return jsonify({"success": True, "message": f"Flight sheet saved, but re-apply failed: {msg}", "apply_error": msg})
+    return jsonify({"success": True, "message": "Flight sheet saved."})
+
+def _fsheet_apply_signature(fsheet):
+    """Fingerprint of the apply-relevant part of a flight sheet (everything that
+    reaches wallet.conf/rig.conf on apply). Used to skip miner restarts when a
+    saved active sheet was only renamed or favourited."""
+    sig_items = []
+    for it in fsheet.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        sig_items.append({
+            k: (str(it.get(k, "")).strip().lower() if k != "user_config" else str(it.get(k, "")).strip())
+            for k in FSHEET_ITEM_FIELDS
+        })
+    return json.dumps({
+        "coin": str(fsheet.get("coin", "")).strip().lower(),
+        "items": sig_items,
+    }, sort_keys=True)
 
 @app.route('/api/fsheets/delete', methods=['POST'])
 def delete_fsheet():
