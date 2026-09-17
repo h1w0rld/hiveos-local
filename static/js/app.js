@@ -391,7 +391,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('afResetBtn').addEventListener('click', () => {
         // Reset the table to the default values (Auto mode, Static 80,
         // Min 30 / Max 100 / Target Core 60 / Target MEM 90 / Critical 70);
-        // press Save settings to apply them to the rig
+        // press Apply to apply them to the rig
         if (!window._af) return;
         window._af.items = (window._af.items || []).map(it => Object.assign({ index: it.index }, AF_DEFAULTS));
         afApplyState(window._af);
@@ -780,7 +780,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // AutoFan is saved through the Hive-style "Save settings" button (afSaveBtn);
+    // AutoFan is saved through the "Apply" button (afSaveBtn);
     // no separate global form submit here.
 
     // Save Preset form submit
@@ -4241,6 +4241,8 @@ function mknetUi() {
 const MKNET_FIELD_KEYS = { mkTargetTemp: 'target_temp', mkTargetMem: 'target_mem_temp',
     mkMinFan: 'min_fan', mkMaxFan: 'max_fan', mkStaticSpeed: 'static_speed' };
 
+const MKNET_DEFAULTS = { target_temp: 60, target_mem_temp: 90, min_fan: 5, max_fan: 100, static_speed: 70 };
+
 function renderMknet(mk) {
     const st = mk.stats || {};
     const cfg = mk.config || {};
@@ -4281,15 +4283,16 @@ function renderMknet(mk) {
             '<span class="small text-muted">Auto keeps the lowest speed within the range to hold the target temperature.</span>' +
         '</div>' +
         '<div class="d-flex flex-wrap gap-3 mb-3 mk-auto-field">' +
-            fld('mkTargetTemp', 'Target temp, °C', val('target_temp'), 60) +
-            fld('mkTargetMem', 'Target MEM, °C', val('target_mem_temp'), 90) +
-            fld('mkMinFan', 'Min fan, %', val('min_fan'), 30) +
-            fld('mkMaxFan', 'Max fan, %', val('max_fan'), 100) +
+            fld('mkTargetTemp', 'Target temp, °C', val('target_temp'), MKNET_DEFAULTS.target_temp) +
+            fld('mkTargetMem', 'Target MEM, °C', val('target_mem_temp'), MKNET_DEFAULTS.target_mem_temp) +
+            fld('mkMinFan', 'Min fan, %', val('min_fan'), MKNET_DEFAULTS.min_fan) +
+            fld('mkMaxFan', 'Max fan, %', val('max_fan'), MKNET_DEFAULTS.max_fan) +
         '</div>' +
         '<div class="d-flex flex-wrap gap-3 mb-3 mk-static-field">' +
-            fld('mkStaticSpeed', 'Static speed, %', val('static_speed'), 50, ' min="0" max="100"') +
+            fld('mkStaticSpeed', 'Static speed, %', val('static_speed'), MKNET_DEFAULTS.static_speed, ' min="0" max="100"') +
         '</div>' +
-        '<div class="d-flex justify-content-end">' +
+        '<div class="d-flex justify-content-end gap-2">' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary px-3" id="mkResetBtn">Reset</button>' +
             '<button type="button" class="btn btn-sm btn-primary px-4" id="mkApplyBtn">Apply</button>' +
         '</div>' +
     '</div>';
@@ -4317,6 +4320,14 @@ function bindMknet() {
     });
     document.getElementById('mkStaticBtn').addEventListener('click', () => {
         mknetUi().mode = 'static'; block.dataset.mode = 'static'; mknetSyncModeUI();
+    });
+    document.getElementById('mkResetBtn').addEventListener('click', () => {
+        // Reset the form fields to the defaults (target 60/90, min 5, max 100,
+        // static 70) keeping the currently selected mode; press Apply to apply
+        const ui = mknetUi();
+        ui.mode = block.dataset.mode === 'static' ? 'static' : 'auto';
+        Object.assign(ui, MKNET_DEFAULTS);
+        loadFans();
     });
     Object.keys(MKNET_FIELD_KEYS).forEach(id => {
         const el = document.getElementById(id);

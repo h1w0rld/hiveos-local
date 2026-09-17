@@ -3437,9 +3437,9 @@ def _mknet_status():
             "auto": str(conf.get("AUTO_ENABLED", "1")).strip() == "1",
             "target_temp": _num("TARGET_TEMP", 60),
             "target_mem_temp": _num("TARGET_MEM_TEMP", 90),
-            "min_fan": _num("MIN_FAN", 30),
+            "min_fan": _num("MIN_FAN", 5),
             "max_fan": _num("MAX_FAN", 100),
-            "static_speed": _num("MANUAL_FAN", 50),
+            "static_speed": _num("MANUAL_FAN", 70),
         },
     }
 
