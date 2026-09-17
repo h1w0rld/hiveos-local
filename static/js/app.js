@@ -4130,9 +4130,9 @@ function renderWalletTable() {
         return '<tr class="' + (isActive ? 'wallet-row-active' : '') + '">' +
             '<td>' + coinAvatarHtml(w.coin) + '</td>' +
             '<td>' + status + '</td>' +
+            '<td>' + sheets + '</td>' +
             '<td><span class="small fw-semibold">' + escapeHtml(w.name) + '</span></td>' +
             '<td><span class="small font-monospace text-muted d-inline-block text-truncate align-middle" style="max-width: 100%;" title="' + escapeHtml(w.address) + '">' + escapeHtml(w.address) + '</span></td>' +
-            '<td>' + sheets + '</td>' +
             '<td class="text-end">' + (w.live ? '<span class="small text-muted">running</span>' :
                 '<button type="button" class="btn btn-xs btn-outline-primary py-0 px-2" data-action="wallet-edit" data-id="' + escapeHtml(w.id) + '" title="Edit"><i class="bi bi-pencil"></i></button>' +
                 '<button type="button" class="btn btn-xs btn-outline-danger py-0 px-2" data-action="wallet-delete" data-id="' + escapeHtml(w.id) + '" title="Delete"><i class="bi bi-trash"></i></button>') +
