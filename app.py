@@ -1237,7 +1237,14 @@ def verify_locked_clocks(expected):
     clocks to a ~15 MHz grid (lock 1300 reads back 1305), so a small tolerance
     counts as confirmed; anything outside the tolerance is double-checked
     against the driver's lock registration (nvtool idempotence) before it
-    counts as a real mismatch — idle GPUs legitimately float off the lock."""
+    counts as a real mismatch — idle GPUs legitimately float off the lock.
+    Tolerance is 16 MHz: the ~15 MHz grid snap must pass, but a silently
+    failed lock CHANGE (old lock still active, e.g. 1350 vs expected 1320 =
+    30 MHz) must NOT pass — with the wider 32 MHz tolerance such drift was
+    swallowed as 'confirmed' and the apply reported success while the old
+    lock stayed active (observed on RIG9: 1350->1320 round trip left the old
+    lock in place; the nvtool re-assert below both detects and self-heals
+    that case)."""
     stdout, _, _ = run_command("nvidia-smi --query-gpu=index,clocks.sm --format=csv,noheader,nounits")
     actual = {}
     for line in stdout.strip().splitlines():
@@ -1249,7 +1256,7 @@ def verify_locked_clocks(expected):
     mismatch = {}
     for i, v in expected.items():
         act = actual.get(i)
-        if act is not None and abs(act - v) <= 32:
+        if act is not None and abs(act - v) <= 16:
             continue
         if _nvtool_lock_confirmed(i, v):
             continue
