@@ -34,6 +34,7 @@ WALLET_CONF_PATH = os.path.join(HIVE_CONFIG_DIR, "wallet.conf")
 PIN_PATH = os.path.join(HIVE_CONFIG_DIR, "dashboard.key")
 AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
+OC_PRESETS_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_presets.json")
 CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
 CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
 DEFAULT_SYNC_INTERVAL = 60
@@ -2660,10 +2661,17 @@ def apply_preset():
                     rig_conf = parse_shell_config(RIG_CONF_PATH)
                     rig_conf["MINER"] = p_rig["MINER"]
                     write_shell_config(RIG_CONF_PATH, rig_conf)
-                    
+
+        # The preset carries the mining config; switch the OC preset bound to its algo
+        oc_msg = _auto_switch_oc_for_algo(
+            _algo_from_wallet_conf(parse_shell_config(WALLET_CONF_PATH)))
+
         logging.info(f"Preset '{name}' applied successfully by IP: {request.remote_addr}. Restarting miner...")
         run_command(MINER_RESTART_CMD)
-        return jsonify({"success": True, "message": f"Preset '{name}' applied successfully! Miner restarting..."})
+        message = f"Preset '{name}' applied successfully! Miner restarting..."
+        if oc_msg:
+            message += oc_msg
+        return jsonify({"success": True, "message": message})
     except Exception as e:
         logging.error(f"Failed to apply preset '{name}': {e}")
         return jsonify({"success": False, "message": "Failed to restore preset configuration files."}), 500
@@ -2697,6 +2705,198 @@ def delete_preset():
     except Exception as e:
         logging.error(f"Failed to delete preset '{name}': {e}")
         return jsonify({"success": False, "message": "Failed to remove preset files."}), 500
+
+# 5b. Algo-bound GPU overclock presets (HiveOS "OC per algorithm" parity).
+# An OC preset is a snapshot of nvidia-oc.conf / amd-oc.conf optionally bound to a
+# mining algorithm; when the rig switches preset / flight sheet to a bound algo,
+# the matching OC preset is applied automatically (_auto_switch_oc_for_algo).
+OC_NVIDIA_KEYS = ("CLOCK", "LCLOCK", "MEM", "LMEM", "PLIMIT", "FAN", "RUNNING_DELAY",
+                  "LOGO_BRIGHTNESS", "FORCESTATE", "POWERMIZER",
+                  "OHGODAPILL_ENABLED", "OHGODAPILL_START_TIMEOUT", "OHGODAPILL_ARGS")
+OC_AMD_KEYS = ("CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF")
+
+
+def _load_oc_presets():
+    return [p for p in _load_json_store(OC_PRESETS_PATH, []) if p.get("id")]
+
+
+def _snapshot_oc_values():
+    """Current overclock values from nvidia-oc.conf / amd-oc.conf (OC keys only)."""
+    nv_conf = parse_shell_config(NVIDIA_OC_CONF)
+    amd_conf = parse_shell_config(AMD_OC_CONF)
+    return ({k: nv_conf.get(k, "") for k in OC_NVIDIA_KEYS},
+            {k: amd_conf.get(k, "") for k in OC_AMD_KEYS})
+
+
+def _norm_oc_value(v):
+    return " ".join(str(v or "").split())
+
+
+def _oc_matches_live(snapshot_nv, snapshot_amd):
+    """True when the preset's overclock values equal the live conf values."""
+    live_nv, live_amd = _snapshot_oc_values()
+    for k in OC_NVIDIA_KEYS:
+        if _norm_oc_value(snapshot_nv.get(k, "")) != _norm_oc_value(live_nv.get(k, "")):
+            return False
+    for k in OC_AMD_KEYS:
+        if _norm_oc_value(snapshot_amd.get(k, "")) != _norm_oc_value(live_amd.get(k, "")):
+            return False
+    return True
+
+
+def _apply_oc_snapshot(snapshot_nv, snapshot_amd):
+    """Write overclock values into the live conf files and push them to hardware."""
+    backup_configs()
+    nv_conf = parse_shell_config(NVIDIA_OC_CONF)
+    nv_conf.update({k: str(snapshot_nv.get(k, "")) for k in OC_NVIDIA_KEYS})
+    amd_conf = parse_shell_config(AMD_OC_CONF)
+    amd_conf.update({k: str(snapshot_amd.get(k, "")) for k in OC_AMD_KEYS})
+    if not write_shell_config(NVIDIA_OC_CONF, nv_conf):
+        return False, "Failed to write nvidia-oc.conf"
+    if not write_shell_config(AMD_OC_CONF, amd_conf):
+        return False, "Failed to write amd-oc.conf"
+    run_nvidia_oc()
+    run_command("sudo /hive/sbin/amd-oc")
+    return True, "Overclock values applied."
+
+
+def _algo_from_wallet_conf(wc):
+    """Mining algorithm recorded in a wallet.conf (custom miner blocks carry it)."""
+    algo = str(wc.get("CUSTOM_ALGO", "") or "").strip().lower()
+    if algo:
+        return algo
+    try:
+        meta = json.loads(str(wc.get("META", "") or "{}"))
+        if isinstance(meta, dict):
+            for sec in meta.values():
+                if isinstance(sec, dict) and sec.get("algo"):
+                    return str(sec["algo"]).strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _auto_switch_oc_for_algo(algo):
+    """Apply the OC preset bound to `algo`. Returns a message suffix for the caller's
+    toast, or None when there is no binding / the preset is already live."""
+    algo = str(algo or "").strip().lower()
+    if not algo:
+        return None
+    preset = next((p for p in _load_oc_presets()
+                   if str(p.get("algo", "")).strip().lower() == algo), None)
+    if preset is None:
+        logging.info(f"OC auto-switch: no OC preset bound to algo '{algo}'")
+        return None
+    if _oc_matches_live(preset.get("nvidia", {}), preset.get("amd", {})):
+        logging.info(f"OC auto-switch: preset '{preset.get('name')}' already matches live OC")
+        return None
+    ok, msg = _apply_oc_snapshot(preset.get("nvidia", {}), preset.get("amd", {}))
+    if ok:
+        logging.info(f"OC auto-switch: preset '{preset.get('name')}' applied for algo '{algo}'")
+        return f" OC preset '{preset.get('name')}' applied (algo {algo})."
+    logging.error(f"OC auto-switch failed for algo '{algo}': {msg}")
+    return f" OC preset '{preset.get('name')}' failed: {msg}"
+
+
+@app.route('/api/oc-presets', methods=['GET'])
+def list_oc_presets():
+    presets = []
+    for p in _load_oc_presets():
+        presets.append({
+            "id": p.get("id", ""),
+            "name": p.get("name", ""),
+            "algo": p.get("algo", ""),
+            "created_at": p.get("created_at", 0),
+            "nvidia": p.get("nvidia", {}),
+            "amd": p.get("amd", {}),
+            "active": _oc_matches_live(p.get("nvidia", {}), p.get("amd", {}))
+        })
+    return jsonify({"success": True, "presets": presets})
+
+
+@app.route('/api/oc-presets/save', methods=['POST'])
+def save_oc_preset():
+    data = request.get_json() or {}
+    name = str(data.get("name", "")).strip()
+    if not name or len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s]+$', name):
+        return jsonify({"success": False, "message": "Invalid OC preset name. Use alphanumeric characters and spaces only."}), 400
+    algo = str(data.get("algo", "")).strip().lower()
+    if algo and not re.match(r'^[a-z0-9_\-]{1,32}$', algo):
+        return jsonify({"success": False, "message": "Invalid algorithm name."}), 400
+    pid = str(data.get("id", "")).strip()
+
+    with config_lock:
+        presets = _load_oc_presets()
+        now = int(time.time())
+        if pid:
+            preset = next((p for p in presets if p.get("id") == pid), None)
+            if preset is None:
+                return jsonify({"success": False, "message": "OC preset not found."}), 404
+            preset["name"] = name
+            preset["algo"] = algo
+            preset["updated_at"] = now
+            if data.get("refresh"):
+                nv_snap, amd_snap = _snapshot_oc_values()
+                preset["nvidia"], preset["amd"] = nv_snap, amd_snap
+            msg = f"OC preset '{name}' updated."
+        else:
+            # Saving under an existing name refreshes that preset (snapshot + binding)
+            preset = next((p for p in presets
+                           if str(p.get("name", "")).lower() == name.lower()), None)
+            nv_snap, amd_snap = _snapshot_oc_values()
+            if preset is not None:
+                preset["algo"] = algo
+                preset["nvidia"], preset["amd"] = nv_snap, amd_snap
+                preset["updated_at"] = now
+                msg = f"OC preset '{name}' updated with current overclock values."
+            else:
+                presets.append({
+                    "id": uuid.uuid4().hex[:12], "name": name, "algo": algo,
+                    "nvidia": nv_snap, "amd": amd_snap,
+                    "created_at": now, "updated_at": now
+                })
+                msg = f"OC preset '{name}' saved."
+        if not _save_json_store(OC_PRESETS_PATH, presets):
+            return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
+
+    logging.info(f"OC preset '{name}' saved by IP: {request.remote_addr}")
+    return jsonify({"success": True, "message": msg})
+
+
+@app.route('/api/oc-presets/apply', methods=['POST'])
+def apply_oc_preset():
+    data = request.get_json() or {}
+    pid = str(data.get("id", "")).strip()
+    with config_lock:
+        preset = next((p for p in _load_oc_presets() if p.get("id") == pid), None)
+    if preset is None:
+        return jsonify({"success": False, "message": "OC preset not found."}), 404
+    try:
+        ok, msg = _apply_oc_snapshot(preset.get("nvidia", {}), preset.get("amd", {}))
+    except Exception as e:
+        logging.error(f"Failed to apply OC preset '{preset.get('name')}': {e}")
+        return jsonify({"success": False, "message": "Failed to apply OC preset values."}), 500
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 500
+    name = preset.get("name", "")
+    logging.info(f"OC preset '{name}' applied by IP: {request.remote_addr}")
+    return jsonify({"success": True, "message": f"OC preset '{name}' applied."})
+
+
+@app.route('/api/oc-presets/delete', methods=['POST'])
+def delete_oc_preset():
+    data = request.get_json() or {}
+    pid = str(data.get("id", "")).strip()
+    with config_lock:
+        presets = _load_oc_presets()
+        remaining = [p for p in presets if p.get("id") != pid]
+        if len(remaining) == len(presets):
+            return jsonify({"success": False, "message": "OC preset not found."}), 404
+        if not _save_json_store(OC_PRESETS_PATH, remaining):
+            return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
+    logging.info(f"OC preset '{pid}' deleted by IP: {request.remote_addr}")
+    return jsonify({"success": True, "message": "OC preset deleted."})
+
 
 def ping_host(host, count=1, timeout=2):
     """Utility helper pinging a destination IP/Host under Linux environment."""
@@ -3408,6 +3608,11 @@ def apply_fsheet():
                                          "install_url": item.get("install_url", ""), "algo": item.get("algo", ""),
                                          "user_config": item.get("user_config", ""), "template": item.get("template", ""),
                                          "pass": item.get("pass", "")})
+    if ok:
+        # Algo-bound OC preset (if any) follows the rig onto the new algorithm
+        oc_msg = _auto_switch_oc_for_algo(item.get("algo", ""))
+        if oc_msg:
+            msg = msg + oc_msg
     return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/flightsheet', methods=['GET', 'POST'])

@@ -824,6 +824,53 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
+    // Save OC Preset form: snapshot the current overclock values under a name,
+    // optionally bound to an algorithm for automatic switching
+    document.getElementById('saveOcPresetForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const nameInput = document.getElementById('ocPresetName');
+        const algoInput = document.getElementById('ocPresetAlgo');
+        const btn = this.querySelector('button[type="submit"]');
+        btn.disabled = true;
+        try {
+            const response = await apiFetch('/api/oc-presets/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken
+                },
+                body: JSON.stringify({ name: nameInput.value.trim(), algo: algoInput.value.trim() })
+            });
+            const data = await response.json();
+            if (response.ok && data.success) {
+                showToast(data.message, true);
+                nameInput.value = '';
+                algoInput.value = '';
+                loadOcPresetsList();
+            } else {
+                showToast(data.message || "Failed to save OC preset.", false);
+            }
+        } catch (error) {
+            showToast("Network error saving OC preset.", false);
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    // OC preset edit modal: rename / rebind algorithm / optional snapshot refresh
+    document.getElementById('ocPresetEditForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const id = document.getElementById('ocEditId').value;
+        const payload = {
+            id: id,
+            name: document.getElementById('ocEditName').value.trim(),
+            algo: document.getElementById('ocEditAlgo').value.trim().toLowerCase()
+        };
+        if (document.getElementById('ocEditRefresh').checked) payload.refresh = true;
+        bootstrap.Modal.getInstance(document.getElementById('ocPresetEditModal')).hide();
+        ocPresetPost('/api/oc-presets/save', payload, "Network error saving OC preset.");
+    });
+
     // 6. Main view routing (Cluster / SSH Accesses / Rig Dashboard)
     document.querySelectorAll('#mainNavTabs .nav-link').forEach(link => {
         link.addEventListener('click', function(e) {
@@ -1816,6 +1863,155 @@ async function deletePreset(name) {
     } catch (error) {
         showToast("Network error deleting preset.", false);
     }
+}
+
+// ---------- OC presets (algo-bound GPU overclock snapshots) ----------
+
+// Unique non-zero values of a per-GPU space-separated list (single value collapses)
+function ocUniqVals(list) {
+    return [...new Set((list || []).map(v => String(v ?? '').trim()).filter(v => v && v !== '0'))];
+}
+
+function ocSummaryHtml(p) {
+    const nv = p.nvidia || {}, amd = p.amd || {};
+    const parts = [];
+    const uniq = v => ocUniqVals(String(v ?? '').split(/\s+/));
+    if (Object.keys(nv).some(k => String(nv[k] || '').trim() !== '')) {
+        const lock = uniq(nv.LCLOCK), coreOff = uniq(nv.CLOCK);
+        const memLock = uniq(nv.LMEM), memOff = uniq(nv.MEM);
+        const pl = uniq(nv.PLIMIT);
+        if (lock.length) parts.push('Core lock ' + escapeHtml(lock.join('/')) + ' MHz');
+        else if (coreOff.length) parts.push('Core +' + escapeHtml(coreOff.join('/')) + ' MHz');
+        if (memLock.length) parts.push('Mem lock ' + escapeHtml(memLock.join('/')) + ' MHz');
+        else if (memOff.length) parts.push('Mem +' + escapeHtml(memOff.join('/')) + ' MHz');
+        if (pl.length) parts.push('PL ' + escapeHtml(pl.join('/')) + ' W');
+    }
+    if (Object.keys(amd).some(k => String(amd[k] || '').trim() !== '')) {
+        const core = uniq(amd.CORE), mem = uniq(amd.MEM);
+        const vdd = uniq(amd.VDD), pl = uniq(amd.PL);
+        if (core.length) parts.push('AMD Core ' + escapeHtml(core.join('/')));
+        if (mem.length) parts.push('AMD Mem ' + escapeHtml(mem.join('/')));
+        if (vdd.length) parts.push('AMD VDD ' + escapeHtml(vdd.join('/')) + ' mV');
+        if (pl.length) parts.push('AMD PL ' + escapeHtml(pl.join('/')) + ' W');
+    }
+    return parts.join(' · ');
+}
+
+// Known algorithms for the binding datalist: live miner algo, OC preset bindings,
+// algorithms used in flight sheets
+function refreshOcAlgoOptions() {
+    const dl = document.getElementById('ocAlgoOptions');
+    if (!dl) return;
+    const algos = new Set();
+    if (lastStatsData && lastStatsData.miner_algo) algos.add(String(lastStatsData.miner_algo).toLowerCase());
+    if (Array.isArray(window._ocPresets)) window._ocPresets.forEach(p => { if (p.algo) algos.add(String(p.algo).toLowerCase()); });
+    if (window._fsData && Array.isArray(window._fsData.fsheets)) {
+        window._fsData.fsheets.forEach(f => (f.items || []).forEach(it => { if (it.algo) algos.add(String(it.algo).toLowerCase()); }));
+    }
+    dl.innerHTML = [...algos].map(a => `<option value="${escapeHtml(a)}"></option>`).join('');
+}
+
+async function loadOcPresetsList() {
+    const container = document.getElementById('ocPresetsContainer');
+    try {
+        const response = await apiFetch('/api/oc-presets');
+        const data = await response.json();
+        if (response.ok && data.success) {
+            window._ocPresets = data.presets || [];
+            refreshOcAlgoOptions();
+            if (!window._ocPresets.length) {
+                container.innerHTML = `<div class="text-center text-muted small py-4">No OC presets yet. Save the current overclock as a preset and bind it to an algorithm.</div>`;
+                return;
+            }
+
+            let html = '<div class="list-group list-group-flush border border-secondary-subtle rounded bg-dark-card">';
+            window._ocPresets.forEach(p => {
+                const algoBadge = p.algo
+                    ? `<span class="badge bg-warning-glow text-warning small" title="Auto-applied when the rig mines ${escapeHtml(p.algo)}"><i class="bi bi-diagram-3"></i> ${escapeHtml(p.algo)}</span>`
+                    : `<span class="text-muted small" title="Not bound to an algorithm">no algo</span>`;
+                const activeBadge = p.active
+                    ? ` <span class="badge bg-success-glow border border-success text-success small" title="Preset values match the live overclock">ACTIVE</span>`
+                    : '';
+                html += `
+                    <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center py-2 px-3">
+                        <div class="me-2">
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <span class="fw-semibold text-white small">${escapeHtml(p.name)}</span>
+                                ${algoBadge}${activeBadge}
+                            </div>
+                            <div class="text-muted small mt-1">${ocSummaryHtml(p) || 'Empty snapshot'}</div>
+                        </div>
+                        <div class="btn-group" role="group" aria-label="OC preset actions">
+                            <button type="button" class="btn btn-xs btn-success fw-semibold py-1 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
+                                <i class="bi bi-play-circle-fill"></i> Apply
+                            </button>
+                            <button type="button" class="btn btn-xs btn-outline-primary py-1 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Rename / rebind algorithm / refresh snapshot">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button type="button" class="btn btn-xs btn-outline-danger py-1 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>`;
+            });
+            html += '</div>';
+            container.innerHTML = html;
+
+            container.querySelectorAll('.oc-apply-btn').forEach(btn => {
+                btn.addEventListener('click', function() { applyOcPreset(this.getAttribute('data-oc-id')); });
+            });
+            container.querySelectorAll('.oc-edit-btn').forEach(btn => {
+                btn.addEventListener('click', function() { openOcPresetEditModal(this.getAttribute('data-oc-id')); });
+            });
+            container.querySelectorAll('.oc-delete-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const p = (window._ocPresets || []).find(x => x.id === this.getAttribute('data-oc-id'));
+                    if (p && confirm(`Delete OC preset "${p.name}"?`)) deleteOcPreset(p.id);
+                });
+            });
+        } else {
+            container.innerHTML = `<div class="text-danger small py-3 text-center">Failed to load OC presets.</div>`;
+        }
+    } catch (error) {
+        container.innerHTML = `<div class="text-danger small py-3 text-center">Connection error.</div>`;
+    }
+}
+
+async function ocPresetPost(path, body, failMsg) {
+    try {
+        const response = await apiFetch(path, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+            },
+            body: JSON.stringify(body)
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToast(data.message, true);
+            loadOcPresetsList();
+            fetchStats();
+        } else {
+            showToast(data.message || failMsg, false);
+        }
+    } catch (error) {
+        showToast(failMsg, false);
+    }
+}
+
+function applyOcPreset(id) { ocPresetPost('/api/oc-presets/apply', { id: id }, "Network error applying OC preset."); }
+function deleteOcPreset(id) { ocPresetPost('/api/oc-presets/delete', { id: id }, "Network error deleting OC preset."); }
+
+function openOcPresetEditModal(id) {
+    const p = (window._ocPresets || []).find(x => x.id === id);
+    if (!p) return;
+    document.getElementById('ocEditId').value = p.id;
+    document.getElementById('ocEditName').value = p.name || '';
+    document.getElementById('ocEditAlgo').value = p.algo || '';
+    document.getElementById('ocEditRefresh').checked = false;
+    const modal = new bootstrap.Modal(document.getElementById('ocPresetEditModal'));
+    modal.show();
 }
 
 async function runDiagnostics() {
@@ -3294,6 +3490,8 @@ async function loadFsheets() {
         refreshFsWalletOptions();
         // While an inline editor is open, keep its unsaved edits on screen
         if (!window._fsExpandedId) renderFsheets();
+        // Flight sheet algorithms feed the OC preset binding datalist
+        refreshOcAlgoOptions();
     } catch (e) {
         console.error('Failed to load flight sheets:', e);
     }
@@ -4019,7 +4217,7 @@ function showDashTab(tab) {
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
     if (tab === 'fans') { loadAutofan(); loadFans(); }
-    if (tab === 'presets') loadPresetsList();
+    if (tab === 'presets') { loadPresetsList(); loadOcPresetsList(); }
 }
 
 function isWalletsTab(tab) { return tab === 'wallets'; }
