@@ -153,6 +153,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const loginError = document.getElementById('loginError');
     const revertBtn = document.getElementById('revertSettingsBtn');
 
+    // Start clean: browsers (incl. Firefox session restore) may re-fill the
+    // login field on reload — clear it now and whenever the page is re-shown
+    const loginPasswordInput = document.getElementById('loginPassword');
+    const wipeLoginField = () => { loginPasswordInput.value = ''; };
+    wipeLoginField();
+    window.addEventListener('pageshow', wipeLoginField);
+
     loginForm.addEventListener('submit', async function(e) {
         e.preventDefault();
         const password = document.getElementById('loginPassword').value.trim();
@@ -175,6 +182,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 csrfToken = data.csrf_token;
                 loginOverlay.classList.add('d-none');
                 loginError.classList.add('d-none');
+                // Wipe the field: a refresh must never restore a stale password
+                document.getElementById('loginPassword').value = '';
                 showToast("Authorized successfully!", true);
                 fetchStats();
                 loadClusterData();
@@ -1135,14 +1144,25 @@ function showToast(message, isSuccess = true) {
     }, 4500);
 }
 
+// Show the auth overlay in a clean state (never carry a typed password into it)
+function showLoginOverlay() {
+    const overlay = document.getElementById('loginOverlay');
+    if (!overlay) return;
+    overlay.classList.remove('d-none');
+    const pwd = document.getElementById('loginPassword');
+    if (pwd) pwd.value = '';
+    const err = document.getElementById('loginError');
+    if (err) err.classList.add('d-none');
+}
+
 // Fetch stats from backend API
 async function fetchStats() {
     try {
         const response = await apiFetch('/api/stats');
-        
+
         // Handle 401 Unauthorized status
         if (response.status === 401) {
-            document.getElementById('loginOverlay').classList.remove('d-none');
+            showLoginOverlay();
             return;
         }
         
@@ -1852,7 +1872,7 @@ async function loadClusterData(silent = false) {
     try {
         const response = await fetch('/api/cluster/rigs');
         if (response.status === 401) {
-            document.getElementById('loginOverlay').classList.remove('d-none');
+            showLoginOverlay();
             return;
         }
         const data = await response.json();
@@ -2371,7 +2391,7 @@ async function loadAccessList(parts) {
     try {
         const response = await fetch('/api/cluster/rigs');
         if (response.status === 401) {
-            document.getElementById('loginOverlay').classList.remove('d-none');
+            showLoginOverlay();
             return;
         }
         const data = await response.json();

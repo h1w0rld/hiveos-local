@@ -393,7 +393,9 @@ def proxy_log_action(rig_id):
 
 @app.route('/')
 def dashboard():
-    return render_template('index.html')
+    # Server-side auth decision: no flash of the app before the login form
+    return render_template('index.html',
+                           authenticated=bool(session.get('authenticated')))
 
 if __name__ == '__main__':
     port = 8080

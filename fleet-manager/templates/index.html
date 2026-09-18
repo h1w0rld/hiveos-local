@@ -186,8 +186,8 @@
         </div>
     </div>
 
-    <!-- Login Overlay -->
-    <div id="loginOverlay" class="position-fixed top-0 start-0 w-100 h-100 d-none align-items-center justify-content-center" style="background: rgba(11, 15, 25, 0.96); z-index: 2000; backdrop-filter: blur(15px);">
+    <!-- Login Overlay: visible from the first paint unless already authenticated -->
+    <div id="loginOverlay" class="position-fixed top-0 start-0 w-100 h-100 {% if not authenticated %}d-flex{% else %}d-none d-flex{% endif %} align-items-center justify-content-center" style="background: rgba(11, 15, 25, 0.96); z-index: 2000; backdrop-filter: blur(15px);">
         <div class="card glass-card p-4 shadow-lg border border-secondary-subtle" style="max-width: 450px; width: 90%;">
             <div class="card-body text-center">
                 <div class="mb-3">

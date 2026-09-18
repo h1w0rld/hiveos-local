@@ -4361,7 +4361,12 @@ def api_remote_proxy(rig_id, subpath):
 
 @app.route('/')
 def dashboard():
-    return render_template('index.html', app_version=VERSION)
+    # Render the auth decision server-side: the overlay is hidden in the HTML
+    # for an authenticated session and shown from the first paint otherwise —
+    # no flash of the app before the login form (and no flash of the login
+    # form for users with a valid session)
+    return render_template('index.html', app_version=VERSION,
+                           authenticated=bool(session.get('authenticated')))
 
 if __name__ == '__main__':
     # 2. Strict Platform Locks
