@@ -125,8 +125,12 @@ def load_cluster_state():
     }
     try:
         if os.path.exists(CLUSTER_CONF):
-            with open(CLUSTER_CONF, 'r') as f:
-                data = json.load(f)
+            # Read under the writer's lock: without it a load hitting the save
+            # window (file truncated before rewritten) saw an empty file and
+            # generated a fresh self_id - the rig was reborn as a new ghost rig
+            with config_lock:
+                with open(CLUSTER_CONF, 'r') as f:
+                    data = json.load(f)
             if isinstance(data, dict):
                 for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts", "clusters"):
                     if k in data:
@@ -172,9 +176,16 @@ def load_cluster_state():
 def save_cluster_state(state):
     try:
         with config_lock:
-            with open(CLUSTER_CONF, 'w') as f:
+            # Atomic write (tmp + rename): readers only ever see the old or the
+            # new complete file, never a truncated one - ntfs-3g on /hive-config
+            # makes the in-place truncate-then-write window wide enough to hit
+            tmp_path = CLUSTER_CONF + ".tmp"
+            with open(tmp_path, 'w') as f:
                 json.dump(state, f, indent=2)
-            os.chmod(CLUSTER_CONF, 0o600)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, CLUSTER_CONF)
         return True
     except Exception as e:
         logging.error(f"Failed to save cluster config: {e}")
