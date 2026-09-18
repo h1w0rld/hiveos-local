@@ -1198,7 +1198,9 @@ def run_nvidia_oc():
 def verify_locked_clocks(expected):
     """Check actual SM clocks against {gpu_index: locked_mhz}. Returns a dict of
     {gpu_index: (expected, actual)} mismatches. Empty dict on verification failure
-    (no nvidia-smi output) so callers can skip gracefully."""
+    (no nvidia-smi output) so callers can skip gracefully. Ampere snaps locked
+    clocks to a ~15 MHz grid (lock 1300 reads back 1305), so a small tolerance
+    counts as confirmed."""
     stdout, _, _ = run_command("nvidia-smi --query-gpu=index,clocks.sm --format=csv,noheader,nounits")
     actual = {}
     for line in stdout.strip().splitlines():
@@ -1207,7 +1209,8 @@ def verify_locked_clocks(expected):
             actual[int(parts[0])] = safe_int(parts[1])
     if not actual:
         return {}
-    return {i: (v, actual.get(i)) for i, v in expected.items() if actual.get(i) != v}
+    return {i: (v, actual.get(i)) for i, v in expected.items()
+            if actual.get(i) is None or abs(actual.get(i) - v) > 32}
 
 # Safe numeric parsers for nvidia-smi output ([N/A] or empty values are treated as 0)
 def safe_int(value, default=0):
