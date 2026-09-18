@@ -33,7 +33,6 @@ AMD_OC_CONF = os.path.join(HIVE_CONFIG_DIR, "amd-oc.conf")
 WALLET_CONF_PATH = os.path.join(HIVE_CONFIG_DIR, "wallet.conf")
 PIN_PATH = os.path.join(HIVE_CONFIG_DIR, "dashboard.key")
 AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
-PRESETS_DIR = os.path.join(HIVE_CONFIG_DIR, "presets")
 OC_PRESETS_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_presets.json")
 CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
 CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
@@ -1843,6 +1842,148 @@ def change_password():
             message = f"Password updated on the local rig and all {ok_n} remote rig(s)!"
     return jsonify({"success": True, "message": message, "results": results})
 
+def _apply_nvidia_oc(data, apply_all, gpu_index):
+    """NVIDIA overclock apply shared by /api/overclock and OC presets (all-GPU
+    form values). Writes nvidia-oc.conf, runs /hive/sbin/nvidia-oc and verifies
+    locked clocks (retry + nvidia-smi -lgc fallback). Returns (ok, message);
+    an empty message means a clean apply."""
+    filepath = NVIDIA_OC_CONF
+    config = parse_shell_config(filepath)
+
+    # Real HiveOS nvidia-oc.conf keys (the nvidia-oc script reads CLOCK/PLIMIT,
+    # not the legacy CORE/PL our older versions used to write)
+    clock = (config.get("CLOCK") if "CLOCK" in config else config.get("CORE", "")).split()
+    mem = config.get("MEM", "").split()
+    plimit = (config.get("PLIMIT") if "PLIMIT" in config else config.get("PL", "")).split()
+    fan = config.get("FAN", "").split()
+    lclock = config.get("LCLOCK", "").split()
+    lmem = config.get("LMEM", "").split()
+
+    if apply_all:
+        # Target every NVIDIA GPU on this rig (fallback: current conf length)
+        try:
+            gpus = get_gpu_stats().get("gpus", [])
+            n = sum(1 for g in gpus if g.get("brand") == "NVIDIA")
+        except Exception:
+            n = 0
+        if n == 0:
+            n = max(len(clock), len(mem), len(plimit), len(fan), 1)
+        max_idx = max(3, n - 1)
+    else:
+        max_idx = max(3, gpu_index)
+    clock += ["0"] * (max_idx + 1 - len(clock))
+    mem += ["0"] * (max_idx + 1 - len(mem))
+    plimit += ["0"] * (max_idx + 1 - len(plimit))
+    fan += ["0"] * (max_idx + 1 - len(fan))
+    # Locked clocks keep explicit "0" for unlocked GPUs (cloud parity):
+    # empty entries would vanish in hive's word-splitting of the conf list
+    # and shift every following per-GPU value one position left
+    lclock += ["0"] * (max_idx + 1 - len(lclock))
+    lmem += ["0"] * (max_idx + 1 - len(lmem))
+
+    def _apply_values(field_key, lst, transform=None):
+        """Single-GPU mode: set one index. All-GPUs mode: empty values are skipped
+        (per-GPU differences are preserved), filled values go to every GPU."""
+        if field_key not in data:
+            return
+        raw = str(data[field_key]).strip()
+        if apply_all:
+            if raw == "":
+                return
+            val = transform(raw) if transform else raw
+            for i in range(len(lst)):
+                lst[i] = val
+        else:
+            lst[gpu_index] = transform(raw) if transform else raw
+
+    _apply_values("core", clock)
+    _apply_values("mem", mem)
+    _apply_values("pl", plimit)
+    _apply_values("fan", fan)
+    # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM);
+    # cleared locks are stored as explicit "0" to preserve list positions
+    _apply_values("lcore", lclock, lambda v: "0" if str(v).strip() in ("", "0") else v)
+    _apply_values("lmem", lmem, lambda v: "0" if str(v).strip() in ("", "0") else v)
+
+    # Rig-wide flags, HiveOS nvidia-oc.conf semantics (cloud OC modal parity):
+    # RUNNING_DELAY = apply delay, LOGO_BRIGHTNESS 0 = LEDs off,
+    # FORCESTATE 1 = force P0, POWERMIZER 2 = idle power reduction,
+    # OHGODAPILL_* = "tablet" for GDDR5X cards
+    if "delay" in data:
+        config["RUNNING_DELAY"] = "" if str(data["delay"]).strip() in ("", "0") else str(data["delay"]).strip()
+    if "led" in data:
+        config["LOGO_BRIGHTNESS"] = "0" if str(data["led"]).strip() == "1" else ""
+    if "p0" in data:
+        config["FORCESTATE"] = "1" if str(data["p0"]).strip() == "1" else ""
+    if "idle" in data:
+        config["POWERMIZER"] = "2" if str(data["idle"]).strip() == "1" else "1"
+    if "pill" in data:
+        config["OHGODAPILL_ENABLED"] = "1" if str(data["pill"]).strip() == "1" else ""
+        config["OHGODAPILL_START_TIMEOUT"] = ""
+        config["OHGODAPILL_ARGS"] = ""
+
+    config.pop("CORE", None)  # legacy key written by older versions
+    config.pop("PL", None)
+    config["CLOCK"] = " ".join(clock)
+    config["MEM"] = " ".join(mem)
+    config["PLIMIT"] = " ".join(plimit)
+    config["FAN"] = " ".join(fan)
+    config["LCLOCK"] = " ".join(lclock)
+    config["LMEM"] = " ".join(lmem)
+
+    if not write_shell_config(filepath, config):
+        return False, "Failed to write nvidia-oc.conf"
+    target_label = "all GPUs" if apply_all else f"GPU {gpu_index}"
+    logging.info(f"NVIDIA {target_label} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
+
+    stdout, stderr, code = run_nvidia_oc()
+    if code != 0:
+        logging.error(f"NVIDIA OC script failed: {stderr}")
+        return False, "NVIDIA overclock script failed to apply settings."
+
+    # Verify locked clocks actually took effect: under full mining load nvtool
+    # calls can silently fail, so retry the whole apply up to 2 more times
+    expected_locks = {}
+    for i, v in enumerate(lclock):
+        try:
+            if int(str(v).strip()) > 0:
+                expected_locks[i] = int(str(v).strip())
+        except ValueError:
+            continue
+    if expected_locks:
+        mismatch = verify_locked_clocks(expected_locks)
+        for _ in range(2):
+            if not mismatch:
+                break
+            logging.warning(f"Locked clocks not confirmed {mismatch}, retrying nvidia-oc")
+            time.sleep(3)
+            run_nvidia_oc()
+            mismatch = verify_locked_clocks(expected_locks)
+        if mismatch:
+            # nvtool (used inside hive's nvidia-oc) silently fails to move locked
+            # clocks while the miner runs at full load; plain nvidia-smi -lgc still
+            # works there (observed on laptop rigs) — last-resort fallback
+            def _smi_lock_fallback(bad):
+                for i, (exp, _act) in sorted(bad.items()):
+                    run_command(f"sudo nvidia-smi -i {i} -lgc {exp},{exp}")
+
+            logging.warning(f"Locked clocks still unconfirmed {mismatch}, falling back to nvidia-smi -lgc")
+            _smi_lock_fallback(mismatch)
+            time.sleep(2)
+            mismatch = verify_locked_clocks(expected_locks)
+            for _ in range(2):
+                if not mismatch:
+                    break
+                time.sleep(3)
+                _smi_lock_fallback(mismatch)
+                mismatch = verify_locked_clocks(expected_locks)
+        if mismatch:
+            bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
+            logging.warning(f"NVIDIA locked clock verification failed: {bad}")
+            return True, f"Saved, but locked clock not confirmed on: {bad}. Try applying again or check nvidia-smi."
+
+    return True, ""
+
 @app.route('/api/overclock', methods=['POST'])
 def save_overclock():
     data = request.get_json()
@@ -1880,169 +2021,42 @@ def save_overclock():
 
     # Backup prior configs before editing
     backup_configs()
-        
+
     if brand == "NVIDIA":
-        filepath = NVIDIA_OC_CONF
-        config = parse_shell_config(filepath)
-        
-        # Real HiveOS nvidia-oc.conf keys (the nvidia-oc script reads CLOCK/PLIMIT,
-        # not the legacy CORE/PL our older versions used to write)
-        clock = (config.get("CLOCK") if "CLOCK" in config else config.get("CORE", "")).split()
-        mem = config.get("MEM", "").split()
-        plimit = (config.get("PLIMIT") if "PLIMIT" in config else config.get("PL", "")).split()
-        fan = config.get("FAN", "").split()
-        lclock = config.get("LCLOCK", "").split()
-        lmem = config.get("LMEM", "").split()
-        
-        if apply_all:
-            # Target every NVIDIA GPU on this rig (fallback: current conf length)
-            try:
-                gpus = get_gpu_stats().get("gpus", [])
-                n = sum(1 for g in gpus if g.get("brand") == "NVIDIA")
-            except Exception:
-                n = 0
-            if n == 0:
-                n = max(len(clock), len(mem), len(plimit), len(fan), 1)
-            max_idx = max(3, n - 1)
-        else:
-            max_idx = max(3, gpu_index)
-        clock += ["0"] * (max_idx + 1 - len(clock))
-        mem += ["0"] * (max_idx + 1 - len(mem))
-        plimit += ["0"] * (max_idx + 1 - len(plimit))
-        fan += ["0"] * (max_idx + 1 - len(fan))
-        # Locked clocks keep explicit "0" for unlocked GPUs (cloud parity):
-        # empty entries would vanish in hive's word-splitting of the conf list
-        # and shift every following per-GPU value one position left
-        lclock += ["0"] * (max_idx + 1 - len(lclock))
-        lmem += ["0"] * (max_idx + 1 - len(lmem))
+        ok, message = _apply_nvidia_oc(data, apply_all, gpu_index)
+        if not ok:
+            return jsonify({"success": False, "message": message})
+        if not message:
+            message = f"Overclock parameters successfully saved and applied to NVIDIA {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"
+        return jsonify({"success": True, "message": message})
 
-        def _apply_values(field_key, lst, transform=None):
-            """Single-GPU mode: set one index. All-GPUs mode: empty values are skipped
-            (per-GPU differences are preserved), filled values go to every GPU."""
-            if field_key not in data:
-                return
-            raw = str(data[field_key]).strip()
-            if apply_all:
-                if raw == "":
-                    return
-                val = transform(raw) if transform else raw
-                for i in range(len(lst)):
-                    lst[i] = val
-            else:
-                lst[gpu_index] = transform(raw) if transform else raw
+    # brand == "AMD" (validated above)
+    filepath = AMD_OC_CONF
+    config = parse_shell_config(filepath)
 
-        _apply_values("core", clock)
-        _apply_values("mem", mem)
-        _apply_values("pl", plimit)
-        _apply_values("fan", fan)
-        # Optional locked clocks (absolute values, HiveOS-style LCLOCK/LMEM);
-        # cleared locks are stored as explicit "0" to preserve list positions
-        _apply_values("lcore", lclock, lambda v: "0" if str(v).strip() in ("", "0") else v)
-        _apply_values("lmem", lmem, lambda v: "0" if str(v).strip() in ("", "0") else v)
+    fields = ["CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF"]
+    parsed_fields = {}
+    for fld in fields:
+        parsed_fields[fld] = config.get(fld, "").split()
+        parsed_fields[fld] += ["0"] * (gpu_index + 1 - len(parsed_fields[fld]))
 
-        # Rig-wide flags, HiveOS nvidia-oc.conf semantics (cloud OC modal parity):
-        # RUNNING_DELAY = apply delay, LOGO_BRIGHTNESS 0 = LEDs off,
-        # FORCESTATE 1 = force P0, POWERMIZER 2 = idle power reduction,
-        # OHGODAPILL_* = "tablet" for GDDR5X cards
-        if "delay" in data:
-            config["RUNNING_DELAY"] = "" if str(data["delay"]).strip() in ("", "0") else str(data["delay"]).strip()
-        if "led" in data:
-            config["LOGO_BRIGHTNESS"] = "0" if str(data["led"]).strip() == "1" else ""
-        if "p0" in data:
-            config["FORCESTATE"] = "1" if str(data["p0"]).strip() == "1" else ""
-        if "idle" in data:
-            config["POWERMIZER"] = "2" if str(data["idle"]).strip() == "1" else "1"
-        if "pill" in data:
-            config["OHGODAPILL_ENABLED"] = "1" if str(data["pill"]).strip() == "1" else ""
-            config["OHGODAPILL_START_TIMEOUT"] = ""
-            config["OHGODAPILL_ARGS"] = ""
+    for key in fields:
+        payload_key = key.lower()
+        if payload_key in data:
+            parsed_fields[key][gpu_index] = str(data[payload_key])
 
-        config.pop("CORE", None)  # legacy key written by older versions
-        config.pop("PL", None)
-        config["CLOCK"] = " ".join(clock)
-        config["MEM"] = " ".join(mem)
-        config["PLIMIT"] = " ".join(plimit)
-        config["FAN"] = " ".join(fan)
-        config["LCLOCK"] = " ".join(lclock)
-        config["LMEM"] = " ".join(lmem)
-        
-        write_shell_config(filepath, config)
-        target_label = "all GPUs" if apply_all else f"GPU {gpu_index}"
-        logging.info(f"NVIDIA {target_label} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
+    for key in fields:
+        config[key] = " ".join(parsed_fields[key])
 
-        stdout, stderr, code = run_nvidia_oc()
-        if code != 0:
-            logging.error(f"NVIDIA OC script failed: {stderr}")
-            return jsonify({"success": False, "message": "NVIDIA overclock script failed to apply settings."})
+    write_shell_config(filepath, config)
+    logging.info(f"AMD GPU {gpu_index} parameters updated: {config}")
 
-        # Verify locked clocks actually took effect: under full mining load nvtool
-        # calls can silently fail, so retry the whole apply up to 2 more times
-        expected_locks = {}
-        for i, v in enumerate(lclock):
-            try:
-                if int(str(v).strip()) > 0:
-                    expected_locks[i] = int(str(v).strip())
-            except ValueError:
-                continue
-        if expected_locks:
-            mismatch = verify_locked_clocks(expected_locks)
-            for _ in range(2):
-                if not mismatch:
-                    break
-                logging.warning(f"Locked clocks not confirmed {mismatch}, retrying nvidia-oc")
-                time.sleep(3)
-                run_nvidia_oc()
-                mismatch = verify_locked_clocks(expected_locks)
-            if mismatch:
-                # nvtool (used inside hive's nvidia-oc) silently fails to move locked
-                # clocks while the miner runs at full load; plain nvidia-smi -lgc still
-                # works there (observed on laptop rigs) — last-resort fallback
-                def _smi_lock_fallback(bad):
-                    for i, (exp, _act) in sorted(bad.items()):
-                        run_command(f"sudo nvidia-smi -i {i} -lgc {exp},{exp}")
+    stdout, stderr, code = run_command("sudo /hive/sbin/amd-oc")
+    if code != 0:
+        logging.error(f"AMD OC script failed: {stderr}")
+        return jsonify({"success": False, "message": "AMD overclock script failed to apply settings."})
 
-                logging.warning(f"Locked clocks still unconfirmed {mismatch}, falling back to nvidia-smi -lgc")
-                _smi_lock_fallback(mismatch)
-                time.sleep(2)
-                mismatch = verify_locked_clocks(expected_locks)
-                for _ in range(2):
-                    if not mismatch:
-                        break
-                    time.sleep(3)
-                    _smi_lock_fallback(mismatch)
-                    mismatch = verify_locked_clocks(expected_locks)
-            if mismatch:
-                bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
-                logging.warning(f"NVIDIA locked clock verification failed: {bad}")
-                return jsonify({"success": True, "message": f"Saved, but locked clock not confirmed on: {bad}. Try applying again or check nvidia-smi."})
-
-    elif brand == "AMD":
-        filepath = AMD_OC_CONF
-        config = parse_shell_config(filepath)
-        
-        fields = ["CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF"]
-        parsed_fields = {}
-        for fld in fields:
-            parsed_fields[fld] = config.get(fld, "").split()
-            parsed_fields[fld] += ["0"] * (gpu_index + 1 - len(parsed_fields[fld]))
-            
-        for key in fields:
-            payload_key = key.lower()
-            if payload_key in data:
-                parsed_fields[key][gpu_index] = str(data[payload_key])
-                
-        for key in fields:
-            config[key] = " ".join(parsed_fields[key])
-            
-        write_shell_config(filepath, config)
-        logging.info(f"AMD GPU {gpu_index} parameters updated: {config}")
-        
-        stdout, stderr, code = run_command("sudo /hive/sbin/amd-oc")
-        if code != 0:
-            logging.error(f"AMD OC script failed: {stderr}")
-            return jsonify({"success": False, "message": "AMD overclock script failed to apply settings."})
-                
-    return jsonify({"success": True, "message": f"Overclock parameters successfully saved and applied to {brand} {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"})
+    return jsonify({"success": True, "message": f"Overclock parameters successfully saved and applied to AMD {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"})
 
 @app.route('/api/revert', methods=['POST'])
 def revert_overclock():
@@ -2575,226 +2589,134 @@ def autofan_gpu_set():
     msg = (f"Fan set to auto on {label}." if mode == "auto" else f"Fan speed set to {static_speed}% on {label}.")
     return jsonify({"success": True, "message": msg})
 
-# 5. Local Preset Profile Swappers
-@app.route('/api/presets', methods=['GET'])
-def list_presets():
-    presets = []
-    if os.path.exists(PRESETS_DIR):
-        try:
-            presets = [d for d in os.listdir(PRESETS_DIR) if os.path.isdir(os.path.join(PRESETS_DIR, d))]
-        except Exception as e:
-            logging.error(f"Failed to list presets directory: {e}")
-    return jsonify({"success": True, "presets": sorted(presets)})
-
-@app.route('/api/presets/save', methods=['POST'])
-def save_preset():
-    data = request.get_json()
-    if not data or 'name' not in data:
-        return jsonify({"success": False, "message": "Missing preset name"}), 400
-        
-    name = str(data['name']).strip()
-    if not re.match(r'^[A-Za-z0-9_\-\s]+$', name):
-        return jsonify({"success": False, "message": "Invalid preset name. Use alphanumeric characters and spaces only."}), 400
-        
-    # Enforce strict path prefix containment validation to block CodeQL Path Traversal warnings
-    presets_dir_abs = os.path.abspath(PRESETS_DIR)
-    preset_path = os.path.abspath(os.path.join(presets_dir_abs, name))
-    if not preset_path.startswith(presets_dir_abs + os.sep) and preset_path != presets_dir_abs:
-        logging.warning(f"Security Alert: Blocked path containment escape in save preset '{name}' from IP {request.remote_addr}")
-        return jsonify({"success": False, "message": "Invalid preset name path configuration."}), 400
-    
-    try:
-        with config_lock:
-            if not os.path.exists(preset_path):
-                os.makedirs(preset_path, exist_ok=True)
-                
-            if os.path.exists(WALLET_CONF_PATH):
-                shutil.copy2(WALLET_CONF_PATH, os.path.join(preset_path, "wallet.conf"))
-            if os.path.exists(os.path.join(HIVE_CONFIG_DIR, "miner.conf")):
-                shutil.copy2(os.path.join(HIVE_CONFIG_DIR, "miner.conf"), os.path.join(preset_path, "miner.conf"))
-                
-            rig_conf = parse_shell_config(RIG_CONF_PATH)
-            write_shell_config(os.path.join(preset_path, "rig_preset.conf"), {
-                "MINER": rig_conf.get("MINER", "none")
-            })
-            
-        logging.info(f"Preset '{name}' saved successfully by IP: {request.remote_addr}")
-        return jsonify({"success": True, "message": f"Preset '{name}' successfully saved!"})
-    except Exception as e:
-        logging.error(f"Failed to save preset '{name}': {e}")
-        return jsonify({"success": False, "message": "Failed to save preset files."}), 500
-
-@app.route('/api/presets/apply', methods=['POST'])
-def apply_preset():
-    data = request.get_json()
-    if not data or 'name' not in data:
-        return jsonify({"success": False, "message": "Missing preset name"}), 400
-        
-    name = str(data['name']).strip()
-    if not re.match(r'^[A-Za-z0-9_\-\s]+$', name):
-        return jsonify({"success": False, "message": "Invalid preset name."}), 400
-        
-    # Enforce strict path prefix containment validation to block CodeQL Path Traversal warnings
-    presets_dir_abs = os.path.abspath(PRESETS_DIR)
-    preset_path = os.path.abspath(os.path.join(presets_dir_abs, name))
-    if not preset_path.startswith(presets_dir_abs + os.sep) and preset_path != presets_dir_abs:
-        logging.warning(f"Security Alert: Blocked path containment escape in apply preset '{name}' from IP {request.remote_addr}")
-        return jsonify({"success": False, "message": "Invalid preset name path configuration."}), 400
-        
-    if not os.path.exists(preset_path):
-        return jsonify({"success": False, "message": f"Preset '{name}' does not exist."}), 404
-        
-    try:
-        with config_lock:
-            preset_wallet = os.path.join(preset_path, "wallet.conf")
-            preset_miner = os.path.join(preset_path, "miner.conf")
-            preset_rig = os.path.join(preset_path, "rig_preset.conf")
-            
-            if os.path.exists(preset_wallet):
-                shutil.copy2(preset_wallet, WALLET_CONF_PATH)
-            if os.path.exists(preset_miner):
-                shutil.copy2(preset_miner, os.path.join(HIVE_CONFIG_DIR, "miner.conf"))
-                
-            if os.path.exists(preset_rig):
-                p_rig = parse_shell_config(preset_rig)
-                if "MINER" in p_rig:
-                    rig_conf = parse_shell_config(RIG_CONF_PATH)
-                    rig_conf["MINER"] = p_rig["MINER"]
-                    write_shell_config(RIG_CONF_PATH, rig_conf)
-
-        # The preset carries the mining config; switch the OC preset bound to its algo
-        oc_msg = _auto_switch_oc_for_algo(
-            _algo_from_wallet_conf(parse_shell_config(WALLET_CONF_PATH)))
-
-        logging.info(f"Preset '{name}' applied successfully by IP: {request.remote_addr}. Restarting miner...")
-        run_command(MINER_RESTART_CMD)
-        message = f"Preset '{name}' applied successfully! Miner restarting..."
-        if oc_msg:
-            message += oc_msg
-        return jsonify({"success": True, "message": message})
-    except Exception as e:
-        logging.error(f"Failed to apply preset '{name}': {e}")
-        return jsonify({"success": False, "message": "Failed to restore preset configuration files."}), 500
-
-@app.route('/api/presets/delete', methods=['POST'])
-def delete_preset():
-    data = request.get_json()
-    if not data or 'name' not in data:
-        return jsonify({"success": False, "message": "Missing preset name"}), 400
-        
-    name = str(data['name']).strip()
-    if not re.match(r'^[A-Za-z0-9_\-\s]+$', name):
-        return jsonify({"success": False, "message": "Invalid preset name."}), 400
-        
-    # Enforce strict path prefix containment validation to block CodeQL Path Traversal warnings
-    presets_dir_abs = os.path.abspath(PRESETS_DIR)
-    preset_path = os.path.abspath(os.path.join(presets_dir_abs, name))
-    if not preset_path.startswith(presets_dir_abs + os.sep) and preset_path != presets_dir_abs:
-        logging.warning(f"Security Alert: Blocked path containment escape in delete preset '{name}' from IP {request.remote_addr}")
-        return jsonify({"success": False, "message": "Invalid preset name path configuration."}), 400
-        
-    if not os.path.exists(preset_path):
-        return jsonify({"success": False, "message": "Preset not found."}), 404
-        
-    try:
-        with config_lock:
-            shutil.rmtree(preset_path)
-            
-        logging.info(f"Preset '{name}' deleted successfully by IP: {request.remote_addr}")
-        return jsonify({"success": True, "message": f"Preset '{name}' successfully deleted."})
-    except Exception as e:
-        logging.error(f"Failed to delete preset '{name}': {e}")
-        return jsonify({"success": False, "message": "Failed to remove preset files."}), 500
-
 # 5b. Algo-bound GPU overclock presets (HiveOS "OC per algorithm" parity).
-# An OC preset is a snapshot of nvidia-oc.conf / amd-oc.conf optionally bound to a
-# mining algorithm; when the rig switches preset / flight sheet to a bound algo,
-# the matching OC preset is applied automatically (_auto_switch_oc_for_algo).
-OC_NVIDIA_KEYS = ("CLOCK", "LCLOCK", "MEM", "LMEM", "PLIMIT", "FAN", "RUNNING_DELAY",
-                  "LOGO_BRIGHTNESS", "FORCESTATE", "POWERMIZER",
-                  "OHGODAPILL_ENABLED", "OHGODAPILL_START_TIMEOUT", "OHGODAPILL_ARGS")
-OC_AMD_KEYS = ("CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF")
+# An OC preset holds the all-GPU overclock form values (the same fields as the
+# rig's "Set settings for all GPUs" card) and can be bound to a mining algorithm
+# or marked as the default. When the rig switches to an algo (flight sheet
+# apply), the preset bound to that algo applies automatically
+# (_auto_switch_oc_for_algo); when no binding matches, the default preset is used.
+OC_FORM_FIELDS = ("core", "lcore", "mem", "lmem", "pl", "fan", "delay")
+OC_FLAGS = ("led", "p0", "idle", "pill")
+
+
+def _conf_to_form_values(nv_conf):
+    """Collapse per-GPU nvidia-oc.conf lists into all-GPU form fields: a field
+    is filled only when every GPU carries the same non-zero value."""
+    def uniform(raw):
+        vals = [v for v in str(raw or "").split() if v and v != "0"]
+        return vals[0] if vals and len(set(vals)) == 1 else ""
+    return {
+        "core": uniform(nv_conf.get("CLOCK", "")),
+        "lcore": uniform(nv_conf.get("LCLOCK", "")),
+        "mem": uniform(nv_conf.get("MEM", "")),
+        "lmem": uniform(nv_conf.get("LMEM", "")),
+        "pl": uniform(nv_conf.get("PLIMIT", "")),
+        "fan": uniform(nv_conf.get("FAN", "")),
+        "delay": str(nv_conf.get("RUNNING_DELAY", "") or ""),
+        "led": "1" if nv_conf.get("LOGO_BRIGHTNESS", "") == "0" else "0",
+        "p0": "1" if nv_conf.get("FORCESTATE", "") == "1" else "0",
+        "idle": "1" if nv_conf.get("POWERMIZER", "") == "2" else "0",
+        "pill": "1" if nv_conf.get("OHGODAPILL_ENABLED", "") == "1" else "0",
+    }
 
 
 def _load_oc_presets():
-    return [p for p in _load_json_store(OC_PRESETS_PATH, []) if p.get("id")]
+    """Store entries normalized to the form-values model (migrates the
+    short-lived full-conf snapshots of 1.10.26 in place)."""
+    raw = [p for p in _load_json_store(OC_PRESETS_PATH, []) if p.get("id")]
+    changed = False
+    for p in raw:
+        if "values" not in p:
+            p["values"] = _conf_to_form_values(p.get("nvidia", {}))
+            p.pop("nvidia", None)
+            p.pop("amd", None)
+            p.setdefault("algo", "")
+            p.setdefault("is_default", False)
+            changed = True
+    if changed:
+        _save_json_store(OC_PRESETS_PATH, raw)
+    return raw
 
 
-def _snapshot_oc_values():
-    """Current overclock values from nvidia-oc.conf / amd-oc.conf (OC keys only)."""
-    nv_conf = parse_shell_config(NVIDIA_OC_CONF)
-    amd_conf = parse_shell_config(AMD_OC_CONF)
-    return ({k: nv_conf.get(k, "") for k in OC_NVIDIA_KEYS},
-            {k: amd_conf.get(k, "") for k in OC_AMD_KEYS})
+def _live_oc_form_values():
+    """Current rig overclock collapsed to the all-GPU form fields (form prefill)."""
+    return _conf_to_form_values(parse_shell_config(NVIDIA_OC_CONF))
 
 
-def _norm_oc_value(v):
-    return " ".join(str(v or "").split())
+def _oc_matches_live(values):
+    """True when the live nvidia-oc.conf matches the preset's form values.
+    Empty preset clock fields are wildcards (apply leaves them unchanged);
+    flags and delay compare strictly."""
+    nv = parse_shell_config(NVIDIA_OC_CONF)
 
+    def uniform(key):
+        vals = [v for v in str(nv.get(key, "") or "").split() if v and v != "0"]
+        return vals[0] if vals and len(set(vals)) == 1 else ""
 
-def _oc_matches_live(snapshot_nv, snapshot_amd):
-    """True when the preset's overclock values equal the live conf values."""
-    live_nv, live_amd = _snapshot_oc_values()
-    for k in OC_NVIDIA_KEYS:
-        if _norm_oc_value(snapshot_nv.get(k, "")) != _norm_oc_value(live_nv.get(k, "")):
+    for field, key in (("core", "CLOCK"), ("lcore", "LCLOCK"), ("mem", "MEM"),
+                       ("lmem", "LMEM"), ("pl", "PLIMIT"), ("fan", "FAN")):
+        want = str(values.get(field, "") or "").strip()
+        if want and want != "0" and uniform(key) != want:
             return False
-    for k in OC_AMD_KEYS:
-        if _norm_oc_value(snapshot_amd.get(k, "")) != _norm_oc_value(live_amd.get(k, "")):
+    want_delay = str(values.get("delay", "") or "").strip()
+    if want_delay and want_delay != "0":
+        if str(nv.get("RUNNING_DELAY", "") or "").strip() != want_delay:
+            return False
+    flag_checks = (("led", "LOGO_BRIGHTNESS", "0"), ("p0", "FORCESTATE", "1"),
+                   ("idle", "POWERMIZER", "2"), ("pill", "OHGODAPILL_ENABLED", "1"))
+    for flag, key, on_val in flag_checks:
+        if (str(values.get(flag, "0")) == "1") != (nv.get(key, "") == on_val):
             return False
     return True
 
 
-def _apply_oc_snapshot(snapshot_nv, snapshot_amd):
-    """Write overclock values into the live conf files and push them to hardware."""
-    backup_configs()
-    nv_conf = parse_shell_config(NVIDIA_OC_CONF)
-    nv_conf.update({k: str(snapshot_nv.get(k, "")) for k in OC_NVIDIA_KEYS})
-    amd_conf = parse_shell_config(AMD_OC_CONF)
-    amd_conf.update({k: str(snapshot_amd.get(k, "")) for k in OC_AMD_KEYS})
-    if not write_shell_config(NVIDIA_OC_CONF, nv_conf):
-        return False, "Failed to write nvidia-oc.conf"
-    if not write_shell_config(AMD_OC_CONF, amd_conf):
-        return False, "Failed to write amd-oc.conf"
-    run_nvidia_oc()
-    run_command("sudo /hive/sbin/amd-oc")
-    return True, "Overclock values applied."
-
-
-def _algo_from_wallet_conf(wc):
-    """Mining algorithm recorded in a wallet.conf (custom miner blocks carry it)."""
-    algo = str(wc.get("CUSTOM_ALGO", "") or "").strip().lower()
-    if algo:
-        return algo
-    try:
-        meta = json.loads(str(wc.get("META", "") or "{}"))
-        if isinstance(meta, dict):
-            for sec in meta.values():
-                if isinstance(sec, dict) and sec.get("algo"):
-                    return str(sec["algo"]).strip().lower()
-    except Exception:
-        pass
-    return ""
+def _apply_oc_preset_values(values):
+    """Push an OC preset to hardware: expand the all-GPU form values to every
+    NVIDIA GPU through the shared apply path (conf write, nvidia-oc run and
+    locked-clock verification included). Empty clock fields are left unchanged."""
+    payload = {}
+    for field in OC_FORM_FIELDS:
+        v = str(values.get(field, "") or "").strip()
+        if field == "delay":
+            payload[field] = v
+        elif v and v != "0":
+            payload[field] = v
+    for flag in OC_FLAGS:
+        payload[flag] = "1" if str(values.get(flag, "0")) == "1" else "0"
+    is_valid, err = validate_overclock_ranges("NVIDIA", payload)
+    if not is_valid:
+        return False, err
+    return _apply_nvidia_oc(payload, True, None)
 
 
 def _auto_switch_oc_for_algo(algo):
-    """Apply the OC preset bound to `algo`. Returns a message suffix for the caller's
-    toast, or None when there is no binding / the preset is already live."""
+    """Apply the OC preset bound to `algo`, falling back to the default preset
+    when no binding matches. Returns a message suffix for the caller's toast,
+    or None when nothing was applied / the chosen preset is already live."""
+    presets = _load_oc_presets()
+    if not presets:
+        return None
     algo = str(algo or "").strip().lower()
-    if not algo:
-        return None
-    preset = next((p for p in _load_oc_presets()
-                   if str(p.get("algo", "")).strip().lower() == algo), None)
+    preset = None
+    reason = ""
+    if algo:
+        preset = next((p for p in presets
+                       if str(p.get("algo", "")).strip().lower() == algo), None)
+        reason = f"algo {algo}"
     if preset is None:
-        logging.info(f"OC auto-switch: no OC preset bound to algo '{algo}'")
+        preset = next((p for p in presets if p.get("is_default")), None)
+        reason = "default"
+    if preset is None:
+        logging.info(f"OC auto-switch: no bound or default OC preset for algo '{algo or '?'}'")
         return None
-    if _oc_matches_live(preset.get("nvidia", {}), preset.get("amd", {})):
+    if _oc_matches_live(preset.get("values", {})):
         logging.info(f"OC auto-switch: preset '{preset.get('name')}' already matches live OC")
         return None
-    ok, msg = _apply_oc_snapshot(preset.get("nvidia", {}), preset.get("amd", {}))
+    ok, msg = _apply_oc_preset_values(preset.get("values", {}))
     if ok:
-        logging.info(f"OC auto-switch: preset '{preset.get('name')}' applied for algo '{algo}'")
-        return f" OC preset '{preset.get('name')}' applied (algo {algo})."
-    logging.error(f"OC auto-switch failed for algo '{algo}': {msg}")
+        logging.info(f"OC auto-switch: preset '{preset.get('name')}' applied ({reason})")
+        return f" OC preset '{preset.get('name')}' applied ({reason})."
+    logging.error(f"OC auto-switch failed ({reason}): {msg}")
     return f" OC preset '{preset.get('name')}' failed: {msg}"
 
 
@@ -2806,12 +2728,12 @@ def list_oc_presets():
             "id": p.get("id", ""),
             "name": p.get("name", ""),
             "algo": p.get("algo", ""),
+            "is_default": bool(p.get("is_default")),
+            "values": p.get("values", {}),
             "created_at": p.get("created_at", 0),
-            "nvidia": p.get("nvidia", {}),
-            "amd": p.get("amd", {}),
-            "active": _oc_matches_live(p.get("nvidia", {}), p.get("amd", {}))
+            "active": _oc_matches_live(p.get("values", {}))
         })
-    return jsonify({"success": True, "presets": presets})
+    return jsonify({"success": True, "presets": presets, "live": _live_oc_form_values()})
 
 
 @app.route('/api/oc-presets/save', methods=['POST'])
@@ -2825,9 +2747,27 @@ def save_oc_preset():
         return jsonify({"success": False, "message": "Invalid algorithm name."}), 400
     pid = str(data.get("id", "")).strip()
 
+    values = data.get("values")
+    clean = None
+    if values is not None:
+        if not isinstance(values, dict):
+            return jsonify({"success": False, "message": "Invalid overclock values."}), 400
+        clean = {}
+        for field in OC_FORM_FIELDS:
+            v = str(values.get(field, "") or "").strip()
+            if v and not is_safe_parameter_value(v):
+                return jsonify({"success": False, "message": f"Invalid value for '{field}'."}), 400
+            clean[field] = v
+        for flag in OC_FLAGS:
+            clean[flag] = "1" if str(values.get(flag, "0")) == "1" else "0"
+        is_valid, err = validate_overclock_ranges("NVIDIA", clean)
+        if not is_valid:
+            return jsonify({"success": False, "message": err}), 400
+
     with config_lock:
         presets = _load_oc_presets()
         now = int(time.time())
+        make_default = bool(data.get("is_default"))
         if pid:
             preset = next((p for p in presets if p.get("id") == pid), None)
             if preset is None:
@@ -2835,31 +2775,92 @@ def save_oc_preset():
             preset["name"] = name
             preset["algo"] = algo
             preset["updated_at"] = now
-            if data.get("refresh"):
-                nv_snap, amd_snap = _snapshot_oc_values()
-                preset["nvidia"], preset["amd"] = nv_snap, amd_snap
+            if clean is not None:
+                preset["values"] = clean
+            if make_default:
+                preset["is_default"] = True
             msg = f"OC preset '{name}' updated."
         else:
-            # Saving under an existing name refreshes that preset (snapshot + binding)
+            if clean is None:
+                return jsonify({"success": False, "message": "Missing overclock values."}), 400
+            # Saving under an existing name refreshes that preset's values/binding
             preset = next((p for p in presets
                            if str(p.get("name", "")).lower() == name.lower()), None)
-            nv_snap, amd_snap = _snapshot_oc_values()
             if preset is not None:
                 preset["algo"] = algo
-                preset["nvidia"], preset["amd"] = nv_snap, amd_snap
+                preset["values"] = clean
                 preset["updated_at"] = now
-                msg = f"OC preset '{name}' updated with current overclock values."
+                if make_default:
+                    preset["is_default"] = True
+                msg = f"OC preset '{name}' updated."
             else:
-                presets.append({
+                preset = {
                     "id": uuid.uuid4().hex[:12], "name": name, "algo": algo,
-                    "nvidia": nv_snap, "amd": amd_snap,
+                    "is_default": False, "values": clean,
                     "created_at": now, "updated_at": now
-                })
+                }
+                presets.append(preset)
                 msg = f"OC preset '{name}' saved."
+        if make_default:
+            for other in presets:
+                if other is not preset:
+                    other["is_default"] = False
         if not _save_json_store(OC_PRESETS_PATH, presets):
             return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
 
     logging.info(f"OC preset '{name}' saved by IP: {request.remote_addr}")
+    return jsonify({"success": True, "message": msg})
+
+
+@app.route('/api/oc-presets/bind', methods=['POST'])
+def bind_oc_preset():
+    """Inline algorithm binding from the presets list dropdown ('' = unbound).
+    An algo can be bound to a single preset — rebinding steals it from others."""
+    data = request.get_json() or {}
+    pid = str(data.get("id", "")).strip()
+    algo = str(data.get("algo", "")).strip().lower()
+    if algo and not re.match(r'^[a-z0-9_\-]{1,32}$', algo):
+        return jsonify({"success": False, "message": "Invalid algorithm name."}), 400
+    with config_lock:
+        presets = _load_oc_presets()
+        preset = next((p for p in presets if p.get("id") == pid), None)
+        if preset is None:
+            return jsonify({"success": False, "message": "OC preset not found."}), 404
+        if algo:
+            for other in presets:
+                if other is not preset and str(other.get("algo", "")).lower() == algo:
+                    other["algo"] = ""
+        preset["algo"] = algo
+        preset["updated_at"] = int(time.time())
+        if not _save_json_store(OC_PRESETS_PATH, presets):
+            return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
+    name = preset.get("name", "")
+    logging.info(f"OC preset '{name}' bound to algo '{algo or 'none'}' by IP: {request.remote_addr}")
+    return jsonify({"success": True,
+                    "message": f"OC preset '{name}' bound to {algo}." if algo else f"OC preset '{name}' unbound."})
+
+
+@app.route('/api/oc-presets/default', methods=['POST'])
+def default_oc_preset():
+    """Mark one preset as the default fallback (empty id clears the default)."""
+    data = request.get_json() or {}
+    pid = str(data.get("id", "")).strip()
+    with config_lock:
+        presets = _load_oc_presets()
+        if pid:
+            preset = next((p for p in presets if p.get("id") == pid), None)
+            if preset is None:
+                return jsonify({"success": False, "message": "OC preset not found."}), 404
+            for p in presets:
+                p["is_default"] = (p is preset)
+            msg = f"OC preset '{preset.get('name')}' set as default."
+        else:
+            for p in presets:
+                p["is_default"] = False
+            msg = "Default OC preset cleared."
+        if not _save_json_store(OC_PRESETS_PATH, presets):
+            return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
+    logging.info(f"OC default preset changed by IP: {request.remote_addr}")
     return jsonify({"success": True, "message": msg})
 
 
@@ -2872,7 +2873,7 @@ def apply_oc_preset():
     if preset is None:
         return jsonify({"success": False, "message": "OC preset not found."}), 404
     try:
-        ok, msg = _apply_oc_snapshot(preset.get("nvidia", {}), preset.get("amd", {}))
+        ok, msg = _apply_oc_preset_values(preset.get("values", {}))
     except Exception as e:
         logging.error(f"Failed to apply OC preset '{preset.get('name')}': {e}")
         return jsonify({"success": False, "message": "Failed to apply OC preset values."}), 500
@@ -2880,7 +2881,7 @@ def apply_oc_preset():
         return jsonify({"success": False, "message": msg}), 500
     name = preset.get("name", "")
     logging.info(f"OC preset '{name}' applied by IP: {request.remote_addr}")
-    return jsonify({"success": True, "message": f"OC preset '{name}' applied."})
+    return jsonify({"success": True, "message": msg or f"OC preset '{name}' applied."})
 
 
 @app.route('/api/oc-presets/delete', methods=['POST'])
@@ -4640,9 +4641,6 @@ if __name__ == '__main__':
         print("="*60 + "\n")
         os._exit(1)
 
-    # Initialize presets directory
-    os.makedirs(PRESETS_DIR, exist_ok=True)
-    
     # Start the background cluster synchronization worker
     start_cluster_worker()
     
