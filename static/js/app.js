@@ -2106,7 +2106,14 @@ window.syncNow = async function() {
             headers: { 'X-CSRF-Token': csrfToken }
         });
     } catch (e) { /* ignore */ }
-    setTimeout(() => loadClusterData(true), 2500);
+    // Give the backend cycle a moment to land, then reload and restore the UI.
+    // renderCluster() overwrites the placeholder with the real last-sync message;
+    // the fallback only fires when the reload produced nothing (network error).
+    setTimeout(async () => {
+        await loadClusterData(true);
+        spinner.classList.add('d-none');
+        if (status.textContent === 'Syncing...') status.textContent = '';
+    }, 2500);
 };
 
 // ---------------- Cluster create/rename/delete + membership ----------------
