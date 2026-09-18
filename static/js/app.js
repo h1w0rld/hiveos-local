@@ -346,6 +346,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('dashTabFsheetsBtn').addEventListener('click', () => showDashTab('fsheets'));
     document.getElementById('dashTabPresetsBtn').addEventListener('click', () => showDashTab('presets'));
     document.getElementById('dashTabServicesBtn').addEventListener('click', () => showDashTab('services'));
+    document.getElementById('dashTabStatsBtn').addEventListener('click', () => showDashTab('stats'));
     document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
 
     // GPU Fans tab (1:1 copy of the HiveOS worker Autofan page)
@@ -920,7 +921,8 @@ const AUTO_REFRESH_LOADERS = {
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
     wallets: () => renderWallets(),
     fsheets: () => loadFsheets(),
-    fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); }
+    fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); },
+    metrics: () => { if (activeView === 'dashboard' && activeDashTab === 'stats') loadMetricsTab(); }
 };
 
 function autoRefreshDefault(target) {
@@ -4101,7 +4103,7 @@ function showDashTab(tab) {
     const isIgpu = isGpus && activeHardwareTab !== 'gpus';
     [['dashTabGpusBtn', isGpus], ['dashTabFansBtn', tab === 'fans'], ['dashTabWalletsBtn', tab === 'wallets'],
      ['dashTabFsheetsBtn', tab === 'fsheets'], ['dashTabPresetsBtn', tab === 'presets'],
-     ['dashTabServicesBtn', tab === 'services']].forEach(([id, on]) => {
+     ['dashTabServicesBtn', tab === 'services'], ['dashTabStatsBtn', tab === 'stats']].forEach(([id, on]) => {
         const b = document.getElementById(id);
         b.classList.toggle('btn-primary', on);
         b.classList.toggle('btn-outline-primary', !on);
@@ -4119,12 +4121,14 @@ function showDashTab(tab) {
     document.getElementById('presetsTabContainer').classList.toggle('d-none', tab !== 'presets');
     document.getElementById('servicesTabContainer').classList.toggle('d-none', tab !== 'services');
     document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
+    document.getElementById('statsTabContainer').classList.toggle('d-none', tab !== 'stats');
     // Stats refresh + hardware sub-switch only make sense on the GPUs tab
     document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
     if (tab === 'fans') { loadAutofan(); loadFans(); }
     if (tab === 'presets') loadOcPresetsList();
+    if (tab === 'stats') loadMetricsTab();
 }
 
 function isWalletsTab(tab) { return tab === 'wallets'; }
@@ -5040,4 +5044,488 @@ function escapeHtml(text) {
     return String(text)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ---------------- Statistics tab (HiveOS worker Stats parity) ----------------
+
+const STATS_GPU_COLORS = ['#1993eb', '#86236d', '#00b091', '#d97b00', '#b43e5a', '#80aa19', '#2f69b7', '#9c5935', '#e377c2', '#17becf', '#bcbd22', '#7f7f7f'];
+const STATS_EVENT_COLORS = { info: '#2392dc', file: '#c6ccd2', danger: '#ff3733', warning: '#ffae00', success: '#84bf40' };
+const statsState = { date: null, days: 1, filter: 'all', data: null, charts: {}, detailChart: null, loading: false };
+
+function statsTodayStr() {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function statsAddDaysStr(dateStr, n) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d + n);
+    return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+}
+
+function statsDateToTs(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d).getTime();
+}
+
+function statsTimeLabel(ts, days) {
+    const d = new Date(ts * 1000);
+    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    if (days === 3) return String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + hm;
+    return hm;
+}
+
+function statsFullLabel(ts) {
+    const d = new Date(ts * 1000);
+    return String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + d.getFullYear() +
+        ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function fmtHashRate(mh, withPerS) {
+    // Hashrate samples are stored in MH/s (same as /api/stats total_hashrate_mh)
+    const units = ['MH', 'GH', 'TH', 'PH'];
+    let v = Math.abs(Number(mh) || 0), i = 0;
+    while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+    const s = v >= 100 ? v.toFixed(1) : v.toFixed(2);
+    return s + ' ' + units[i] + (withPerS ? '/s' : '');
+}
+
+function statsGradient(ctx, color) {
+    const area = ctx.chart.chartArea;
+    if (!area) return color + '22';
+    const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+    g.addColorStop(0, color + '4D');
+    g.addColorStop(1, color + '0D');
+    return g;
+}
+
+function statsDownsample(samples, maxPoints) {
+    if (samples.length <= maxPoints) return samples;
+    const step = Math.ceil(samples.length / maxPoints);
+    const out = [];
+    for (let i = 0; i < samples.length; i += step) out.push(samples[i]);
+    if (out[out.length - 1][0] !== samples[samples.length - 1][0]) out.push(samples[samples.length - 1]);
+    return out;
+}
+
+function statsBaseOptions(unitFmt, beginAtZero, tickFmt) {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    title: (items) => statsFullLabel(statsState._labelTs[items[0].dataIndex] || 0),
+                    label: (ctx) => ' ' + ctx.dataset.label + ': ' + unitFmt(ctx.parsed.y)
+                }
+            }
+        },
+        scales: {
+            x: {
+                ticks: { color: 'rgba(198,204,210,0.55)', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+                grid: { display: false },
+                border: { color: 'rgba(198,204,210,0.18)' }
+            },
+            y: {
+                beginAtZero: beginAtZero,
+                ticks: { color: 'rgba(198,204,210,0.55)', font: { size: 10 }, callback: tickFmt },
+                grid: { color: 'rgba(198,204,210,0.07)' },
+                border: { display: false }
+            }
+        }
+    };
+}
+
+function statsSeriesDatasets(samples, col) {
+    let gpuCount = 0;
+    samples.forEach(s => { gpuCount = Math.max(gpuCount, (s[col] || []).length); });
+    const ds = [];
+    for (let i = 0; i < gpuCount; i++) {
+        const color = STATS_GPU_COLORS[i % STATS_GPU_COLORS.length];
+        ds.push({
+            label: 'GPU ' + i,
+            data: samples.map(s => (s[col] || [])[i] !== undefined ? (s[col] || [])[i] : null),
+            borderColor: color,
+            backgroundColor: (c) => statsGradient(c, color),
+            fill: true, borderWidth: 1.5, pointRadius: 0, pointHitRadius: 8, tension: 0.25, spanGaps: true
+        });
+    }
+    return ds;
+}
+
+function statsSingleDataset(samples, col, color, label) {
+    return [{
+        label: label,
+        data: samples.map(s => s[col]),
+        borderColor: color,
+        backgroundColor: (c) => statsGradient(c, color),
+        fill: true, borderWidth: 1.5, pointRadius: 0, pointHitRadius: 8, tension: 0.25
+    }];
+}
+
+function statsMakeChart(key, canvasId, labels, datasets, options) {
+    if (statsState.charts[key]) { statsState.charts[key].destroy(); statsState.charts[key] = null; }
+    const el = document.getElementById(canvasId);
+    if (!el || typeof Chart === 'undefined') return;
+    statsState.charts[key] = new Chart(el.getContext('2d'), { type: 'line', data: { labels: labels, datasets: datasets }, options: options });
+}
+
+function statsNoChartFallback() {
+    document.querySelectorAll('#statsTabContainer .stats-chart-box').forEach(box => {
+        if (!box.dataset.fallback) {
+            box.dataset.fallback = '1';
+            box.innerHTML = '<div class="stats-nochart">Charts unavailable: Chart.js could not be loaded</div>';
+        }
+    });
+}
+
+async function loadMetricsTab() {
+    if (!statsState.date) statsState.date = statsTodayStr();
+    if (statsState.loading) return;
+    statsState.loading = true;
+    try {
+        const res = await apiFetch('/api/metrics/history?date=' + statsState.date + '&days=' + statsState.days);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        statsState.data = await res.json();
+        renderStatsTab();
+    } catch (e) {
+        console.error('Metrics history load failed:', e);
+    } finally {
+        statsState.loading = false;
+    }
+}
+
+function renderStatsTab() {
+    const data = statsState.data;
+    if (!data) return;
+    const allSamples = data.samples || [];
+    const samples = statsDownsample(allSamples, 400);
+    statsState._labelTs = samples.map(s => s[0]);
+    const labels = samples.map(s => statsTimeLabel(s[0], data.days));
+
+    // Date navigation + period buttons
+    document.getElementById('statsDateLabel').textContent = statsRangeLabel(data.start, data.days);
+    document.getElementById('statsSeparatorDate').textContent = statsRangeLabel(statsAddDaysStr(data.start, data.days - 1), 1);
+    document.getElementById('stats1dBtn').classList.toggle('active', data.days === 1);
+    document.getElementById('stats3dBtn').classList.toggle('active', data.days === 3);
+    document.getElementById('statsNextBtn').disabled = statsAddDaysStr(data.start, data.days - 1) >= statsTodayStr();
+
+    // Algo titles
+    const algo = data.algo || 'Hashrate';
+    document.getElementById('statsHashTitle').textContent = algo;
+    document.getElementById('statsHashTotalTitle').textContent = algo;
+
+    // Current-value chips from the last raw sample
+    const last = allSamples.length ? allSamples[allSamples.length - 1] : null;
+    statsRenderChips('statsTempChips', last ? last[1] : [], v => v + '\u00B0');
+    statsRenderChips('statsFanChips', last ? last[2] : [], v => v + '%');
+    statsRenderChips('statsPowerChips', last ? last[3] : [], v => Math.round(v) + 'W');
+    statsRenderChips('statsHashChips', last ? last[4] : [], v => fmtHashRate(v, true));
+
+    // Totals + min/mean/max
+    statsRenderTotals();
+    const hrs = allSamples.map(s => s[6] || 0).filter(v => v > 0);
+    if (hrs.length) {
+        const min = Math.min.apply(null, hrs), max = Math.max.apply(null, hrs);
+        const mean = hrs.reduce((a, b) => a + b, 0) / hrs.length;
+        document.getElementById('statsHashMin').textContent = fmtHashRate(min, true);
+        document.getElementById('statsHashMean').textContent = fmtHashRate(mean, true);
+        document.getElementById('statsHashMax').textContent = fmtHashRate(max, true);
+    } else {
+        document.getElementById('statsHashMin').textContent = '0';
+        document.getElementById('statsHashMean').textContent = '0';
+        document.getElementById('statsHashMax').textContent = '0';
+    }
+
+    if (typeof Chart === 'undefined') { statsNoChartFallback(); return; }
+
+    // Per-GPU charts
+    statsMakeChart('temp', 'statsTempChart', labels, statsSeriesDatasets(samples, 1),
+        statsBaseOptions(v => v + '\u00B0C', false, v => v + '\u00B0'));
+    statsMakeChart('fan', 'statsFanChart', labels, statsSeriesDatasets(samples, 2),
+        statsBaseOptions(v => v + '%', true, v => v + '%'));
+    statsMakeChart('power', 'statsPowerChart', labels, statsSeriesDatasets(samples, 3),
+        statsBaseOptions(v => v + 'W', true, v => v + 'W'));
+    statsMakeChart('hashrate', 'statsHashChart', labels, statsSeriesDatasets(samples, 4),
+        statsBaseOptions(v => fmtHashRate(v, false), false, v => fmtHashRate(v, false)));
+    statsMakeChart('powertotal', 'statsPowerTotalChart', labels, statsSingleDataset(samples, 5, '#2392dc', 'Power'),
+        statsBaseOptions(v => v + 'W', true, v => v + 'W'));
+    statsMakeChart('hashtotal', 'statsHashTotalChart', labels, statsSingleDataset(samples, 6, '#00b091', algo),
+        statsBaseOptions(v => fmtHashRate(v, false), false, v => fmtHashRate(v, false)));
+
+    statsRenderActivity();
+}
+
+function statsRangeLabel(startStr, days) {
+    const fmt = (s) => {
+        const [y, m, d] = s.split('-').map(Number);
+        return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+    };
+    if (days === 1) return fmt(startStr);
+    return fmt(startStr) + ' \u2013 ' + fmt(statsAddDaysStr(startStr, days - 1));
+}
+
+function statsRenderChips(containerId, values, fmt) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (!values || !values.length) {
+        el.innerHTML = '<span class="text-muted small">No samples for this range yet</span>';
+        return;
+    }
+    el.innerHTML = values.map((v, i) =>
+        '<span class="stat-chip"><span class="stat-chip-val">' + escapeHtml(fmt(v)) + '</span>' +
+        '<span class="stat-chip-dot" style="background:' + STATS_GPU_COLORS[i % STATS_GPU_COLORS.length] + '"></span>' +
+        '<small>' + i + '</small></span>'
+    ).join('');
+}
+
+function statsRenderTotals() {
+    const data = statsState.data;
+    const samples = data.samples || [];
+    let kwh = 0;
+    for (let i = 1; i < samples.length; i++) {
+        const dt = samples[i][0] - samples[i - 1][0];
+        // 60s sampler; bridge gaps up to 10 min (missed cycles / service restart)
+        if (dt > 0 && dt <= 600) kwh += ((samples[i - 1][5] || 0) * dt) / 3600000;
+    }
+    const rate = Number(data.rate || 0);
+    document.getElementById('statsKwhValue').innerHTML = kwh.toFixed(2) + '<small>kWh</small>';
+    document.getElementById('statsRateValue').textContent = String(rate);
+    document.getElementById('statsCostValue').textContent = (kwh * rate).toFixed(2);
+    const last = samples.length ? samples[samples.length - 1] : null;
+    document.getElementById('statsPowerTotalValue').innerHTML = last
+        ? ((last[5] || 0) / 1000).toFixed(3) + '<small>kW</small>'
+        : '&mdash;';
+    document.getElementById('statsHashTotalValue').innerHTML = last
+        ? escapeHtml(fmtHashRate(last[6] || 0, true))
+        : '&mdash;';
+}
+
+function statsActivityBuckets() {
+    const data = statsState.data;
+    const startTs = statsDateToTs(data.start);
+    const bucketMs = data.days === 3 ? 4 * 3600 * 1000 : 3600 * 1000;
+    const nBuckets = Math.ceil((data.days * 86400 * 1000) / bucketMs);
+    return { startTs, bucketMs, nBuckets };
+}
+
+function statsRenderActivity() {
+    const data = statsState.data;
+    if (statsState.charts.activity) { statsState.charts.activity.destroy(); statsState.charts.activity = null; }
+    const canvas = document.getElementById('statsActivityChart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    const { startTs, bucketMs, nBuckets } = statsActivityBuckets();
+    const counts = {};
+    Object.keys(STATS_EVENT_COLORS).forEach(lv => { counts[lv] = new Array(nBuckets).fill(0); });
+    (data.events || []).forEach(e => {
+        const idx = Math.floor((e.ts * 1000 - startTs) / bucketMs);
+        if (idx >= 0 && idx < nBuckets && counts[e.level]) counts[e.level][idx]++;
+    });
+    const levels = statsState.filter === 'all' ? Object.keys(STATS_EVENT_COLORS) : [statsState.filter];
+    const labels = Array.from({ length: nBuckets }, (_, i) => statsTimeLabel((startTs + i * bucketMs) / 1000, data.days));
+    const datasets = levels.map(lv => ({
+        label: lv,
+        data: counts[lv],
+        backgroundColor: STATS_EVENT_COLORS[lv],
+        stack: 'events', barPercentage: 0.6, categoryPercentage: 0.9, borderWidth: 0
+    }));
+    const options = {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    title: (items) => statsFullLabel((startTs + items[0].dataIndex * bucketMs) / 1000),
+                    label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y
+                }
+            }
+        },
+        scales: {
+            x: {
+                stacked: true,
+                ticks: { color: 'rgba(198,204,210,0.55)', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+                grid: { display: false },
+                border: { color: 'rgba(198,204,210,0.18)' }
+            },
+            y: {
+                stacked: true, beginAtZero: true,
+                ticks: { color: 'rgba(198,204,210,0.55)', font: { size: 10 }, precision: 0 },
+                grid: { color: 'rgba(198,204,210,0.07)' },
+                border: { display: false }
+            }
+        }
+    };
+    statsState.charts.activity = new Chart(canvas.getContext('2d'), { type: 'bar', data: { labels: labels, datasets: datasets }, options: options });
+}
+
+function setActivityFilter(filter) {
+    statsState.filter = filter || 'all';
+    document.querySelectorAll('#statsActivityFilters .stats-filter-link').forEach(a => {
+        a.classList.toggle('active', a.dataset.filter === statsState.filter);
+    });
+    if (statsState.data) statsRenderActivity();
+}
+
+function statsRenderEventList(container, events) {
+    if (!events.length) {
+        container.innerHTML = '<div class="text-muted small">No events in this range</div>';
+        return;
+    }
+    container.innerHTML = events.slice().reverse().map(e =>
+        '<div class="stats-event-row">' +
+        '<span class="stats-legend-dot" style="background:' + (STATS_EVENT_COLORS[e.level] || '#c6ccd2') + '"></span>' +
+        '<span class="stats-event-time">' + escapeHtml(statsFullLabel(e.ts)) + '</span>' +
+        '<span class="stats-event-msg">' + escapeHtml(e.message) + '</span></div>'
+    ).join('');
+}
+
+function openStatsDetail(key) {
+    const data = statsState.data;
+    if (!data || typeof Chart === 'undefined') return;
+    const algo = data.algo || 'Hashrate';
+    const titles = { activity: 'Activity', temp: 'TEMP', fan: 'FAN', power: 'POWER', hashrate: algo, powertotal: 'Power', hashtotal: algo + ' (total)' };
+    document.getElementById('statsDetailTitle').textContent = titles[key] || 'Detail view';
+    const eventsBox = document.getElementById('statsDetailEvents');
+    const isActivity = key === 'activity';
+    eventsBox.classList.toggle('d-none', !isActivity);
+    if (isActivity) {
+        statsRenderEventList(eventsBox, (data.events || []).filter(e => statsState.filter === 'all' || e.level === statsState.filter));
+    }
+    if (statsState.detailChart) { statsState.detailChart.destroy(); statsState.detailChart = null; }
+
+    const samples = statsDownsample(data.samples || [], 1200);
+    statsState._labelTs = samples.map(s => s[0]);
+    const labels = samples.map(s => statsTimeLabel(s[0], data.days));
+    let datasets, options;
+    if (isActivity) {
+        const { startTs, bucketMs, nBuckets } = statsActivityBuckets();
+        const counts = {};
+        Object.keys(STATS_EVENT_COLORS).forEach(lv => { counts[lv] = new Array(nBuckets).fill(0); });
+        (data.events || []).forEach(e => {
+            const idx = Math.floor((e.ts * 1000 - startTs) / bucketMs);
+            if (idx >= 0 && idx < nBuckets && counts[e.level]) counts[e.level][idx]++;
+        });
+        const levels = statsState.filter === 'all' ? Object.keys(STATS_EVENT_COLORS) : [statsState.filter];
+        const alabels = Array.from({ length: nBuckets }, (_, i) => statsTimeLabel((startTs + i * bucketMs) / 1000, data.days));
+        datasets = levels.map(lv => ({
+            label: lv, data: counts[lv], backgroundColor: STATS_EVENT_COLORS[lv],
+            stack: 'events', barPercentage: 0.6, categoryPercentage: 0.9, borderWidth: 0
+        }));
+        options = {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y } } },
+            scales: {
+                x: { stacked: true, ticks: { color: 'rgba(198,204,210,0.6)', font: { size: 11 }, autoSkip: true, maxTicksLimit: 12 }, grid: { display: false } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: 'rgba(198,204,210,0.6)', precision: 0 }, grid: { color: 'rgba(198,204,210,0.07)' } }
+            }
+        };
+        statsState.detailChart = new Chart(document.getElementById('statsDetailChart'), { type: 'bar', data: { labels: alabels, datasets: datasets }, options: options });
+    } else {
+        const cfg = {
+            temp: () => [statsSeriesDatasets(samples, 1), statsBaseOptions(v => v + '\u00B0C', false, v => v + '\u00B0'), 'line'],
+            fan: () => [statsSeriesDatasets(samples, 2), statsBaseOptions(v => v + '%', true, v => v + '%'), 'line'],
+            power: () => [statsSeriesDatasets(samples, 3), statsBaseOptions(v => v + 'W', true, v => v + 'W'), 'line'],
+            hashrate: () => [statsSeriesDatasets(samples, 4), statsBaseOptions(v => fmtHashRate(v, false), false, v => fmtHashRate(v, false)), 'line'],
+            powertotal: () => [statsSingleDataset(samples, 5, '#2392dc', 'Power'), statsBaseOptions(v => v + 'W', true, v => v + 'W'), 'line'],
+            hashtotal: () => [statsSingleDataset(samples, 6, '#00b091', algo), statsBaseOptions(v => fmtHashRate(v, false), false, v => fmtHashRate(v, false)), 'line']
+        };
+        if (!cfg[key]) return;
+        const built = cfg[key]();
+        datasets = built[0]; options = built[1];
+        statsState.detailChart = new Chart(document.getElementById('statsDetailChart'), { type: built[2], data: { labels: labels, datasets: datasets }, options: options });
+    }
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('statsDetailModal')).show();
+}
+
+async function exportMetricsCsv() {
+    try {
+        const res = await apiFetch('/api/metrics/export?date=' + statsState.date + '&days=' + statsState.days);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'metrics_' + statsState.date + '_' + statsState.days + 'd.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } catch (e) {
+        showToast('CSV export failed.', false);
+    }
+}
+
+function openRateEdit() {
+    document.getElementById('statsRateInput').value = statsState.data ? Number(statsState.data.rate || 0) : '';
+    document.getElementById('statsRateEditBlock').classList.remove('d-none');
+    document.getElementById('statsRateInput').focus();
+}
+
+async function saveMetricsRate() {
+    const input = document.getElementById('statsRateInput');
+    const v = parseFloat(input.value);
+    if (!Number.isFinite(v) || v < 0) {
+        showToast('Rate must be a non-negative number.', false);
+        return;
+    }
+    const btn = document.getElementById('statsRateSaveBtn');
+    btn.disabled = true;
+    try {
+        const res = await apiFetch('/api/metrics/rate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ rate: v })
+        });
+        const data = await res.json().catch(() => ({}));
+        showToast(data.message || (data.success ? 'Rate saved.' : 'Failed to save rate.'), !!data.success);
+        if (data.success) {
+            document.getElementById('statsRateEditBlock').classList.add('d-none');
+            if (statsState.data) statsState.data.rate = data.rate;
+            statsRenderTotals();
+        }
+    } catch (e) {
+        showToast('Network error saving rate.', false);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function setStatsPeriod(days) {
+    statsState.days = days;
+    statsState.date = statsAddDaysStr(statsTodayStr(), -(days - 1));
+    loadMetricsTab();
+}
+
+function statsShiftDate(delta) {
+    statsState.date = statsAddDaysStr(statsState.date, delta * statsState.days);
+    loadMetricsTab();
+}
+
+function initStatsTab() {
+    document.getElementById('statsPrevBtn').addEventListener('click', () => statsShiftDate(-1));
+    document.getElementById('statsNextBtn').addEventListener('click', () => statsShiftDate(1));
+    document.getElementById('stats1dBtn').addEventListener('click', () => setStatsPeriod(1));
+    document.getElementById('stats3dBtn').addEventListener('click', () => setStatsPeriod(3));
+    document.getElementById('statsRefreshBtn').addEventListener('click', () => loadMetricsTab());
+    document.getElementById('statsExportBtn').addEventListener('click', exportMetricsCsv);
+    document.getElementById('statsRateEditBtn').addEventListener('click', openRateEdit);
+    document.getElementById('statsRateSaveBtn').addEventListener('click', saveMetricsRate);
+    document.getElementById('statsRateCancelBtn').addEventListener('click', () => {
+        document.getElementById('statsRateEditBlock').classList.add('d-none');
+    });
+    document.querySelectorAll('#statsActivityFilters .stats-filter-link').forEach(a => {
+        a.addEventListener('click', (ev) => { ev.preventDefault(); setActivityFilter(a.dataset.filter); });
+    });
+    document.querySelectorAll('#statsTabContainer .stats-detail-btn').forEach(b => {
+        b.addEventListener('click', () => openStatsDetail(b.dataset.detail));
+    });
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initStatsTab);
+} else {
+    initStatsTab();
 }

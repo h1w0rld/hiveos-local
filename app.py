@@ -705,6 +705,123 @@ def collect_stats_payload():
         "csrf_token": session.get('csrf_token', '') if has_request_context() else ''
     }
 
+# ---------------- Metrics history (worker Stats tab) ----------------
+# Samples the live stats once a minute into /hive-config/metrics_history.json
+# (per-day samples + Activity events + electricity rate) so the dashboard can
+# draw the HiveOS-style Statistics charts (1d/3d).
+
+METRICS_PATH = os.path.join(HIVE_CONFIG_DIR, "metrics_history.json")
+METRICS_SAMPLE_INTERVAL = 60      # seconds between samples
+METRICS_MAX_DAYS = 4              # keep the 3d view + one buffer day
+METRICS_MAX_EVENTS = 600
+_METRICS_EVENT_LEVELS = ("info", "file", "danger", "warning", "success")
+_metrics_last_miner_running = {"value": None}
+
+def _metrics_day_key(ts):
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+def _load_metrics_store():
+    try:
+        if os.path.exists(METRICS_PATH):
+            with open(METRICS_PATH, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data.setdefault("days", {})
+                data.setdefault("events", [])
+                data.setdefault("rate", 0.0)
+                data.setdefault("meta", {})
+                return data
+    except Exception as e:
+        logging.error(f"Failed to read metrics history: {e}")
+    return {"days": {}, "events": [], "rate": 0.0, "meta": {}}
+
+def _save_metrics_store(store):
+    try:
+        tmp_path = METRICS_PATH + ".tmp"
+        with config_lock:
+            with open(tmp_path, 'w') as f:
+                json.dump(store, f, separators=(",", ":"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, METRICS_PATH)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save metrics history: {e}")
+        return False
+
+def record_metrics_event(level, message, ts=None):
+    """Append an event to the Activity feed of the worker Statistics tab."""
+    try:
+        if level not in _METRICS_EVENT_LEVELS:
+            level = "info"
+        store = _load_metrics_store()
+        events = store.get("events", [])
+        events.append({"ts": int(ts if ts is not None else time.time()),
+                       "level": level, "message": str(message)[:300]})
+        cutoff = time.time() - METRICS_MAX_DAYS * 86400
+        store["events"] = [e for e in events if isinstance(e, dict) and e.get("ts", 0) >= cutoff][-METRICS_MAX_EVENTS:]
+        _save_metrics_store(store)
+    except Exception as e:
+        logging.error(f"Failed to record metrics event: {e}")
+
+def _metrics_take_sample():
+    """Collect one stats sample into the history store; miner start/stop
+    transitions emit Activity events. Returns True when a sample was stored."""
+    try:
+        payload = collect_stats_payload()
+    except Exception as e:
+        logging.error(f"Metrics sampler: failed to collect stats: {e}")
+        return False
+    gpus = payload.get("gpus") or []
+    if not gpus:
+        return False
+    ts = int(time.time())
+    temps = [int(g.get("temp", 0) or 0) for g in gpus]
+    fans = [int(g.get("fan", 0) or 0) for g in gpus]
+    powers = [round(float(g.get("power", 0) or 0), 1) for g in gpus]
+    hashrates = [round(float(g.get("hashrate", 0) or 0), 2) for g in gpus]
+    total_w = round(sum(powers), 1)
+    total_mh = round(float(payload.get("total_hashrate_mh", 0) or 0), 2)
+    sample = [ts, temps, fans, powers, hashrates, total_w, total_mh]
+
+    store = _load_metrics_store()
+    days = store.setdefault("days", {})
+    day = days.setdefault(_metrics_day_key(ts), {"samples": []})
+    samples = day.setdefault("samples", [])
+    if not samples or samples[-1][0] < ts - METRICS_SAMPLE_INTERVAL - 5:
+        samples.append(sample)
+    store["meta"] = {"algo": str(payload.get("miner_algo") or ""), "gpu_count": len(gpus)}
+    cutoff_key = _metrics_day_key(ts - METRICS_MAX_DAYS * 86400)
+    for k in [k for k in list(days.keys()) if k < cutoff_key]:
+        del days[k]
+    cutoff = ts - METRICS_MAX_DAYS * 86400
+    store["events"] = [e for e in store.get("events", []) if isinstance(e, dict) and e.get("ts", 0) >= cutoff]
+    _save_metrics_store(store)
+
+    # Miner state transitions -> Activity events (skip the very first check)
+    running = bool((payload.get("system") or {}).get("miner_running"))
+    prev = _metrics_last_miner_running["value"]
+    if prev is not None and prev != running:
+        record_metrics_event("success" if running else "warning",
+                             "Miner started" if running else "Miner stopped", ts=ts)
+    _metrics_last_miner_running["value"] = running
+    return True
+
+def _metrics_sampler_worker():
+    time.sleep(10)
+    while True:
+        try:
+            _metrics_take_sample()
+        except Exception as e:
+            logging.error(f"Metrics sampler error: {e}")
+        time.sleep(METRICS_SAMPLE_INTERVAL)
+
+def start_metrics_sampler():
+    t = threading.Thread(target=_metrics_sampler_worker, daemon=True, name="metrics-sampler")
+    t.start()
+    logging.info("Metrics sampler started")
+
 _cluster_sync_lock = threading.Lock()
 _cluster_last_sync = {"ts": 0, "ok": True, "message": "Not synced yet"}
 
@@ -2028,6 +2145,7 @@ def save_overclock():
             return jsonify({"success": False, "message": message})
         if not message:
             message = f"Overclock parameters successfully saved and applied to NVIDIA {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"
+        record_metrics_event("info", f"Overclock applied: NVIDIA {'all GPUs' if apply_all else f'GPU {gpu_index}'}")
         return jsonify({"success": True, "message": message})
 
     # brand == "AMD" (validated above)
@@ -2056,6 +2174,7 @@ def save_overclock():
         logging.error(f"AMD OC script failed: {stderr}")
         return jsonify({"success": False, "message": "AMD overclock script failed to apply settings."})
 
+    record_metrics_event("info", f"Overclock applied: AMD {'all GPUs' if apply_all else f'GPU {gpu_index}'}")
     return jsonify({"success": True, "message": f"Overclock parameters successfully saved and applied to AMD {'all GPUs' if apply_all else f'GPU {gpu_index}'}!"})
 
 @app.route('/api/revert', methods=['POST'])
@@ -2139,6 +2258,8 @@ def miner_control():
     if code == 0:
         msg = f"Miner successfully {action}ed!"
         logging.info(msg)
+        record_metrics_event("success", {"start": "Miner started", "stop": "Miner stopped",
+                                         "restart": "Miner restarted"}.get(action, f"Miner {action}ed"))
         return jsonify({"success": True, "message": msg})
     else:
         logging.error(f"Miner control command failed: {output}")
@@ -2149,6 +2270,7 @@ def miner_control():
 @app.route('/api/system/reboot', methods=['POST'])
 def system_reboot():
     logging.info(f"System reboot requested by IP: {request.remote_addr}")
+    record_metrics_event("warning", "Reboot initiated from panel")
     cmd = 'nohup bash -c "sleep 1.5 && sudo /hive/sbin/sreboot" > /dev/null 2>&1 &'
     subprocess.Popen(cmd, shell=True)
     return jsonify({"success": True, "message": "Reboot command initiated. Rig will restart shortly."})
@@ -2156,6 +2278,7 @@ def system_reboot():
 @app.route('/api/system/shutdown', methods=['POST'])
 def system_shutdown():
     logging.info(f"System shutdown requested by IP: {request.remote_addr}")
+    record_metrics_event("danger", "Shutdown initiated from panel")
     cmd = 'nohup bash -c "sleep 1.5 && sudo /hive/sbin/sreboot shutdown" > /dev/null 2>&1 &'
     subprocess.Popen(cmd, shell=True)
     return jsonify({"success": True, "message": "Shutdown command initiated. Rig will power down shortly."})
@@ -3614,6 +3737,7 @@ def apply_fsheet():
         oc_msg = _auto_switch_oc_for_algo(item.get("algo", ""))
         if oc_msg:
             msg = msg + oc_msg
+        record_metrics_event("info", f"Flight sheet applied: {fsheet.get('name', '') or fid}")
     return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
 
 @app.route('/api/flightsheet', methods=['GET', 'POST'])
@@ -3976,6 +4100,98 @@ def pull_update():
 @app.route('/api/stats')
 def api_stats():
     return jsonify(collect_stats_payload())
+
+# ---------------- Metrics history API (worker Statistics tab) ----------------
+
+def _metrics_parse_range(date_str, days_str):
+    """Local-time [start, end) epoch bounds for the selected day(s); days is 1 or 3."""
+    days = 3 if str(days_str) == "3" else 1
+    try:
+        st = time.strptime(str(date_str), "%Y-%m-%d")
+    except (ValueError, TypeError):
+        st = time.localtime()
+    start = time.mktime((st.tm_year, st.tm_mon, st.tm_mday, 0, 0, 0, 0, 0, -1))
+    return start, start + days * 86400, days
+
+@app.route('/api/metrics/history')
+def api_metrics_history():
+    start, end, days = _metrics_parse_range(request.args.get("date"), request.args.get("days", 1))
+    store = _load_metrics_store()
+    day_keys = sorted(store.get("days", {}).keys())
+    first_key = time.strftime("%Y-%m-%d", time.localtime(start))
+    last_key = time.strftime("%Y-%m-%d", time.localtime(end - 1))
+    samples = []
+    for key in day_keys:
+        if key < first_key or key > last_key:
+            continue
+        for s in store["days"][key].get("samples", []):
+            if start <= s[0] < end:
+                samples.append(s)
+    events = [e for e in store.get("events", []) if start <= e.get("ts", 0) < end]
+    meta = store.get("meta", {}) if isinstance(store.get("meta", {}), dict) else {}
+    return jsonify({
+        "success": True,
+        "start": first_key,
+        "days": days,
+        "rate": float(store.get("rate", 0.0) or 0.0),
+        "algo": str(meta.get("algo", "") or ""),
+        "gpu_count": int(meta.get("gpu_count", 0) or 0),
+        "samples": samples,
+        "events": events
+    })
+
+@app.route('/api/metrics/rate', methods=['POST'])
+def api_metrics_rate():
+    data = request.get_json(silent=True) or {}
+    try:
+        rate = round(float(data.get("rate", 0)), 2)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Rate must be a number."}), 400
+    if not (0 <= rate <= 10000):
+        return jsonify({"success": False, "message": "Rate out of range (0-10000)."}), 400
+    store = _load_metrics_store()
+    old = float(store.get("rate", 0.0) or 0.0)
+    store["rate"] = rate
+    _save_metrics_store(store)
+    if old != rate:
+        record_metrics_event("info", f"Electricity rate set to {rate:g} RUB/kWh")
+    return jsonify({"success": True, "rate": rate, "message": f"Rate saved: {rate:g} RUB/kWh"})
+
+@app.route('/api/metrics/export')
+def api_metrics_export():
+    start, end, days = _metrics_parse_range(request.args.get("date"), request.args.get("days", 1))
+    date_str = time.strftime("%Y-%m-%d", time.localtime(start))
+    store = _load_metrics_store()
+    day_keys = sorted(store.get("days", {}).keys())
+    first_key = time.strftime("%Y-%m-%d", time.localtime(start))
+    last_key = time.strftime("%Y-%m-%d", time.localtime(end - 1))
+    rows = []
+    gpu_count = 0
+    for key in day_keys:
+        if key < first_key or key > last_key:
+            continue
+        for s in store["days"][key].get("samples", []):
+            if not (start <= s[0] < end):
+                continue
+            ts, temps, fans, powers, hashrates, total_w, total_mh = (list(s) + [0] * 7)[:7]
+            gpu_count = max(gpu_count, len(temps))
+            rows.append([ts, temps, fans, powers, hashrates, total_w, total_mh])
+
+    lines = []
+    header = ["time"]
+    for label, count in (("temp", gpu_count), ("fan", gpu_count), ("power_w", gpu_count), ("hashrate_mh", gpu_count)):
+        header.extend([f"{label}_{i}" for i in range(count)])
+    header.extend(["total_power_w", "total_hashrate_mh"])
+    lines.append(",".join(header))
+    for ts, temps, fans, powers, hashrates, total_w, total_mh in rows:
+        vals = [time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))]
+        for series in (temps, fans, powers, hashrates):
+            vals.extend(str(v) for v in series)
+        vals.extend([str(total_w), str(total_mh)])
+        lines.append(",".join(vals))
+    csv_data = "\n".join(lines) + "\n"
+    return Response(csv_data, mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename=metrics_{date_str}_{days}d.csv"})
 
 # ---------------- Cluster API (UI + peer exchange) ----------------
 
@@ -4643,7 +4859,10 @@ if __name__ == '__main__':
 
     # Start the background cluster synchronization worker
     start_cluster_worker()
-    
+
+    # Start the metrics history sampler (worker Statistics tab)
+    start_metrics_sampler()
+
     local_ip = get_local_ip()
     port = 1337
     

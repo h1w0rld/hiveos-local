@@ -480,6 +480,9 @@
                     <button id="dashTabServicesBtn" type="button" class="btn btn-outline-primary">
                         <i class="bi bi-shield-fill-check me-1"></i> Services
                     </button>
+                    <button id="dashTabStatsBtn" type="button" class="btn btn-outline-primary">
+                        <i class="bi bi-graph-up me-1"></i> Stats
+                    </button>
                 </div>
                 <div class="d-flex align-items-center gap-2" id="gpusTabControls">
                     <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
@@ -1144,8 +1147,200 @@
                                             </div>
                                         </td>
                                     </tr>
-                                </tbody>
-                            </table>
+                                 </tbody>
+                             </table>
+                         </div>
+                     </div>
+                 </div>
+            </div>
+
+            <!-- Statistics tab content (HiveOS worker Stats parity) -->
+            <div id="statsTabContainer" class="d-none">
+                <!-- Date navigation + period + export -->
+                <div class="card glass-card mb-3">
+                    <div class="card-body py-2">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <button id="statsPrevBtn" type="button" class="btn btn-sm btn-outline-secondary stats-nav-btn" title="Previous period">Previous</button>
+                                <span id="statsDateLabel" class="stats-date-label" title="Selected date"></span>
+                                <button id="statsNextBtn" type="button" class="btn btn-sm btn-outline-secondary stats-nav-btn" title="Next period" disabled>Next</button>
+                                <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Period">
+                                    <button id="stats1dBtn" type="button" class="btn btn-outline-primary stats-period-btn active">1d</button>
+                                    <button id="stats3dBtn" type="button" class="btn btn-outline-primary stats-period-btn">3d</button>
+                                </div>
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                <button id="statsExportBtn" type="button" class="btn btn-sm btn-outline-secondary stats-export-btn" title="Download the selected range as CSV">
+                                    <i class="bi bi-download me-1"></i> Export to CSV
+                                </button>
+                                <div class="btn-group" role="group">
+                                    <button id="statsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload statistics history">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                        <span class="visually-hidden">Auto-refresh interval</span>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="metrics"></ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Activity (events) -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <h2 class="h6 fw-bold mb-0 stats-card-title">Activity</h2>
+                            <div class="stats-legend">
+                                <span class="stats-legend-item"><span class="stats-legend-dot" style="background:#2392dc"></span><small>info</small></span>
+                                <span class="stats-legend-item"><span class="stats-legend-dot" style="background:#c6ccd2"></span><small>file</small></span>
+                                <span class="stats-legend-item"><span class="stats-legend-dot" style="background:#ff3733"></span><small>danger</small></span>
+                                <span class="stats-legend-item"><span class="stats-legend-dot" style="background:#ffae00"></span><small>warning</small></span>
+                                <span class="stats-legend-item"><span class="stats-legend-dot" style="background:#84bf40"></span><small>success</small></span>
+                            </div>
+                        </div>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <div class="stats-filters" id="statsActivityFilters">
+                                <a href="#" data-filter="all" class="stats-filter-link active">all</a>
+                                <a href="#" data-filter="info" class="stats-filter-link">info</a>
+                                <a href="#" data-filter="file" class="stats-filter-link">file</a>
+                                <a href="#" data-filter="danger" class="stats-filter-link">danger</a>
+                                <a href="#" data-filter="warning" class="stats-filter-link">warning</a>
+                                <a href="#" data-filter="success" class="stats-filter-link">success</a>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="activity">
+                                <i class="bi bi-arrows-fullscreen me-1"></i>Detail view
+                            </button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsActivityChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- TEMP -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title">TEMP</div>
+                                <div class="stats-chips" id="statsTempChips"></div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="temp"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsTempChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- FAN -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title">FAN</div>
+                                <div class="stats-chips" id="statsFanChips"></div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="fan"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsFanChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- POWER (per GPU) -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title">POWER</div>
+                                <div class="stats-chips" id="statsPowerChips"></div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="power"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsPowerChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Hashrate (per GPU) -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title stats-title-algo" id="statsHashTitle">Hashrate</div>
+                                <div class="stats-chips" id="statsHashChips"></div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="hashrate"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsHashChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Total power -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title">Power</div>
+                                <div class="stats-total-value" id="statsPowerTotalValue">&mdash;</div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="powertotal"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsPowerTotalChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <div class="stats-date-separator"><span id="statsSeparatorDate"></span></div>
+
+                <!-- Total energy + cost -->
+                <div class="card glass-card mb-3">
+                    <div class="card-body py-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <h2 class="h6 fw-bold mb-0 stats-card-title">Total</h2>
+                            <div class="stats-total-row">
+                                <span class="stats-total-main" id="statsKwhValue">&mdash;<small>kWh</small></span>
+                                <span class="stats-total-secondary">&times;
+                                    <span id="statsRateValue">0</span><small>RUB/kWh</small> &asymp;
+                                    <span id="statsCostValue">0</span><small>RUB</small>
+                                </span>
+                                <button id="statsRateEditBtn" type="button" class="btn btn-sm btn-link text-secondary p-0 ms-1" title="Edit electricity rate (RUB/kWh)"><i class="bi bi-pencil-square"></i></button>
+                            </div>
+                        </div>
+                        <div class="d-none mt-2" id="statsRateEditBlock">
+                            <div class="d-flex align-items-center gap-2 justify-content-end">
+                                <label for="statsRateInput" class="small text-muted mb-0">Rate, RUB/kWh:</label>
+                                <input type="number" step="0.01" min="0" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="statsRateInput" style="max-width:120px">
+                                <button id="statsRateSaveBtn" type="button" class="btn btn-sm btn-outline-primary">Save</button>
+                                <button id="statsRateCancelBtn" type="button" class="btn btn-sm btn-outline-secondary">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Total hashrate -->
+                <div class="card glass-card stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-head">
+                            <div>
+                                <div class="stats-card-title stats-title-algo" id="statsHashTotalTitle">Hashrate</div>
+                                <div class="stats-total-value" id="statsHashTotalValue">&mdash;</div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mb-1">
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="hashtotal"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsHashTotalChart" height="140"></canvas></div>
+                        <div class="stats-minmax-row" id="statsHashSummary">
+                            <span class="stats-minmax-pill">Min - <span id="statsHashMin">0</span></span>
+                            <span class="stats-minmax-pill">Mean - <span id="statsHashMean">0</span></span>
+                            <span class="stats-minmax-pill">Max - <span id="statsHashMax">0</span></span>
                         </div>
                     </div>
                 </div>
@@ -1153,6 +1348,22 @@
         </section>
 
         </div><!-- /view-dashboard -->
+    </div>
+
+    <!-- Stats Detail View Modal (fullscreen chart) -->
+    <div class="modal fade" id="statsDetailModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-fullscreen">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold" id="statsDetailTitle">Detail view</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body d-flex flex-column">
+                    <div class="flex-grow-1 stats-detail-chart-wrap"><canvas id="statsDetailChart"></canvas></div>
+                    <div id="statsDetailEvents" class="stats-detail-events d-none"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Miner Log Modal -->
@@ -1861,6 +2072,8 @@
 
     <!-- Bootstrap 5 JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Chart.js (worker Statistics tab) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <!-- Custom Application Logic -->
     <script src="/static/js/app.js?v={{ app_version }}"></script>
 </body>
