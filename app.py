@@ -1206,12 +1206,38 @@ def run_nvidia_oc():
     with nvidia_oc_lock:
         return run_command("sudo /hive/sbin/nvidia-oc")
 
+def _nvtool_lock_confirmed(gpu_index, expected):
+    """True when the driver's locked-clock registration equals `expected`.
+
+    nvtool --setclocks is idempotent: re-setting the value that is already
+    locked reports 'was already set'. First call says 'already set' ->
+    registered. First call claims to apply (lock was missing) -> one
+    re-assert must confirm it stuck; a silently failed change prints
+    'SET ... MHz' twice and never 'already set'. Live clocks.sm cannot
+    serve as the only confirmation: at idle the mobile driver floats clocks
+    below (or above) the locked range when no load is present, which read
+    as false 'not confirmed' after a fresh boot (RIG9: applied 1350 while
+    the miner was stopped, all 8 GPUs reported 1110-1275; under load the
+    same lock reads exactly 1350)."""
+    for _ in range(2):
+        stdout, _, code = run_command(
+            f"sudo timeout 10 nvtool -q --nodev -i {gpu_index} --setclocks {int(expected)}")
+        if code != 0:
+            return False
+        if "was already set" in stdout:
+            return True
+        # claimed to apply (was missing) — re-assert once to prove it stuck;
+        # a silently failed change prints 'SET ... MHz' again, never 'already set'
+    return False
+
 def verify_locked_clocks(expected):
     """Check actual SM clocks against {gpu_index: locked_mhz}. Returns a dict of
     {gpu_index: (expected, actual)} mismatches. Empty dict on verification failure
     (no nvidia-smi output) so callers can skip gracefully. Ampere snaps locked
     clocks to a ~15 MHz grid (lock 1300 reads back 1305), so a small tolerance
-    counts as confirmed."""
+    counts as confirmed; anything outside the tolerance is double-checked
+    against the driver's lock registration (nvtool idempotence) before it
+    counts as a real mismatch — idle GPUs legitimately float off the lock."""
     stdout, _, _ = run_command("nvidia-smi --query-gpu=index,clocks.sm --format=csv,noheader,nounits")
     actual = {}
     for line in stdout.strip().splitlines():
@@ -1220,8 +1246,15 @@ def verify_locked_clocks(expected):
             actual[int(parts[0])] = safe_int(parts[1])
     if not actual:
         return {}
-    return {i: (v, actual.get(i)) for i, v in expected.items()
-            if actual.get(i) is None or abs(actual.get(i) - v) > 32}
+    mismatch = {}
+    for i, v in expected.items():
+        act = actual.get(i)
+        if act is not None and abs(act - v) <= 32:
+            continue
+        if _nvtool_lock_confirmed(i, v):
+            continue
+        mismatch[i] = (v, act)
+    return mismatch
 
 # Safe numeric parsers for nvidia-smi output ([N/A] or empty values are treated as 0)
 def safe_int(value, default=0):
