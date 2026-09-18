@@ -1149,6 +1149,9 @@ function showLoginOverlay() {
     const overlay = document.getElementById('loginOverlay');
     if (!overlay) return;
     overlay.classList.remove('d-none');
+    // inline display (rendered 'none' for authenticated sessions) must be
+    // overridden explicitly — classes alone lose to the inline style
+    overlay.style.display = 'flex';
     const pwd = document.getElementById('loginPassword');
     if (pwd) pwd.value = '';
     const err = document.getElementById('loginError');

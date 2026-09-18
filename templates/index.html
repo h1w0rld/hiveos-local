@@ -19,6 +19,31 @@
     <link rel="stylesheet" href="/static/css/style.css?v={{ app_version }}">
 </head>
 <body>
+    <!-- Login Overlay: first element in <body> so it paints before any app content
+         (progressive rendering used to flash the dashboard before the form appeared).
+         Display is inlined (not via Bootstrap classes) so it is correct even before
+         the CDN CSS arrives; JS keeps managing it for mid-session auth loss. -->
+    <div id="loginOverlay" class="align-items-center justify-content-center {% if not authenticated %}d-flex{% else %}d-none d-flex{% endif %}" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: {{ 'none' if authenticated else 'flex' }}; background: rgba(11, 15, 25, 0.96); z-index: 2000; backdrop-filter: blur(15px);">
+        <div class="card glass-card p-4 shadow-lg border border-secondary-subtle" style="max-width: 400px; width: 90%;">
+            <div class="card-body text-center">
+                <div class="mb-3">
+                    <i class="bi bi-shield-lock-fill fs-1 text-primary-gradient"></i>
+                </div>
+                <h3 class="fw-bold mb-2">Access Password Required</h3>
+                <p class="text-muted small mb-4">This dashboard is password protected. Enter the access key displayed on the server terminal during installation.</p>
+                <form id="loginForm">
+                    <div class="mb-3">
+                        <input type="password" class="form-control form-control-lg text-center bg-dark-input fw-bold font-monospace" id="loginPassword" placeholder="Enter password" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 py-2 fw-semibold mb-2">Authorize Session</button>
+                    <div id="loginError" class="text-danger small mt-2 d-none">
+                        <i class="bi bi-x-circle-fill"></i> Invalid Access PIN. Try again.
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- Theme Toggle -->
     <button id="themeToggleBtn" class="btn btn-theme-toggle shadow-lg" aria-label="Toggle Light/Dark Mode">
         <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
@@ -1747,29 +1772,6 @@
                     <span id="toastMessage"></span>
                 </div>
                 <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Login Overlay: visible from the first paint unless the session is already
-         authenticated (JS keeps managing it for mid-session auth loss) -->
-    <div id="loginOverlay" class="position-fixed top-0 start-0 w-100 h-100 {% if not authenticated %}d-flex{% else %}d-none d-flex{% endif %} align-items-center justify-content-center" style="background: rgba(11, 15, 25, 0.96); z-index: 2000; backdrop-filter: blur(15px);">
-        <div class="card glass-card p-4 shadow-lg border border-secondary-subtle" style="max-width: 400px; width: 90%;">
-            <div class="card-body text-center">
-                <div class="mb-3">
-                    <i class="bi bi-shield-lock-fill fs-1 text-primary-gradient"></i>
-                </div>
-                <h3 class="fw-bold mb-2">Access Password Required</h3>
-                <p class="text-muted small mb-4">This dashboard is password protected. Enter the access key displayed on the server terminal during installation.</p>
-                <form id="loginForm">
-                    <div class="mb-3">
-                        <input type="password" class="form-control form-control-lg text-center bg-dark-input fw-bold font-monospace" id="loginPassword" placeholder="Enter password" autocomplete="current-password" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100 py-2 fw-semibold mb-2">Authorize Session</button>
-                    <div id="loginError" class="text-danger small mt-2 d-none">
-                        <i class="bi bi-x-circle-fill"></i> Invalid Access PIN. Try again.
-                    </div>
-                </form>
             </div>
         </div>
     </div>

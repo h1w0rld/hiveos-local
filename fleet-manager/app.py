@@ -393,9 +393,15 @@ def proxy_log_action(rig_id):
 
 @app.route('/')
 def dashboard():
-    # Server-side auth decision: no flash of the app before the login form
+    # Server-side auth decision: no flash of the app before the login form.
+    # static_ver busts the browser cache of static assets after deploys.
+    try:
+        static_ver = str(int(os.path.getmtime(os.path.join(app.static_folder, 'js', 'app.js'))))
+    except OSError:
+        static_ver = "1"
     return render_template('index.html',
-                           authenticated=bool(session.get('authenticated')))
+                           authenticated=bool(session.get('authenticated')),
+                           static_ver=static_ver)
 
 if __name__ == '__main__':
     port = 8080

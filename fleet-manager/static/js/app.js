@@ -52,8 +52,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(url, options);
             if (res.status === 401) {
-                document.getElementById('loginOverlay').classList.remove('d-none');
-                document.getElementById('loginOverlay').classList.add('d-flex');
+                const overlay = document.getElementById('loginOverlay');
+                overlay.classList.remove('d-none');
+                overlay.classList.add('d-flex');
+                // inline display (rendered 'none' for authenticated sessions) must be
+                // overridden explicitly — classes alone lose to the inline style
+                overlay.style.display = 'flex';
                 return null;
             }
             return res;
@@ -73,8 +77,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.csrf_token) {
                     csrfToken = data.csrf_token;
                 }
-                document.getElementById('loginOverlay').classList.add('d-none');
-                document.getElementById('loginOverlay').classList.remove('d-flex');
+                const overlay = document.getElementById('loginOverlay');
+                overlay.classList.add('d-none');
+                overlay.classList.remove('d-flex');
+                overlay.style.display = '';
                 fetchFleet();
             }
         } catch (e) {
@@ -493,8 +499,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
             if (res.ok && data.success) {
                 csrfToken = data.csrf_token;
-                document.getElementById('loginOverlay').classList.add('d-none');
-                document.getElementById('loginOverlay').classList.remove('d-flex');
+                const overlay = document.getElementById('loginOverlay');
+                overlay.classList.add('d-none');
+                overlay.classList.remove('d-flex');
+                overlay.style.display = '';
                 document.getElementById('loginPin').value = '';
                 fetchFleet();
             } else {
