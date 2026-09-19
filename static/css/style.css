@@ -1235,6 +1235,7 @@ hr {
     font-size: 0.85rem;
     letter-spacing: 0.04em;
     color: var(--text-primary);
+    margin-bottom: 0.3rem;
 }
 
 .stats-title-algo {
@@ -1296,16 +1297,18 @@ hr {
     font-size: 0.72rem;
     padding: 0.15rem 0.55rem;
     color: var(--text-muted);
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 
 .stats-detail-btn:hover {
     color: var(--text-primary);
 }
 
-.stats-card-head {
+.stats-chips-row {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    align-items: flex-start;
     gap: 1rem;
     margin-bottom: 0.4rem;
 }
@@ -1314,7 +1317,7 @@ hr {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem 0.9rem;
-    margin-top: 0.35rem;
+    min-width: 0;
 }
 
 .stat-chip {
@@ -1357,7 +1360,6 @@ hr {
     font-size: 1.15rem;
     font-weight: 700;
     color: var(--text-primary);
-    margin-top: 0.3rem;
 }
 
 .stats-total-value small,

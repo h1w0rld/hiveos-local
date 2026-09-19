@@ -1217,80 +1217,77 @@
                     </div>
                 </div>
 
-                <!-- TEMP -->
-                <div class="card glass-card mb-3 stats-metric-card">
-                    <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title">TEMP</div>
-                                <div class="stats-chips" id="statsTempChips"></div>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mb-1">
-                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="temp"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
-                        </div>
-                        <div class="stats-chart-box"><canvas id="statsTempChart" height="140"></canvas></div>
-                    </div>
-                </div>
-
-                <!-- FAN -->
-                <div class="card glass-card mb-3 stats-metric-card">
-                    <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title">FAN</div>
-                                <div class="stats-chips" id="statsFanChips"></div>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mb-1">
-                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="fan"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
-                        </div>
-                        <div class="stats-chart-box"><canvas id="statsFanChart" height="140"></canvas></div>
-                    </div>
-                </div>
-
-                <!-- POWER (per GPU) -->
-                <div class="card glass-card mb-3 stats-metric-card">
-                    <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title">POWER</div>
-                                <div class="stats-chips" id="statsPowerChips"></div>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mb-1">
-                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="power"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
-                        </div>
-                        <div class="stats-chart-box"><canvas id="statsPowerChart" height="140"></canvas></div>
-                    </div>
-                </div>
-
                 <!-- Hashrate (per GPU) -->
                 <div class="card glass-card mb-3 stats-metric-card">
                     <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title stats-title-algo" id="statsHashTitle">Hashrate</div>
-                                <div class="stats-chips" id="statsHashChips"></div>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mb-1">
+                        <div class="stats-card-title stats-title-algo" id="statsHashTitle">Hashrate</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-chips" id="statsHashChips"></div>
                             <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="hashrate"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
                         </div>
                         <div class="stats-chart-box"><canvas id="statsHashChart" height="140"></canvas></div>
                     </div>
                 </div>
 
-                <!-- Total power -->
+                <!-- Temp -->
                 <div class="card glass-card mb-3 stats-metric-card">
                     <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title">Power</div>
-                                <div class="stats-total-value" id="statsPowerTotalValue">&mdash;</div>
-                            </div>
+                        <div class="stats-card-title">Temp</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-chips" id="statsTempChips"></div>
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="temp"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
                         </div>
-                        <div class="d-flex justify-content-end mb-1">
+                        <div class="stats-chart-box"><canvas id="statsTempChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Fan -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-title">Fan</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-chips" id="statsFanChips"></div>
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="fan"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsFanChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Power (per GPU) -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-title">Power</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-chips" id="statsPowerChips"></div>
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="power"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsPowerChart" height="140"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Total hashrate -->
+                <div class="card glass-card mb-3 stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-title stats-title-algo" id="statsHashTotalTitle">Hashrate</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-total-value" id="statsHashTotalValue">&mdash;</div>
+                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="hashtotal"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
+                        </div>
+                        <div class="stats-chart-box"><canvas id="statsHashTotalChart" height="140"></canvas></div>
+                        <div class="stats-minmax-row" id="statsHashSummary">
+                            <span class="stats-minmax-pill">Min - <span id="statsHashMin">0</span></span>
+                            <span class="stats-minmax-pill">Mean - <span id="statsHashMean">0</span></span>
+                            <span class="stats-minmax-pill">Max - <span id="statsHashMax">0</span></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Total power -->
+                <div class="card glass-card stats-metric-card">
+                    <div class="card-body">
+                        <div class="stats-card-title">Power</div>
+                        <div class="stats-chips-row">
+                            <div class="stats-total-value" id="statsPowerTotalValue">&mdash;</div>
                             <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="powertotal"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
                         </div>
                         <div class="stats-chart-box"><canvas id="statsPowerTotalChart" height="140"></canvas></div>
@@ -1300,7 +1297,7 @@
                 <div class="stats-date-separator"><span id="statsSeparatorDate"></span></div>
 
                 <!-- Total energy + cost -->
-                <div class="card glass-card mb-3">
+                <div class="card glass-card">
                     <div class="card-body py-3">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
                             <h2 class="h6 fw-bold mb-0 stats-card-title">Total</h2>
@@ -1320,27 +1317,6 @@
                                 <button id="statsRateSaveBtn" type="button" class="btn btn-sm btn-outline-primary">Save</button>
                                 <button id="statsRateCancelBtn" type="button" class="btn btn-sm btn-outline-secondary">Cancel</button>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Total hashrate -->
-                <div class="card glass-card stats-metric-card">
-                    <div class="card-body">
-                        <div class="stats-card-head">
-                            <div>
-                                <div class="stats-card-title stats-title-algo" id="statsHashTotalTitle">Hashrate</div>
-                                <div class="stats-total-value" id="statsHashTotalValue">&mdash;</div>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mb-1">
-                            <button type="button" class="btn btn-sm btn-outline-secondary stats-detail-btn" data-detail="hashtotal"><i class="bi bi-arrows-fullscreen me-1"></i>Detail view</button>
-                        </div>
-                        <div class="stats-chart-box"><canvas id="statsHashTotalChart" height="140"></canvas></div>
-                        <div class="stats-minmax-row" id="statsHashSummary">
-                            <span class="stats-minmax-pill">Min - <span id="statsHashMin">0</span></span>
-                            <span class="stats-minmax-pill">Mean - <span id="statsHashMean">0</span></span>
-                            <span class="stats-minmax-pill">Max - <span id="statsHashMax">0</span></span>
                         </div>
                     </div>
                 </div>
