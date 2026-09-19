@@ -885,12 +885,13 @@ tr.af-sep td {
 .wallet-table .btn-xs + .btn-xs { margin-left: 6px; }
 
 /* OC presets table (presets tab): same transparent treatment as wallets */
-.oc-preset-table .table { --bs-table-bg: transparent; table-layout: fixed; min-width: 760px; }
+.oc-preset-table .table { --bs-table-bg: transparent; table-layout: fixed; min-width: 700px; }
 .oc-preset-table td, .oc-preset-table th { border-color: rgba(255, 255, 255, 0.06); }
 .oc-preset-table th { white-space: nowrap; }
 .oc-preset-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-.oc-preset-table tr th:first-child, .oc-preset-table tr td:first-child { padding-left: 12px; }
-.oc-preset-table tr th:last-child, .oc-preset-table tr td:last-child { padding-right: 12px; }
+/* outer columns sit closer to the block edges than the wallets table */
+.oc-preset-table tr th:first-child, .oc-preset-table tr td:first-child { padding-left: 6px; }
+.oc-preset-table tr th:last-child, .oc-preset-table tr td:last-child { padding-right: 6px; }
 .oc-preset-table .btn-xs + .btn-xs { margin-left: 6px; }
 /* Action icons (apply/edit/delete) — same size as in the wallets table */
 .oc-preset-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; }
