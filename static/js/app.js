@@ -1165,6 +1165,10 @@ function showToast(message, isSuccess = true) {
 function showLoginOverlay() {
     const overlay = document.getElementById('loginOverlay');
     if (!overlay) return;
+    // Already on the auth screen? Leave it untouched — background polls keep
+    // hitting 401 and re-calling this; wiping now would clear the field the
+    // user is mid-typing into
+    if (!overlay.classList.contains('d-none')) return;
     overlay.classList.remove('d-none');
     // inline display (rendered 'none' for authenticated sessions) must be
     // overridden explicitly — classes alone lose to the inline style
@@ -1878,7 +1882,7 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:52px"><col style="width:200px"></colgroup>
+                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:52px"><col style="width:218px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
