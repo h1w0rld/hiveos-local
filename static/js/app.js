@@ -1882,7 +1882,7 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:52px"><col style="width:218px"></colgroup>
+                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:52px"><col style="width:294px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
