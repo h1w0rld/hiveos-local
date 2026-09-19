@@ -56,9 +56,16 @@ VERSION = _load_version()
 # systemd/sudo environments lack /hive/bin, so miner screen children (miner-run) can not be
 # executed. Force an explicit PATH when invoking the hive miner wrapper.
 HIVE_MINER_ENV = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/hive/bin"
-MINER_START_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner start"
+# A miner spawned directly by the panel inherits the panel's systemd cgroup, and
+# KillMode=control-group makes `systemctl restart/stop hiveos-local` SIGKILL the
+# miner with it (observed: fsheet apply from the UI, then a deploy restart, killed
+# the running miner silently). Wrapping start/restart in `systemd-run --scope`
+# puts the screen+miner into their own transient scope - the same place a
+# `miner start` from an SSH session lands - so panel lifecycle can not touch them.
+_MINER_SCOPE = "systemd-run --scope --quiet " if shutil.which("systemd-run") else ""
+MINER_START_CMD = f"sudo {_MINER_SCOPE}env {HIVE_MINER_ENV} /hive/bin/miner start"
 MINER_STOP_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner stop"
-MINER_RESTART_CMD = f"sudo env {HIVE_MINER_ENV} /hive/bin/miner restart"
+MINER_RESTART_CMD = f"sudo {_MINER_SCOPE}env {HIVE_MINER_ENV} /hive/bin/miner restart"
 
 # Verify environments
 IS_LINUX = platform.system() == "Linux"
