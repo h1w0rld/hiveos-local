@@ -36,6 +36,7 @@ AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 OC_PRESETS_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_presets.json")
 OC_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_preset_state.json")
 CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
+CLUSTER_SELF_ID_PATH = os.path.join(HIVE_CONFIG_DIR, "cluster-self-id")
 CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
 DEFAULT_SYNC_INTERVAL = 60
 DASHBOARD_PORT = 1337
@@ -121,6 +122,35 @@ def make_self_rig_entry(state):
         "added_at": now,
     }
 
+# Last self_id this process has ever resolved (second safety net after the
+# sidecar file: even if /hive-config glitches for both files, the running
+# process must not forget who it is)
+_KNOWN_SELF_ID = {"value": ""}
+
+def _read_self_id_sidecar():
+    """Reads the persistent rig identity (cluster-self-id sidecar)."""
+    try:
+        with open(CLUSTER_SELF_ID_PATH, 'r') as f:
+            sid = f.read().strip()
+            return sid or None
+    except Exception:
+        return None
+
+def _write_self_id_sidecar(self_id):
+    """Persists the rig identity next to cluster.json (atomic, like cluster.json)."""
+    try:
+        tmp_path = CLUSTER_SELF_ID_PATH + ".tmp"
+        with open(tmp_path, 'w') as f:
+            f.write(self_id)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, CLUSTER_SELF_ID_PATH)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save cluster identity sidecar: {e}")
+        return False
+
 def load_cluster_state():
     state = {
         "cluster_name": "",
@@ -143,11 +173,32 @@ def load_cluster_state():
                 for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts", "clusters"):
                     if k in data:
                         state[k] = data[k]
+            else:
+                # Valid JSON but not a rig state (ntfs glitch can truncate to
+                # "null" etc.) - treat exactly like an unreadable file
+                logging.error(f"Cluster config has unexpected type {type(data).__name__}, ignoring")
     except Exception as e:
         logging.error(f"Failed to read cluster config: {e}")
 
     if not state.get("self_id"):
-        state["self_id"] = uuid.uuid4().hex
+        # The config is missing or damaged (a damaged file can also look like
+        # valid JSON without a self_id key). NEVER generate a new identity
+        # here: a reborn rig appears as a new rig on every peer within one
+        # sync cycle (the 'extra rig' ghosts). Restore the identity from the
+        # sidecar written at first creation, then from process memory.
+        restored = _read_self_id_sidecar() or _KNOWN_SELF_ID.get("value")
+        if restored:
+            state["self_id"] = restored
+            logging.error("Cluster config unreadable or without self_id - identity kept "
+                          f"({restored[:8]}...), no rebirth")
+        else:
+            state["self_id"] = uuid.uuid4().hex
+            _write_self_id_sidecar(state["self_id"])
+    if _KNOWN_SELF_ID.get("value") != state["self_id"]:
+        _KNOWN_SELF_ID["value"] = state["self_id"]
+    if _read_self_id_sidecar() != state["self_id"]:
+        # Legacy install (config predates the sidecar) or sidecar drift
+        _write_self_id_sidecar(state["self_id"])
     rigs = [r for r in state.get("rigs", []) if isinstance(r, dict) and r.get("id")]
     # Do not re-add this rig while an unexpired deletion tombstone for it exists:
     # a fresh self entry (updated_at=now) would always beat the tombstone on peers
