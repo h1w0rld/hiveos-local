@@ -1878,7 +1878,7 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col><col style="width:72px"><col style="width:124px"></colgroup>
+                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:44px"><col style="width:170px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
@@ -1906,7 +1906,7 @@ async function loadOcPresetsList() {
                         <td class="text-center">${defaultIcon}</td>
                         <td class="text-center text-nowrap">
                             <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
-                                <i class="bi bi-play-circle-fill"></i>
+                                <i class="bi bi-play-circle-fill"></i> Apply
                             </button>
                             <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values">
                                 <i class="bi bi-pencil"></i>
@@ -3607,8 +3607,11 @@ function fsRowHtml({ f, applied, live }) {
         '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + fid + '" title="To favorites">' +
         '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
     const walletLabel = it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner';
+    const walletAddr = resolveItemWallet(it0, wallets);
     const poolLabel = it0.pool || 'Configured in miner';
     const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
+    // Algo from the sheet item; for the applied sheet fall back to the miner's live algo
+    const algoLabel = it0.algo || (applied && lastStatsData && lastStatsData.miner_algo ? String(lastStatsData.miner_algo) : '');
     const run = '<button type="button" class="fs-run' + (applied ? ' active' : '') + '" data-action="apply" data-id="' + fid + '" title="' + (applied ? 'Re-apply this flight sheet' : 'Run this flight sheet') + '">' +
         '<i class="bi bi-rocket-takeoff' + (applied ? '-fill' : '') + '"></i></button>';
     const chevron = '<button type="button" class="fs-details' + (infoOpen ? ' open' : '') + '" data-action="info" data-id="' + fid + '" title="Details">' +
@@ -3652,6 +3655,12 @@ function fsRowHtml({ f, applied, live }) {
             '</div>' +
             '<div class="fs-row-info min-w-0">' +
                 '<div class="fs-info-line fw-semibold text-truncate" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
+                (walletAddr
+                    ? '<div class="fs-info-line font-monospace text-muted text-truncate" title="Wallet address: ' + escapeHtml(walletAddr) + '">' + escapeHtml(walletAddr) + '</div>'
+                    : '') +
+                (algoLabel
+                    ? '<div class="fs-info-line text-truncate" title="Algorithm"><span class="font-monospace small">' + escapeHtml(algoLabel) + '</span></div>'
+                    : '') +
                 '<div class="fs-info-line text-muted text-truncate" title="' + escapeHtml(poolLabel) + '">' + escapeHtml(poolLabel) + '</div>' +
                 '<div class="fs-info-line text-truncate"><span class="font-monospace small">' + escapeHtml(minerLabel) + '</span>' + minerBadgesHtml(it0.miner) + '</div>' +
             '</div>' +
