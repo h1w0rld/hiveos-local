@@ -34,6 +34,7 @@ WALLET_CONF_PATH = os.path.join(HIVE_CONFIG_DIR, "wallet.conf")
 PIN_PATH = os.path.join(HIVE_CONFIG_DIR, "dashboard.key")
 AUTOFAN_CONF = os.path.join(HIVE_CONFIG_DIR, "autofan.conf")
 OC_PRESETS_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_presets.json")
+OC_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_preset_state.json")
 CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
 CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
 DEFAULT_SYNC_INTERVAL = 60
@@ -2058,6 +2059,10 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
         logging.error(f"NVIDIA OC script failed: {stderr}")
         return False, "NVIDIA overclock script failed to apply settings."
 
+    # Route/manual overclock edit: no preset can claim these values anymore
+    # (the OC preset appliers re-set their own marker right after this call)
+    _set_oc_applied("")
+
     # Verify locked clocks actually took effect: under full mining load nvtool
     # calls can silently fail, so retry the whole apply up to 2 more times
     expected_locks = {}
@@ -2766,6 +2771,36 @@ def _live_oc_form_values():
     return _conf_to_form_values(parse_shell_config(NVIDIA_OC_CONF))
 
 
+def _load_oc_state():
+    try:
+        with config_lock:
+            if os.path.exists(OC_STATE_PATH):
+                with open(OC_STATE_PATH, 'r') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logging.error(f"Failed to read OC preset state: {e}")
+    return {}
+
+
+def _set_oc_applied(pid):
+    """Remember which OC preset is currently applied on the rig — single ACTIVE
+    semantics: only one preset can be the live one, and any manual overclock
+    edit (route-driven _apply_nvidia_oc) clears the marker."""
+    state = _load_oc_state()
+    if state.get("applied_id", "") == pid:
+        return
+    state["applied_id"] = pid
+    try:
+        with config_lock:
+            with open(OC_STATE_PATH, 'w') as f:
+                json.dump(state, f)
+            os.chmod(OC_STATE_PATH, 0o600)
+    except Exception as e:
+        logging.error(f"Failed to write OC preset state: {e}")
+
+
 def _oc_matches_live(values):
     """True when the live nvidia-oc.conf matches the preset's form values.
     Empty preset clock fields are wildcards (apply leaves them unchanged);
@@ -2833,10 +2868,13 @@ def _auto_switch_oc_for_algo(algo):
         logging.info(f"OC auto-switch: no bound or default OC preset for algo '{algo or '?'}'")
         return None
     if _oc_matches_live(preset.get("values", {})):
+        # Values already live — the chosen preset is still the active one
+        _set_oc_applied(preset.get("id", ""))
         logging.info(f"OC auto-switch: preset '{preset.get('name')}' already matches live OC")
         return None
     ok, msg = _apply_oc_preset_values(preset.get("values", {}))
     if ok:
+        _set_oc_applied(preset.get("id", ""))
         logging.info(f"OC auto-switch: preset '{preset.get('name')}' applied ({reason})")
         return f" OC preset '{preset.get('name')}' applied ({reason})."
     logging.error(f"OC auto-switch failed ({reason}): {msg}")
@@ -2845,6 +2883,7 @@ def _auto_switch_oc_for_algo(algo):
 
 @app.route('/api/oc-presets', methods=['GET'])
 def list_oc_presets():
+    applied_id = _load_oc_state().get("applied_id", "")
     presets = []
     for p in _load_oc_presets():
         presets.append({
@@ -2854,7 +2893,9 @@ def list_oc_presets():
             "is_default": bool(p.get("is_default")),
             "values": p.get("values", {}),
             "created_at": p.get("created_at", 0),
-            "active": _oc_matches_live(p.get("values", {}))
+            # Single ACTIVE: the preset last applied by the rig AND still matching
+            # the live conf (manual OC edits clear the applied marker)
+            "active": p.get("id", "") == applied_id and _oc_matches_live(p.get("values", {}))
         })
     return jsonify({"success": True, "presets": presets, "live": _live_oc_form_values()})
 
@@ -3003,6 +3044,7 @@ def apply_oc_preset():
     if not ok:
         return jsonify({"success": False, "message": msg}), 500
     name = preset.get("name", "")
+    _set_oc_applied(preset.get("id", ""))
     logging.info(f"OC preset '{name}' applied by IP: {request.remote_addr}")
     return jsonify({"success": True, "message": msg or f"OC preset '{name}' applied."})
 
@@ -3018,6 +3060,8 @@ def delete_oc_preset():
             return jsonify({"success": False, "message": "OC preset not found."}), 404
         if not _save_json_store(OC_PRESETS_PATH, remaining):
             return jsonify({"success": False, "message": "Failed to save OC presets store."}), 500
+    if _load_oc_state().get("applied_id", "") == pid:
+        _set_oc_applied("")
     logging.info(f"OC preset '{pid}' deleted by IP: {request.remote_addr}")
     return jsonify({"success": True, "message": "OC preset deleted."})
 
@@ -3799,6 +3843,7 @@ def reset_overclock():
         # Apply clean stock settings immediately on hardware
         run_nvidia_oc()
         run_command("sudo /hive/sbin/amd-oc")
+        _set_oc_applied("")
         return jsonify({"success": True, "message": "Emergency reset completed! All overclock profiles reset to safe factory stock limits."})
     else:
         return jsonify({"success": False, "message": "Failed to overwrite overclock configuration files."}), 500

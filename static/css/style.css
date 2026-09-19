@@ -883,6 +883,16 @@ tr.af-sep td {
 .wallet-table tr th:first-child, .wallet-table tr td:first-child { padding-left: 12px; }
 .wallet-table tr th:last-child, .wallet-table tr td:last-child { padding-right: 12px; }
 .wallet-table .btn-xs + .btn-xs { margin-left: 6px; }
+
+/* OC presets table (presets tab): same transparent treatment as wallets */
+.oc-preset-table .table { --bs-table-bg: transparent; table-layout: fixed; }
+.oc-preset-table td, .oc-preset-table th { border-color: rgba(255, 255, 255, 0.06); }
+.oc-preset-table th { white-space: nowrap; }
+.oc-preset-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+.oc-preset-table tr th:first-child, .oc-preset-table tr td:first-child { padding-left: 12px; }
+.oc-preset-table tr th:last-child, .oc-preset-table tr td:last-child { padding-right: 12px; }
+.oc-preset-table .btn-xs + .btn-xs { margin-left: 6px; }
+.oc-preset-table .oc-algo-select { font-size: 0.8rem; padding: 2px 6px; }
 /* Active wallet row — same amber highlight as the active flight sheet.
    Collapsed tables ignore border-radius, so the rounded outline is drawn
    per-cell with inset shadows (corners clipped via border-radius).

@@ -815,7 +815,6 @@ document.addEventListener('DOMContentLoaded', function() {
             if (response.ok && data.success) {
                 showToast(data.message, true);
                 document.getElementById('ocPresetName').value = '';
-                document.getElementById('ocPDefault').checked = false;
                 window._ocFormDirty = false;
                 loadOcPresetsList();
             } else {
@@ -832,7 +831,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // live-OC prefill never wipes their input
     ['ocPresetName', 'ocPCore', 'ocPLcore', 'ocPMem', 'ocPLmem', 'ocPPl', 'ocPFan', 'ocPDelay']
         .forEach(id => document.getElementById(id).addEventListener('input', () => { window._ocFormDirty = true; }));
-    ['ocPLed', 'ocPPill', 'ocPP0', 'ocPIdle', 'ocPDefault']
+    ['ocPLed', 'ocPPill', 'ocPP0', 'ocPIdle']
         .forEach(id => document.getElementById(id).addEventListener('change', () => { window._ocFormDirty = true; }));
 
     // 6. Main view routing (Cluster / SSH Accesses / Rig Dashboard)
@@ -1798,7 +1797,6 @@ function collectOcFormValues() {
     return {
         name: name,
         algo: '',
-        is_default: document.getElementById('ocPDefault').checked,
         values: {
             core: val('ocPCore'), lcore: val('ocPLcore'),
             mem: val('ocPMem'), lmem: val('ocPLmem'),
@@ -1825,42 +1823,43 @@ async function loadOcPresetsList() {
             }
 
             let html = `
-                <table class="table table-sm table-hover align-middle mb-0">
+                <table class="table table-sm align-middle mb-0">
+                    <colgroup><col style="width:19%"><col style="width:19%"><col><col style="width:76px"><col style="width:116px"></colgroup>
                     <thead>
-                        <tr>
-                            <th class="small text-muted fw-semibold">Preset</th>
-                            <th class="small text-muted fw-semibold" style="min-width: 130px;">Algorithm</th>
-                            <th class="small text-muted fw-semibold">Overclock</th>
-                            <th class="small text-muted fw-semibold text-center" title="Default preset: applied when no algorithm binding matches">Default</th>
-                            <th class="small text-muted fw-semibold text-end">Actions</th>
+                        <tr class="small text-muted text-uppercase">
+                            <th>Preset</th>
+                            <th>Algorithm</th>
+                            <th>Overclock</th>
+                            <th class="text-center" title="Default preset: applied when no algorithm binding matches">Default</th>
+                            <th class="text-end">Actions</th>
                         </tr>
                     </thead>
                     <tbody>`;
             window._ocPresets.forEach(p => {
                 const activeBadge = p.active
-                    ? ` <span class="badge bg-success-glow border border-success text-success small" title="Preset values match the live overclock">ACTIVE</span>`
+                    ? ` <span class="badge bg-warning-glow text-warning small" title="The overclock currently applied on the rig">ACTIVE</span>`
                     : '';
                 const defaultIcon = p.is_default
                     ? `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-warning" data-oc-id="${p.id}" title="Unset as default"><i class="bi bi-star-fill"></i></button>`
                     : `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-muted" data-oc-id="${p.id}" title="Set as default"><i class="bi bi-star"></i></button>`;
                 html += `
                     <tr>
-                        <td class="fw-semibold text-white small">${escapeHtml(p.name)}${activeBadge}</td>
+                        <td><span class="small fw-semibold">${escapeHtml(p.name)}</span>${activeBadge}</td>
                         <td>${ocAlgoSelectHtml(p)}</td>
-                        <td class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="text-muted fst-italic">empty</span>'}</td>
+                        <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
                         <td class="text-center">${defaultIcon}</td>
                         <td class="text-end text-nowrap">
-                            <button type="button" class="btn btn-xs btn-success fw-semibold py-1 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
+                            <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
                                 <i class="bi bi-play-circle-fill"></i> Apply
                             </button>
-                            <button type="button" class="btn btn-xs btn-outline-danger py-1 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
+                            <button type="button" class="btn btn-xs btn-outline-danger py-0 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </td>
                     </tr>`;
             });
             html += '</tbody></table>';
-            container.innerHTML = html;
+            container.innerHTML = `<div class="table-responsive oc-preset-table">${html}</div>`;
 
             container.querySelectorAll('.oc-apply-btn').forEach(btn => {
                 btn.addEventListener('click', function() { applyOcPreset(this.getAttribute('data-oc-id')); });
