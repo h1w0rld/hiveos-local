@@ -3628,6 +3628,10 @@ function fsRowHtml({ f, applied, live }) {
                     ? coins.map(c => coinAvatarHtml(c) + '<span class="fs-ticker">' + escapeHtml(c) + '</span>').join('<span class="fs-plus">+</span>')
                     : coinAvatarHtml('') + '<span class="fs-ticker text-muted">—</span>') +
             '</div>' +
+            '<div class="fs-name text-truncate" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) +
+                (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
+                extra +
+            '</div>' +
             '<div class="fs-row-info min-w-0">' +
                 '<div class="fs-info-line fw-semibold text-truncate" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
                 '<div class="fs-info-line text-muted text-truncate" title="' + escapeHtml(poolLabel) + '">' + escapeHtml(poolLabel) + '</div>' +
@@ -3635,10 +3639,6 @@ function fsRowHtml({ f, applied, live }) {
             '</div>' +
         '</div>' +
         '<div class="fs-row-right">' +
-            '<div class="fs-name text-end text-truncate">' + escapeHtml(f.name) +
-                (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
-                extra +
-            '</div>' +
             '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + chevron + star + kebab + '</div>' +
         '</div>' +
     '</div>';

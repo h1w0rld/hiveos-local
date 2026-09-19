@@ -1033,8 +1033,8 @@ tr.af-sep td {
 .fs-plus { color: #6c757d; font-weight: 700; }
 .fs-row-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .fs-info-line { font-size: 0.8rem; line-height: 1.25; max-width: 340px; }
-.fs-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; max-width: 46%; }
-.fsheet-row2 .fs-name { font-weight: 600; font-size: 0.86rem; }
+.fs-row-right { display: flex; align-items: center; justify-content: flex-end; flex-shrink: 0; }
+.fsheet-row2 .fs-name { font-weight: 600; font-size: 0.86rem; flex: 0 1 auto; min-width: 0; }
 .fs-multi {
     display: inline-block;
     font-size: 0.68rem;
