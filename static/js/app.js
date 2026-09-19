@@ -793,11 +793,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // AutoFan is saved through the "Apply" button (afSaveBtn);
     // no separate global form submit here.
 
-    // Save OC Preset form: the same all-GPU overclock fields as the rig's
-    // "Set settings for all GPUs" card, stored as a named preset; the Edit
-    // button in the list loads a preset here for updating (banner shows it)
+    // Save OC Preset form (inside the preset modal): the same all-GPU overclock
+    // fields as the rig's "Set settings for all GPUs" card, stored as a named
+    // preset; the Edit button in the list opens the same dialog for updating
     window._ocEditingId = '';
     window._ocEditingAlgo = '';
+    document.getElementById('ocPresetAddBtn').addEventListener('click', () => showOcPresetModal(null));
     document.getElementById('saveOcPresetForm').addEventListener('submit', async function(e) {
         e.preventDefault();
         const payload = collectOcFormValues();
@@ -819,6 +820,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('ocPresetName').value = '';
                 setOcEditMode(null);
                 window._ocFormDirty = false;
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('ocPresetModal')).hide();
                 loadOcPresetsList();
             } else {
                 showToast(data.message || "Failed to save OC preset.", false);
@@ -1799,7 +1801,8 @@ function fillOcPresetForm(v) {
 }
 
 // Edit mode banner over the save form: shows which preset is being edited,
-// Cancel returns to "new preset" mode without touching the fields
+// Cancel returns to "new preset" mode without touching the fields.
+// The dialog title follows the mode as well (New OC Preset / Edit OC Preset)
 function setOcEditMode(p) {
     window._ocEditingId = p ? p.id : '';
     if (!p) window._ocEditingAlgo = '';
@@ -1809,6 +1812,27 @@ function setOcEditMode(p) {
         ? 'Editing <span class="fw-semibold">' + escapeHtml(p.name) + '</span> — Save updates this preset'
         : '';
     banner.classList.toggle('d-none', !p);
+    const title = document.getElementById('ocPresetModalTitle');
+    if (title) {
+        title.innerHTML = p
+            ? '<i class="bi bi-gpu-card text-warning me-2"></i>Edit OC Preset'
+            : '<i class="bi bi-gpu-card text-warning me-2"></i>New OC Preset';
+    }
+}
+
+// Preset add/edit dialog: opened from the Add button (keeps the live-OC
+// prefill / last used values, like the old inline form) or from the row Edit
+// button (fields prefilled with the preset's values)
+function showOcPresetModal(entry) {
+    const isEdit = !!(entry && entry.id);
+    window._ocEditingAlgo = isEdit ? String(entry.algo || '') : '';
+    if (isEdit) {
+        fillOcPresetForm(entry.values || {});
+        document.getElementById('ocPresetName').value = entry.name || '';
+        window._ocFormDirty = false;
+    }
+    setOcEditMode(isEdit ? entry : null);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('ocPresetModal')).show();
 }
 
 function collectOcFormValues() {
@@ -1848,13 +1872,13 @@ async function loadOcPresetsList() {
             window._ocPresets = data.presets || [];
             prefillOcPresetForm(data.live);
             if (!window._ocPresets.length) {
-                container.innerHTML = `<div class="text-center text-muted small py-4">No OC presets yet. Fill the form below and save one.</div>`;
+                container.innerHTML = `<div class="text-center text-muted small py-4">No OC presets yet. Click Add to create one.</div>`;
                 return;
             }
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col><col style="width:72px"><col style="width:150px"></colgroup>
+                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col><col style="width:72px"><col style="width:124px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
@@ -1875,16 +1899,16 @@ async function loadOcPresetsList() {
                     : `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-muted" data-oc-id="${p.id}" title="Set as default"><i class="bi bi-star"></i></button>`;
                 html += `
                     <tr>
-                        <td><span class="small fw-semibold">${escapeHtml(p.name)}</span></td>
-                        <td>${statusCell}</td>
+                        <td class="text-center"><span class="small fw-semibold">${escapeHtml(p.name)}</span></td>
+                        <td class="text-center">${statusCell}</td>
                         <td>${ocAlgoSelectHtml(p)}</td>
                         <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
                         <td class="text-center">${defaultIcon}</td>
                         <td class="text-center text-nowrap">
                             <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
-                                <i class="bi bi-play-circle-fill"></i> Apply
+                                <i class="bi bi-play-circle-fill"></i>
                             </button>
-                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values in the form below">
+                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values">
                                 <i class="bi bi-pencil"></i>
                             </button>
                             <button type="button" class="btn btn-xs btn-outline-danger py-0 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
@@ -1902,13 +1926,7 @@ async function loadOcPresetsList() {
             container.querySelectorAll('.oc-edit-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
                     const p = (window._ocPresets || []).find(x => x.id === this.getAttribute('data-oc-id'));
-                    if (!p) return;
-                    fillOcPresetForm(p.values || {});
-                    document.getElementById('ocPresetName').value = p.name || '';
-                    window._ocEditingAlgo = String(p.algo || '');
-                    window._ocFormDirty = false;
-                    setOcEditMode(p);
-                    document.getElementById('saveOcPresetForm').scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    if (p) showOcPresetModal(p);
                 });
             });
             container.querySelectorAll('.oc-delete-btn').forEach(btn => {
