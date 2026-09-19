@@ -2937,7 +2937,10 @@ def save_oc_preset():
             if preset is None:
                 return jsonify({"success": False, "message": "OC preset not found."}), 404
             preset["name"] = name
-            preset["algo"] = algo
+            # algo is optional on updates — the UI edit flow sends it, but a
+            # metadata-only save must not wipe the binding
+            if "algo" in data:
+                preset["algo"] = algo
             preset["updated_at"] = now
             if clean is not None:
                 preset["values"] = clean

@@ -975,6 +975,13 @@
 
                         <!-- Save OC Preset form (same fields as "Set settings for all GPUs") -->
                         <form id="saveOcPresetForm" class="border-top border-secondary-subtle pt-3">
+                            <div id="ocEditBanner" class="d-none bg-dark-card border border-primary-subtle rounded p-2 mb-2">
+                                <div class="d-flex align-items-center gap-2 small">
+                                    <i class="bi bi-pencil text-primary"></i>
+                                    <span id="ocEditBannerText"></span>
+                                    <button type="button" id="ocEditCancelBtn" class="btn btn-xs btn-outline-secondary py-0 px-2 ms-auto" title="Stop editing without saving">Cancel</button>
+                                </div>
+                            </div>
                             <div class="row g-2">
                                 <div class="col-md-3 col-6">
                                     <label for="ocPresetName" class="form-label small fw-medium mb-1">Preset Name</label>

@@ -885,7 +885,7 @@ tr.af-sep td {
 .wallet-table .btn-xs + .btn-xs { margin-left: 6px; }
 
 /* OC presets table (presets tab): same transparent treatment as wallets */
-.oc-preset-table .table { --bs-table-bg: transparent; table-layout: fixed; }
+.oc-preset-table .table { --bs-table-bg: transparent; table-layout: fixed; min-width: 660px; }
 .oc-preset-table td, .oc-preset-table th { border-color: rgba(255, 255, 255, 0.06); }
 .oc-preset-table th { white-space: nowrap; }
 .oc-preset-table tr:hover td { background: rgba(255, 255, 255, 0.02); }

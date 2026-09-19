@@ -794,8 +794,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // no separate global form submit here.
 
     // Save OC Preset form: the same all-GPU overclock fields as the rig's
-    // "Set settings for all GPUs" card, stored as a named preset (optionally
-    // the default) for algorithm-bound automatic switching
+    // "Set settings for all GPUs" card, stored as a named preset; the Edit
+    // button in the list loads a preset here for updating (banner shows it)
+    window._ocEditingId = '';
+    window._ocEditingAlgo = '';
     document.getElementById('saveOcPresetForm').addEventListener('submit', async function(e) {
         e.preventDefault();
         const payload = collectOcFormValues();
@@ -815,6 +817,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (response.ok && data.success) {
                 showToast(data.message, true);
                 document.getElementById('ocPresetName').value = '';
+                setOcEditMode(null);
                 window._ocFormDirty = false;
                 loadOcPresetsList();
             } else {
@@ -826,6 +829,8 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.disabled = false;
         }
     });
+
+    document.getElementById('ocEditCancelBtn').addEventListener('click', () => setOcEditMode(null));
 
     // The preset form counts as dirty once the user edits any field, so the
     // live-OC prefill never wipes their input
@@ -1771,20 +1776,39 @@ function ocAlgoSelectHtml(p) {
 }
 
 // Prefill the save form from the rig's current overclock (uniform values only);
-// skipped while the user is editing so a refresh never wipes input
+// skipped while the user is editing a preset or the form so a refresh never
+// wipes input
 function prefillOcPresetForm(live) {
-    if (window._ocFormDirty || !live) return;
+    if (window._ocFormDirty || window._ocEditingId || !live) return;
+    fillOcPresetForm(live);
+}
+
+// Write preset values into the save form (used by the Edit button)
+function fillOcPresetForm(v) {
     const map = { ocPCore: 'core', ocPLcore: 'lcore', ocPMem: 'mem', ocPLmem: 'lmem',
                   ocPPl: 'pl', ocPFan: 'fan', ocPDelay: 'delay' };
     for (const [id, field] of Object.entries(map)) {
         const el = document.getElementById(id);
-        if (el) el.value = String(live[field] ?? '');
+        if (el) el.value = String(v[field] ?? '');
     }
     const flags = { ocPLed: 'led', ocPPill: 'pill', ocPP0: 'p0', ocPIdle: 'idle' };
     for (const [id, flag] of Object.entries(flags)) {
         const el = document.getElementById(id);
-        if (el) el.checked = String(live[flag] ?? '0') === '1';
+        if (el) el.checked = String(v[flag] ?? '0') === '1';
     }
+}
+
+// Edit mode banner over the save form: shows which preset is being edited,
+// Cancel returns to "new preset" mode without touching the fields
+function setOcEditMode(p) {
+    window._ocEditingId = p ? p.id : '';
+    if (!p) window._ocEditingAlgo = '';
+    const banner = document.getElementById('ocEditBanner');
+    if (!banner) return;
+    document.getElementById('ocEditBannerText').innerHTML = p
+        ? 'Editing <span class="fw-semibold">' + escapeHtml(p.name) + '</span> — Save updates this preset'
+        : '';
+    banner.classList.toggle('d-none', !p);
 }
 
 function collectOcFormValues() {
@@ -1794,7 +1818,7 @@ function collectOcFormValues() {
         return null;
     }
     const val = id => document.getElementById(id).value.trim();
-    return {
+    const payload = {
         name: name,
         algo: '',
         values: {
@@ -1807,6 +1831,12 @@ function collectOcFormValues() {
             idle: document.getElementById('ocPIdle').checked ? '1' : '0'
         }
     };
+    // Editing an existing preset: keep its algorithm binding
+    if (window._ocEditingId) {
+        payload.id = window._ocEditingId;
+        payload.algo = window._ocEditingAlgo || '';
+    }
+    return payload;
 }
 
 async function loadOcPresetsList() {
@@ -1824,31 +1854,36 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:19%"><col style="width:19%"><col><col style="width:76px"><col style="width:116px"></colgroup>
+                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col style="width:72px"><col><col style="width:150px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase">
                             <th>Preset</th>
+                            <th>Status</th>
                             <th>Algorithm</th>
-                            <th>Overclock</th>
                             <th class="text-center" title="Default preset: applied when no algorithm binding matches">Default</th>
-                            <th class="text-end">Actions</th>
+                            <th>Overclock</th>
+                            <th class="text-center">Actions</th>
                         </tr>
                     </thead>
                     <tbody>`;
             window._ocPresets.forEach(p => {
-                const activeBadge = p.active
-                    ? ` <span class="badge bg-warning-glow text-warning small" title="The overclock currently applied on the rig">ACTIVE</span>`
-                    : '';
+                const statusCell = p.active
+                    ? `<span class="badge bg-warning-glow text-warning small" title="The overclock currently applied on the rig">ACTIVE</span>`
+                    : `<span class="text-muted small">&mdash;</span>`;
                 const defaultIcon = p.is_default
                     ? `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-warning" data-oc-id="${p.id}" title="Unset as default"><i class="bi bi-star-fill"></i></button>`
                     : `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-muted" data-oc-id="${p.id}" title="Set as default"><i class="bi bi-star"></i></button>`;
                 html += `
                     <tr>
-                        <td><span class="small fw-semibold">${escapeHtml(p.name)}</span>${activeBadge}</td>
+                        <td><span class="small fw-semibold">${escapeHtml(p.name)}</span></td>
+                        <td>${statusCell}</td>
                         <td>${ocAlgoSelectHtml(p)}</td>
-                        <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
                         <td class="text-center">${defaultIcon}</td>
-                        <td class="text-end text-nowrap">
+                        <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
+                        <td class="text-center text-nowrap">
+                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values in the form below">
+                                <i class="bi bi-pencil"></i>
+                            </button>
                             <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
                                 <i class="bi bi-play-circle-fill"></i> Apply
                             </button>
@@ -1863,6 +1898,18 @@ async function loadOcPresetsList() {
 
             container.querySelectorAll('.oc-apply-btn').forEach(btn => {
                 btn.addEventListener('click', function() { applyOcPreset(this.getAttribute('data-oc-id')); });
+            });
+            container.querySelectorAll('.oc-edit-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const p = (window._ocPresets || []).find(x => x.id === this.getAttribute('data-oc-id'));
+                    if (!p) return;
+                    fillOcPresetForm(p.values || {});
+                    document.getElementById('ocPresetName').value = p.name || '';
+                    window._ocEditingAlgo = String(p.algo || '');
+                    window._ocFormDirty = false;
+                    setOcEditMode(p);
+                    document.getElementById('saveOcPresetForm').scrollIntoView({ block: 'center', behavior: 'smooth' });
+                });
             });
             container.querySelectorAll('.oc-delete-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
