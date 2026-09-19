@@ -1854,15 +1854,15 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col style="width:72px"><col><col style="width:150px"></colgroup>
+                    <colgroup><col style="width:17%"><col style="width:88px"><col style="width:17%"><col><col style="width:72px"><col style="width:150px"></colgroup>
                     <thead>
-                        <tr class="small text-muted text-uppercase">
+                        <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
                             <th>Status</th>
                             <th>Algorithm</th>
-                            <th class="text-center" title="Default preset: applied when no algorithm binding matches">Default</th>
                             <th>Overclock</th>
-                            <th class="text-center">Actions</th>
+                            <th title="Default preset: applied when no algorithm binding matches">Default</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>`;
@@ -1878,14 +1878,14 @@ async function loadOcPresetsList() {
                         <td><span class="small fw-semibold">${escapeHtml(p.name)}</span></td>
                         <td>${statusCell}</td>
                         <td>${ocAlgoSelectHtml(p)}</td>
-                        <td class="text-center">${defaultIcon}</td>
                         <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
+                        <td class="text-center">${defaultIcon}</td>
                         <td class="text-center text-nowrap">
-                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values in the form below">
-                                <i class="bi bi-pencil"></i>
-                            </button>
                             <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
                                 <i class="bi bi-play-circle-fill"></i> Apply
+                            </button>
+                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values in the form below">
+                                <i class="bi bi-pencil"></i>
                             </button>
                             <button type="button" class="btn btn-xs btn-outline-danger py-0 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
                                 <i class="bi bi-trash"></i>
