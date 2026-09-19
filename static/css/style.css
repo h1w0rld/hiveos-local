@@ -885,11 +885,12 @@ tr.af-sep td {
 .wallet-table .btn-xs + .btn-xs { margin-left: 6px; }
 /* Active wallet row — same amber highlight as the active flight sheet.
    Collapsed tables ignore border-radius, so the rounded outline is drawn
-   per-cell with inset shadows (corners clipped via border-radius). */
+   per-cell with inset shadows (corners clipped via border-radius).
+   Cell borders keep the default grey hairline — an amber border here
+   would sit flush against the shadow and double the line. */
 .wallet-table tr.wallet-row-active td,
 .wallet-table tr.wallet-row-active:hover td {
     background: var(--warning-glow);
-    border-color: rgba(245, 158, 11, 0.45);
     box-shadow: inset 0 1px 0 rgba(245, 158, 11, 0.45), inset 0 -1px 0 rgba(245, 158, 11, 0.45);
 }
 .wallet-table tr.wallet-row-active td:first-child {
