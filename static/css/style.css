@@ -114,6 +114,16 @@ body {
     opacity: 1;
 }
 
+/* Split carets must match the height of the neighboring standard buttons:
+   flex layout detaches the 1rem label from the button's baseline strut, so the
+   larger inline font can no longer inflate the line box by an extra pixel
+   (label font size itself is untouched) */
+.btn-group > .dropdown-toggle-split {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
 /* Glassmorphism Cards */
 .glass-card {
     background: var(--bg-card);
@@ -1195,6 +1205,8 @@ hr {
 .stats-nav-btn {
     font-size: 0.8rem;
     padding: 0.25rem 0.75rem;
+    /* 21px line box at 0.8rem keeps total height equal to the 31px btn-sm row */
+    line-height: 21px;
 }
 
 .stats-date-label {
@@ -1212,6 +1224,7 @@ hr {
 
 .stats-export-btn {
     font-size: 0.8rem;
+    line-height: 21px;
 }
 
 .stats-metric-card .card-body {
