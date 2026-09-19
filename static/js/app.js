@@ -1737,10 +1737,10 @@ async function loadTuningSettings() {
 
 function ocSummaryHtml(v) {
     const parts = [];
+    if (String(v.core || '').trim()) parts.push('Core +' + escapeHtml(v.core) + ' MHz');
     if (String(v.lcore || '').trim()) parts.push('Core lock ' + escapeHtml(v.lcore) + ' MHz');
-    else if (String(v.core || '').trim()) parts.push('Core +' + escapeHtml(v.core) + ' MHz');
+    if (String(v.mem || '').trim()) parts.push('Mem +' + escapeHtml(v.mem) + ' MHz');
     if (String(v.lmem || '').trim()) parts.push('Mem lock ' + escapeHtml(v.lmem) + ' MHz');
-    else if (String(v.mem || '').trim()) parts.push('Mem +' + escapeHtml(v.mem) + ' MHz');
     if (String(v.pl || '').trim()) parts.push('PL ' + escapeHtml(v.pl) + ' W');
     if (String(v.fan || '').trim() && v.fan !== '0') parts.push('Fan ' + escapeHtml(v.fan) + '%');
     const flags = [];
