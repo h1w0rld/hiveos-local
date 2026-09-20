@@ -1184,6 +1184,13 @@ def _import_ensure_key(access, mode, pw64, force_set, self_password):
         return "", "dashboard key setup failed: %s" % msg
     return str(self_password), "set"
 
+def _access_natural_key(a):
+    """Route identity (host|port|user|jump): re-import upserts the same route
+    instead of piling a second copy with a different id onto the entry."""
+    return "%s|%s|%s|%s" % (str(a.get("host", "")).lower(), int(a.get("port", 22) or 22),
+                            str(a.get("user", "")),
+                            str(a.get("jump_id", "")) or str(a.get("type", "direct")))
+
 def _import_upsert_jump_entries(state, jump_entries):
     """Merge the import's jump definitions into the local library by natural key
     (host+port+user); keeps existing ids, refreshes passwords (newer wins on sync)."""
@@ -1486,10 +1493,13 @@ def _cluster_import_worker(job, parsed):
                          if str(r.get("name", "")).strip().lower() == st["name"].lower()), None)
         if existing is not None:
             entry = json.loads(json.dumps(existing))
-            by_id = {a.get("id"): a for a in entry.get("accesses", []) if isinstance(a, dict)}
+            by_key = {}
+            for a in entry.get("accesses", []):
+                if isinstance(a, dict):
+                    by_key[_access_natural_key(a)] = a
             for a in new_accesses:
-                by_id[a["id"]] = a
-            entry["accesses"] = list(by_id.values())
+                by_key[_access_natural_key(a)] = a
+            entry["accesses"] = list(by_key.values())
             if entry.get("id") != state["self_id"]:
                 entry["password"] = st["key"]
             entry["host_label"] = existing.get("host_label") or st["accesses"][0]["host"]
@@ -1570,10 +1580,13 @@ def _cluster_import_worker(job, parsed):
                                and x["user"] == a["user"] and x["result"] == "ok" for x in st["accesses"])]
             new_accesses = _import_make_access_list(verified, jump_entries)
             if existing is not None:
-                by_id = {a.get("id"): a for a in existing.get("accesses", []) if isinstance(a, dict)}
+                by_key = {}
+                for a in existing.get("accesses", []):
+                    if isinstance(a, dict):
+                        by_key[_access_natural_key(a)] = a
                 for a in new_accesses:
-                    by_id[a["id"]] = a
-                existing["accesses"] = list(by_id.values())
+                    by_key[_access_natural_key(a)] = a
+                existing["accesses"] = list(by_key.values())
                 if existing.get("id") != state["self_id"]:
                     existing["password"] = st["key"]
                 existing.setdefault("added_at", now)
