@@ -1046,7 +1046,10 @@ tr.af-sep td {
 .fs-plus { color: #6c757d; font-weight: 700; }
 /* Info block sits a bit further from the sheet name than the flex gap */
 .fs-row-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; margin-left: 14px; }
-.fs-info-line { font-size: 0.8rem; line-height: 1.25; max-width: 340px; }
+.fs-info-line { font-size: 0.8rem; line-height: 1.25; }
+/* Wallet label/address lines: no 340px clamp, no ellipsis — the wallet shows in
+   full; a long address wraps instead of truncating on narrow windows */
+.fs-info-line.fs-wrap { overflow-wrap: anywhere; }
 .fs-row-right { display: flex; align-items: center; justify-content: flex-end; flex-shrink: 0; }
 .fsheet-row2 .fs-name { font-weight: 600; font-size: 0.86rem; flex: 0 1 auto; min-width: 0; }
 .fs-multi {

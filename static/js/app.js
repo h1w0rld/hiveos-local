@@ -3610,8 +3610,17 @@ function fsRowHtml({ f, applied, live }) {
     const star = live ? '' :
         '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + fid + '" title="To favorites">' +
         '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
+    const isLibWallet = !!(it0.wallet && wallets.some(x => x.id === it0.wallet));
     const walletLabel = it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner';
     const walletAddr = resolveItemWallet(it0, wallets);
+    // Raw-address sheets (and the live rig config): the label IS the address —
+    // show it in full once (mono, wraps), no 18-char '…' copy above the same string
+    const walletHtml = !it0.wallet
+        ? '<div class="fs-info-line fw-semibold">Configured in miner</div>'
+        : isLibWallet
+            ? '<div class="fs-info-line fs-wrap fw-semibold" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
+              '<div class="fs-info-line fs-wrap font-monospace text-muted" title="Wallet address: ' + escapeHtml(walletAddr) + '">' + escapeHtml(walletAddr) + '</div>'
+            : '<div class="fs-info-line fs-wrap font-monospace text-muted" title="Wallet address: ' + escapeHtml(walletAddr) + '">' + escapeHtml(walletAddr) + '</div>';
     const poolLabel = it0.pool || 'Configured in miner';
     const minerLabel = (it0.miner && it0.miner !== 'none') ? it0.miner : 'none';
     // Algo from the sheet item; for the applied sheet fall back to the miner's live algo
@@ -3658,10 +3667,7 @@ function fsRowHtml({ f, applied, live }) {
                 extra +
             '</div>' +
             '<div class="fs-row-info min-w-0">' +
-                '<div class="fs-info-line fw-semibold text-truncate" title="' + escapeHtml(walletLabel) + '">' + escapeHtml(walletLabel) + '</div>' +
-                (walletAddr
-                    ? '<div class="fs-info-line font-monospace text-muted text-truncate" title="Wallet address: ' + escapeHtml(walletAddr) + '">' + escapeHtml(walletAddr) + '</div>'
-                    : '') +
+                walletHtml +
                 (algoLabel
                     ? '<div class="fs-info-line text-truncate" title="Algorithm"><span class="font-monospace small">' + escapeHtml(algoLabel) + '</span></div>'
                     : '') +
