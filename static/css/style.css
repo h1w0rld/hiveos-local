@@ -876,8 +876,12 @@ tr.af-sep td {
 .wallet-table .table { --bs-table-bg: transparent; table-layout: fixed; }
 .wallet-table td, .wallet-table th { border-color: rgba(255, 255, 255, 0.06); }
 .wallet-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-/* Edit/delete icons in the wallets table — slightly larger, easier to hit */
-.wallet-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; }
+/* Edit/delete buttons in the wallets table — same treatment as the presets
+   table (see .oc-preset-table .btn-xs comment): inline-flex centering so the
+   glyph stays inside the frame; py-0 dropped from the markup. */
+.wallet-table .btn-xs { display: inline-flex; align-items: center; justify-content: center; gap: 4px; line-height: 1; }
+.wallet-table .btn-xs .bi { display: block; line-height: 1; font-size: 1.05rem; }
+.wallet-table .btn-xs .bi::before { display: block; line-height: 1; vertical-align: baseline; }
 /* Cell breathing room: coin icon off the left edge, actions off the right edge,
    small gap between the edit and delete buttons (headers included) */
 .wallet-table tr th:first-child, .wallet-table tr td:first-child { padding-left: 12px; }
