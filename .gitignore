@@ -10,9 +10,15 @@ venv/
 env/
 hiveos-local.log
 
-# local handoff notes
-HANDOFF.md
+# local handoff notes / agent memory (not for git)
+AGENTS.md
+temp/
 
 # hiveos account credentials (never commit)
 .hive_credentials
 .hive_token
+
+# docs/audit kept local only (public repo must not expose internals)
+INTERNAL_AUDIT.md
+SECURITY.md
+LICENSE
