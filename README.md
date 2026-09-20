@@ -48,7 +48,7 @@ sudo ./install.sh --upgrade
 sudo ./install.sh --uninstall
 ```
 
-During installation, the script will read dependencies from [requirements.txt](file:///g:/LocalHiveOS/requirements.txt) to check and install the Flask and Waitress packages, register a systemd daemon (`hiveos-local.service`), and start the server on port `1337`.
+During installation, the script will read dependencies from [requirements.txt](./requirements.txt) to check and install the Flask and Waitress packages, register a systemd daemon (`hiveos-local.service`), and start the server on port `1337`.
 
 If you prefer to install packages manually or verify dependencies outside of the shell script, you can run:
 ```bash
