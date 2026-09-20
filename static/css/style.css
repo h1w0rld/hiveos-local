@@ -902,6 +902,11 @@ tr.af-sep td {
 .oc-preset-table .btn-xs { display: inline-flex; align-items: center; justify-content: center; gap: 4px; line-height: 1; }
 .oc-preset-table .btn-xs .bi { display: block; line-height: 1; font-size: 1.05rem; }
 .oc-preset-table .btn-xs .bi::before { display: block; line-height: 1; vertical-align: baseline; }
+/* Default star (btn-link): Bootstrap underlines it on hover/focus, and focus
+   sticks after a click — with the flex button that paints as a detached line
+   under the glyph; keep the star clean in every state */
+.oc-preset-table .oc-default-btn:hover, .oc-preset-table .oc-default-btn:focus,
+.oc-preset-table .oc-default-btn:focus-visible { text-decoration: none !important; }
 /* Preset name: the narrowed column stays tidy — long names ellipsize, full name in the tooltip */
 .oc-preset-table .oc-preset-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* Algorithm select: selected value centered, like the other columns */

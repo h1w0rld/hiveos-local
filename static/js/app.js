@@ -817,9 +817,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await response.json();
             if (response.ok && data.success) {
                 showToast(data.message, true);
-                document.getElementById('ocPresetName').value = '';
                 setOcEditMode(null);
-                window._ocFormDirty = false;
                 bootstrap.Modal.getOrCreateInstance(document.getElementById('ocPresetModal')).hide();
                 loadOcPresetsList();
             } else {
@@ -833,13 +831,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     document.getElementById('ocEditCancelBtn').addEventListener('click', () => setOcEditMode(null));
-
-    // The preset form counts as dirty once the user edits any field, so the
-    // live-OC prefill never wipes their input
-    ['ocPresetName', 'ocPCore', 'ocPLcore', 'ocPMem', 'ocPLmem', 'ocPPl', 'ocPFan', 'ocPDelay']
-        .forEach(id => document.getElementById(id).addEventListener('input', () => { window._ocFormDirty = true; }));
-    ['ocPLed', 'ocPPill', 'ocPP0', 'ocPIdle']
-        .forEach(id => document.getElementById(id).addEventListener('change', () => { window._ocFormDirty = true; }));
 
     // 6. Main view routing (Cluster / SSH Accesses / Rig Dashboard)
     document.querySelectorAll('#mainNavTabs .nav-link').forEach(link => {
@@ -1781,15 +1772,8 @@ function ocAlgoSelectHtml(p) {
     return `<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle oc-algo-select" data-oc-id="${p.id}" title="Auto-applies this preset when the rig mines the chosen algorithm">${options.join('')}</select>`;
 }
 
-// Prefill the save form from the rig's current overclock (uniform values only);
-// skipped while the user is editing a preset or the form so a refresh never
-// wipes input
-function prefillOcPresetForm(live) {
-    if (window._ocFormDirty || window._ocEditingId || !live) return;
-    fillOcPresetForm(live);
-}
-
-// Write preset values into the save form (used by the Edit button)
+// Write values into the preset dialog (Edit prefills the preset's values,
+// Add passes {} so every field starts empty)
 function fillOcPresetForm(v) {
     const map = { ocPCore: 'core', ocPLcore: 'lcore', ocPMem: 'mem', ocPLmem: 'lmem',
                   ocPPl: 'pl', ocPFan: 'fan', ocPDelay: 'delay' };
@@ -1824,16 +1808,18 @@ function setOcEditMode(p) {
     }
 }
 
-// Preset add/edit dialog: opened from the Add button (keeps the live-OC
-// prefill / last used values, like the old inline form) or from the row Edit
-// button (fields prefilled with the preset's values)
+// Preset add/edit dialog: opened from the Add button (every field starts
+// empty — no live-OC prefill) or from the row Edit button (fields prefilled
+// with the preset's values)
 function showOcPresetModal(entry) {
     const isEdit = !!(entry && entry.id);
     window._ocEditingAlgo = isEdit ? String(entry.algo || '') : '';
     if (isEdit) {
         fillOcPresetForm(entry.values || {});
         document.getElementById('ocPresetName').value = entry.name || '';
-        window._ocFormDirty = false;
+    } else {
+        fillOcPresetForm({});
+        document.getElementById('ocPresetName').value = '';
     }
     setOcEditMode(isEdit ? entry : null);
     bootstrap.Modal.getOrCreateInstance(document.getElementById('ocPresetModal')).show();
@@ -1874,7 +1860,6 @@ async function loadOcPresetsList() {
         const data = await response.json();
         if (response.ok && data.success) {
             window._ocPresets = data.presets || [];
-            prefillOcPresetForm(data.live);
             if (!window._ocPresets.length) {
                 container.innerHTML = `<div class="text-center text-muted small py-4">No OC presets yet. Click Add to create one.</div>`;
                 return;
