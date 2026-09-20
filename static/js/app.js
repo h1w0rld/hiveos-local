@@ -5722,16 +5722,47 @@ function shareAfStateToData(state) {
     };
 }
 
+// One selectable row of the share dialogs: [checkbox] [label + sub] [...tail]
+// Built via the DOM (not innerHTML strings) so the checkbox is always a plain
+// flex item — independent of the bootstrap .form-check float/negative-margin
+// pairing that hid the inputs for some users.
+function shareMakeRow(id, inputCls, labelText, sub, subHtml, tail) {
+    const row = document.createElement('div');
+    row.className = 'd-flex align-items-center gap-2 py-1 share-item';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'form-check-input ' + inputCls;
+    input.id = id;
+    input.checked = true;
+    input.style.flexShrink = '0';
+    row.appendChild(input);
+    const label = document.createElement('label');
+    label.className = 'form-check-label flex-grow-1 mb-0';
+    label.htmlFor = id;
+    const lab = document.createElement('span');
+    lab.className = 'share-item-label';
+    lab.textContent = labelText;
+    label.appendChild(lab);
+    if (subHtml || sub) {
+        const subEl = document.createElement('span');
+        subEl.className = 'share-item-sub d-block';
+        if (subHtml) subEl.innerHTML = subHtml; else subEl.textContent = sub;
+        label.appendChild(subEl);
+    }
+    row.appendChild(label);
+    (tail || []).forEach(el => row.appendChild(el));
+    return row;
+}
+
 function renderShareEntities() {
     const list = shareModalEl('shareEntitiesList');
-    list.innerHTML = (shareCtx.entities || []).map((e, i) =>
-        '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0 share-item">' +
-        '<input class="form-check-input share-entity-check" type="checkbox" id="shareEntity_' + i + '" data-idx="' + i + '" checked>' +
-        '<label class="form-check-label flex-grow-1" for="shareEntity_' + i + '">' +
-        '<span class="share-item-label">' + escapeHtml(e.label) + '</span>' +
-        (e.subHtml ? '<span class="share-item-sub d-block">' + e.subHtml + '</span>'
-                   : (e.sub ? '<span class="share-item-sub d-block">' + escapeHtml(e.sub) + '</span>' : '')) +
-        '</label></div>').join('');
+    list.innerHTML = '';
+    (shareCtx.entities || []).forEach((e, i) => {
+        const row = shareMakeRow('shareEntity_' + i, 'share-entity-check',
+            e.label, e.sub || '', e.subHtml || '', []);
+        row.querySelector('input').dataset.idx = String(i);
+        list.appendChild(row);
+    });
     shareSyncEntityState();
 }
 
@@ -5790,18 +5821,22 @@ async function openShareTargets() {
     if (!rigs.length) {
         list.innerHTML = '<div class="text-muted small py-3 text-center">No other rigs in the cluster. Add rigs on the SSH Accesses tab first.</div>';
     } else {
-        list.innerHTML = rigs.map(r => {
-            const offline = !r.online && !r.is_self;
-            return '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0 share-item">' +
-                '<input class="form-check-input share-rig-check" type="checkbox" id="shareRig_' + r.id + '" data-rig="' + r.id + '">' +
-                '<label class="form-check-label flex-grow-1" for="shareRig_' + r.id + '">' +
-                '<span class="share-item-label">' + escapeHtml(r.name || r.id) + '</span>' +
-                (offline ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis small ms-1" title="Last known state: the rig is offline">offline</span>' : '') +
-                '</label>' +
-                '<span class="conn-dot" id="share-dot_' + r.id + '" title="Not checked yet"></span>' +
-                '<span class="share-rig-detail d-none" id="share-detail_' + r.id + '" style="max-width: 40%;"></span>' +
-                '</div>';
-        }).join('');
+        rigs.forEach(r => {
+            const dot = document.createElement('span');
+            dot.className = 'conn-dot';
+            dot.id = 'share-dot_' + r.id;
+            dot.title = 'Not checked yet';
+            const detail = document.createElement('span');
+            detail.className = 'share-rig-detail d-none';
+            detail.id = 'share-detail_' + r.id;
+            detail.style.maxWidth = '40%';
+            const sub = (!r.online && !r.is_self) ? 'offline' : '';
+            const row = shareMakeRow('shareRig_' + r.id, 'share-rig-check',
+                r.name || r.id, sub, '', [dot, detail]);
+            row.dataset.rig = r.id;
+            row.querySelector('input').dataset.rig = r.id;
+            list.appendChild(row);
+        });
     }
     shareSyncRigState();
     shareModal('shareTargetsModal').show();

@@ -683,6 +683,9 @@
                                 <i class="bi bi-wallet2 text-warning"></i> Wallets
                             </h2>
                             <div class="d-flex gap-2">
+                                <button id="walletShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share wallets with other rigs">
+                                    <i class="bi bi-share-fill me-1"></i>Share
+                                </button>
                                 <div class="btn-group" role="group">
                                     <button id="walletsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload wallet list">
                                         <i class="bi bi-arrow-clockwise"></i> Refresh
@@ -692,9 +695,6 @@
                                     </button>
                                     <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="wallets"></ul>
                                 </div>
-                                <button id="walletShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share wallets with other rigs">
-                                    <i class="bi bi-share-fill me-1"></i>Share
-                                </button>
                                 <button id="walletAddBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add a wallet to the library">
                                     <i class="bi bi-plus-lg me-1"></i>Add
                                 </button>
@@ -736,14 +736,14 @@
                                 <i class="bi bi-folder2-open text-warning"></i> Flight Sheets
                             </h2>
                             <div class="d-flex gap-2">
+                                <button id="fsShareBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Share flight sheets with other rigs">
+                                    <i class="bi bi-share-fill"></i> Share
+                                </button>
                                 <button id="fsAddSheetBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Create a new flight sheet">
                                     <i class="bi bi-plus-lg"></i> Add flight sheet
                                 </button>
                                 <button id="importFsheetsBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Import flight sheets from JSON">
                                     <i class="bi bi-box-arrow-in-down"></i> Import
-                                </button>
-                                <button id="fsShareBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Share flight sheets with other rigs">
-                                    <i class="bi bi-share-fill"></i> Share
                                 </button>
                                 <div class="btn-group" role="group">
                                     <button id="fsheetsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload flight sheets">
@@ -828,6 +828,9 @@
                                 <label class="form-check-label fw-semibold" for="afEnabledSwitch">AutoFan enabled</label>
                             </div>
                             <div class="d-flex align-items-center gap-2">
+                                <button id="afShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share fan settings with other rigs">
+                                    <i class="bi bi-share-fill me-1"></i>Share
+                                </button>
                                 <div class="btn-group btn-group-sm" role="group" aria-label="Fan settings view mode">
                                     <button type="button" id="afTableModeBtn" class="btn btn-primary" title="Compact table mode">
                                         <i class="bi bi-table me-1"></i>Table mode
@@ -836,9 +839,6 @@
                                         <i class="bi bi-list-ul me-1"></i>Advanced mode
                                     </button>
                                 </div>
-                                <button id="afShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share fan settings with other rigs">
-                                    <i class="bi bi-share-fill me-1"></i>Share
-                                </button>
                             </div>
                         </div>
 
