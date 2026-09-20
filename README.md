@@ -1,6 +1,6 @@
 # HiveOS Local GPU Manager (HiveOS-Local)
 
-[![GitHub Stars](https://img.shields.io/github/stars/y3tiCrypto/hiveos-local?style=flat-square&logo=github&color=yellow)](https://github.com/y3tiCrypto/hiveos-local/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/h1w0rld/hiveos-local?style=flat-square&logo=github&color=yellow)](https://github.com/h1w0rld/hiveos-local/stargazers)
 
 A lightweight, local, browser-based emergency diagnostics and GPU overclocking manager designed to run side-by-side on rigs powered by **HiveOS** (https://hiveon.com).
 
@@ -28,7 +28,7 @@ Execute these commands inside your HiveOS shell (via SSH, Shellinabox, or local 
 
 ```bash
 # 1. Clone the repository to your local rig
-git clone https://github.com/y3tiCrypto/hiveos-local.git
+git clone https://github.com/h1w0rld/hiveos-local.git
 
 # 2. Navigate to the directory
 cd hiveos-local
