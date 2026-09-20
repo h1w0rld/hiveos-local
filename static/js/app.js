@@ -1882,7 +1882,7 @@ async function loadOcPresetsList() {
 
             let html = `
                 <table class="table table-sm align-middle mb-0">
-                    <colgroup><col style="width:13%"><col style="width:70px"><col style="width:14%"><col><col style="width:52px"><col style="width:176px"></colgroup>
+                    <colgroup><col style="width:12%"><col style="width:70px"><col style="width:14%"><col><col style="width:76px"><col style="width:184px"></colgroup>
                     <thead>
                         <tr class="small text-muted text-uppercase text-center">
                             <th>Preset</th>
@@ -1890,7 +1890,7 @@ async function loadOcPresetsList() {
                             <th>Algorithm</th>
                             <th>Overclock</th>
                             <th title="Default preset: applied when no algorithm binding matches">Default</th>
-                            <th class="text-end">Actions</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>`;
@@ -1903,12 +1903,12 @@ async function loadOcPresetsList() {
                     : `<button type="button" class="btn btn-xs btn-link p-0 oc-default-btn text-muted" data-oc-id="${p.id}" title="Set as default"><i class="bi bi-star"></i></button>`;
                 html += `
                     <tr>
-                        <td class="text-center"><span class="small fw-semibold">${escapeHtml(p.name)}</span></td>
+                        <td class="text-center"><span class="small fw-semibold oc-preset-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span></td>
                         <td class="text-center">${statusCell}</td>
                         <td>${ocAlgoSelectHtml(p)}</td>
                         <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
                         <td class="text-center">${defaultIcon}</td>
-                        <td class="text-end text-nowrap">
+                        <td class="text-center text-nowrap">
                             <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
                                 <i class="bi bi-play-circle-fill"></i> Apply
                             </button>

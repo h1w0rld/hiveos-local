@@ -893,8 +893,12 @@ tr.af-sep td {
 .oc-preset-table tr th:first-child, .oc-preset-table tr td:first-child { padding-left: 6px; }
 .oc-preset-table tr th:last-child, .oc-preset-table tr td:last-child { padding-right: 6px; }
 .oc-preset-table .btn-xs + .btn-xs { margin-left: 6px; }
-/* Action icons (apply/edit/delete) — same size as in the wallets table */
-.oc-preset-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; }
+/* Action icons (apply/edit/delete) — same size as in the wallets table;
+   vertical-align middle keeps the glyph dead-center inside the button frame
+   (baseline alignment pushed it up, leaving a gap under the border) */
+.oc-preset-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; vertical-align: middle; }
+/* Preset name: the narrowed column stays tidy — long names ellipsize, full name in the tooltip */
+.oc-preset-table .oc-preset-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* Algorithm select: selected value centered, like the other columns */
 .oc-preset-table .oc-algo-select { font-size: 0.8rem; padding: 2px 6px; text-align: center; text-align-last: center; }
 /* Active wallet row — same amber highlight as the active flight sheet.
