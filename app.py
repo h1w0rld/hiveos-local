@@ -1346,6 +1346,7 @@ def _import_process_node(job, st, jump_entries, self_password):
     # 1. Route test: every access must be verified from here
     st["status"] = "testing"
     good = []
+    target_hostname = ""
     for acc in st["accesses"]:
         if job["cancel"]:
             break
@@ -1354,6 +1355,9 @@ def _import_process_node(job, st, jump_entries, self_password):
         if ok and "__OK__" in out:
             acc["result"] = "ok"
             good.append(access)
+            if not target_hostname:
+                first_line = (out or "").replace("__OK__", "").strip().splitlines()
+                target_hostname = first_line[0].strip() if first_line else ""
         else:
             acc["result"] = "fail"
             acc["error"] = (err or "connection failed")[:200]
@@ -1363,6 +1367,16 @@ def _import_process_node(job, st, jump_entries, self_password):
         return
     if job["cancel"]:
         st["status"] = "skipped"
+        return
+    # 1a. The target is this very rig: never install/restart ourselves (that would
+    # kill the running import job) - only merge routes and skip root steps
+    if target_hostname and target_hostname == socket.gethostname().strip():
+        st["is_self"] = True
+        st["action"] = "self"
+        st["key"] = self_password
+        st["key_state"] = "self"
+        st["status"] = "ready"
+        st["message"] = "this rig - routes merged, no install needed"
         return
     # 1b. Root access detection: root SSH, passwordless sudo or sudo+SSH password
     mode, pw64, esc_err = _import_escalate(good[0])
@@ -1494,15 +1508,21 @@ def _cluster_import_worker(job, parsed):
             }
         entries[k] = entry
     if ready_keys:
+        # the payload's self entry must be the merged one (with the new CSV routes)
+        self_entry = next((r for r in state["rigs"] if r.get("id") == state["self_id"]), None)
+        merged_self = next((entries[k] for k in ready_keys if entries[k].get("id") == state["self_id"]), None)
         payload = _import_cluster_payload(state, [entries[k] for k in ready_keys],
-                                          next((r for r in state["rigs"] if r.get("id") == state["self_id"]), None),
-                                          jump_entries)
+                                          merged_self or self_entry, jump_entries)
 
         def bootstrap_node(key):
             st = job["nodes"][key]
             try:
                 if job["cancel"]:
                     st["status"] = "skipped"
+                    return
+                if entries[key].get("id") == state["self_id"]:
+                    st["status"] = "done"
+                    st["message"] = (st.get("message", "") + "; this rig (nothing to bootstrap)").strip("; ")
                     return
                 # reuse the first verified access of this node
                 access = None
