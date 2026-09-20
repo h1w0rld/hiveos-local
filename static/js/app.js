@@ -3074,7 +3074,7 @@ function clusterImportOpen() {
     document.getElementById('clusterImportSummary').innerHTML = '';
     const applyBtn = document.getElementById('clusterImportApplyBtn');
     applyBtn.disabled = true;
-    applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+    applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply';
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
     setTimeout(() => document.getElementById('clusterImportText').focus(), 300);
 }
@@ -3161,7 +3161,7 @@ async function clusterImportStart() {
     } catch (e) {
         showToast('Network error while starting the import.', false);
         applyBtn.disabled = false;
-        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply';
         return;
     }
     if (!data || !data.success || !data.job_id) {
@@ -3170,7 +3170,7 @@ async function clusterImportStart() {
             '<div class="small text-danger mb-1"><span class="badge bg-danger-subtle text-danger me-1">line ' +
             escapeHtml(String(e.line)) + '</span> ' + escapeHtml(e.message) + '</div>').join('');
         applyBtn.disabled = false;
-        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply';
         return;
     }
     clusterImportJobId = data.job_id;
@@ -3252,7 +3252,7 @@ async function clusterImportPoll() {
         document.getElementById('clusterImportCancelBtn').classList.add('d-none');
         const applyBtn = document.getElementById('clusterImportApplyBtn');
         applyBtn.disabled = false;
-        applyBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Re-apply / Retry';
+        applyBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Apply';
         clusterImportJobId = null;
         loadClusterData(true);
         loadAccessList();
