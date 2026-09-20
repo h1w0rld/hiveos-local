@@ -3507,9 +3507,7 @@ function renderFsheets() {
     // Chip filters (coins / wallets / pools)
     const chips = window._fsChips || {};
     const shown = entries.filter(e => fsMatchesChips(e, chips));
-    // Favorites first, then by name
-    shown.sort((a, b) => (b.f.fav ? 1 : 0) - (a.f.fav ? 1 : 0) ||
-        String(a.f.name).localeCompare(String(b.f.name)));
+    shown.sort((a, b) => String(a.f.name).localeCompare(String(b.f.name)));
 
     const counter = document.getElementById('fsheetsCount');
     if (counter) counter.textContent = shown.length + ' of ' + entries.length + ' shown';
@@ -3592,9 +3590,6 @@ function fsRowHtml({ f, applied, live }) {
     const extra = items.length > 1 ? ' <span class="fs-multi" title="' + items.length + ' miner items">+' + (items.length - 1) + '</span>' : '';
     const infoOpen = !!(window._fsInfoOpen && window._fsInfoOpen.has(f.id));
     const editOpen = window._fsExpandedId === f.id;
-    const star = live ? '' :
-        '<button type="button" class="fs-star' + (f.fav ? ' on' : '') + '" data-action="fav" data-id="' + fid + '" title="To favorites">' +
-        '<i class="bi ' + (f.fav ? 'bi-star-fill' : 'bi-star') + '"></i></button>';
     const isLibWallet = !!(it0.wallet && wallets.some(x => x.id === it0.wallet));
     const walletLabel = it0.wallet ? walletAddressLabel(it0.wallet, wallets) : 'Configured in miner';
     const walletAddr = resolveItemWallet(it0, wallets);
@@ -3644,8 +3639,8 @@ function fsRowHtml({ f, applied, live }) {
         '<div class="fs-row-left" data-action="info" data-id="' + fid + '" role="button">' +
             '<div class="fs-row-coins">' +
                 (coins.length
-                    ? coins.map(c => coinAvatarHtml(c) + '<span class="fs-ticker">' + escapeHtml(c) + '</span>').join('<span class="fs-plus">+</span>')
-                    : coinAvatarHtml('') + '<span class="fs-ticker text-muted">—</span>') +
+                    ? coins.map(c => coinAvatarHtml(c)).join('<span class="fs-plus">+</span>')
+                    : coinAvatarHtml('')) +
             '</div>' +
             '<div class="fs-name text-truncate" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) +
                 (live ? ' <span class="badge bg-secondary small" title="Running from the rig config, not saved in the library">live</span>' : '') +
@@ -3661,7 +3656,7 @@ function fsRowHtml({ f, applied, live }) {
             '</div>' +
         '</div>' +
         '<div class="fs-row-right">' +
-            '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + chevron + star + kebab + '</div>' +
+            '<div class="fs-actions d-flex gap-1 align-items-center justify-content-end">' + run + chevron + kebab + '</div>' +
         '</div>' +
     '</div>';
 
@@ -3687,8 +3682,8 @@ function fsRowHtml({ f, applied, live }) {
             '<div class="fs-active-grid">' +
                 '<div class="fs-act-col fs-act-coins">' +
                     (coins.length
-                        ? coins.map(c => coinAvatarHtml(c) + '<span class="fs-ticker">' + escapeHtml(c) + '</span>').join('<span class="fs-plus">+</span>')
-                        : coinAvatarHtml('') + '<span class="fs-ticker text-muted">—</span>') +
+                        ? coins.map(c => coinAvatarHtml(c)).join('<span class="fs-plus">+</span>')
+                        : coinAvatarHtml('')) +
                 '</div>' +
                 '<div class="fs-act-col min-w-0">' +
                     '<div class="fs-act-name text-truncate">' + escapeHtml(walletName) + extra + '</div>' +
@@ -3952,25 +3947,6 @@ window.copyFsheet = async function(fid) {
     showToast(ok ? 'Flight sheet JSON copied to clipboard.' : 'Copy failed — use Export instead.', ok);
 };
 
-window.toggleFsheetFav = async function(fid) {
-    const f = findFsheet(fid);
-    if (!f) return;
-    try {
-        const response = await apiFetch('/api/fsheets/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-            body: JSON.stringify({ fsheet: {
-                id: f.id, name: f.name, coin: f.coin || '', fav: !f.fav, items: f.items || []
-            } })
-        });
-        const data = await response.json();
-        if (data.success) { f.fav = !f.fav; renderFsheets(); }
-        else showToast(data.message || 'Failed to update favorite.', false);
-    } catch (e) {
-        showToast('Network error updating favorite.', false);
-    }
-};
-
 // Delegated handlers for all flight sheet row + inline editor actions
 function setupFsheetsContainer() {
     const container = document.getElementById('fsheetsContainer');
@@ -3981,11 +3957,10 @@ function setupFsheetsContainer() {
         if (!target || !container.contains(target)) return;
         const action = target.dataset.action;
         const fid = target.dataset.id;
-        if (action === 'fav' || action === 'apply' || action === 'duplicate' ||
+        if (action === 'apply' || action === 'duplicate' ||
             action === 'export' || action === 'copy' || action === 'delete' || action === 'unset') {
             if (!fid && action !== 'unset') return;
-            if (action === 'fav') toggleFsheetFav(fid);
-            else if (action === 'apply') applyFsheet(fid);
+            if (action === 'apply') applyFsheet(fid);
             else if (action === 'duplicate') (fid === '__rig__') ? duplicateLiveConfig() : duplicateFsheet(fid);
             else if (action === 'export') exportFsheet(fid);
             else if (action === 'copy') copyFsheet(fid);
