@@ -1909,13 +1909,13 @@ async function loadOcPresetsList() {
                         <td><span class="small text-muted">${ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'}</span></td>
                         <td class="text-center">${defaultIcon}</td>
                         <td class="text-center text-nowrap">
-                            <button type="button" class="btn btn-xs btn-outline-success py-0 px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
+                            <button type="button" class="btn btn-xs btn-outline-success px-2 oc-apply-btn" data-oc-id="${p.id}" title="Apply these overclock values now">
                                 <i class="bi bi-play-circle-fill"></i> Apply
                             </button>
-                            <button type="button" class="btn btn-xs btn-outline-primary py-0 px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values">
+                            <button type="button" class="btn btn-xs btn-outline-primary px-2 oc-edit-btn" data-oc-id="${p.id}" title="Edit these overclock values">
                                 <i class="bi bi-pencil"></i>
                             </button>
-                            <button type="button" class="btn btn-xs btn-outline-danger py-0 px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
+                            <button type="button" class="btn btn-xs btn-outline-danger px-2 oc-delete-btn" data-oc-id="${p.id}" title="Delete OC preset">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </td>

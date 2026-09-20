@@ -893,10 +893,15 @@ tr.af-sep td {
 .oc-preset-table tr th:first-child, .oc-preset-table tr td:first-child { padding-left: 6px; }
 .oc-preset-table tr th:last-child, .oc-preset-table tr td:last-child { padding-right: 6px; }
 .oc-preset-table .btn-xs + .btn-xs { margin-left: 6px; }
-/* Action icons (apply/edit/delete) — same size as in the wallets table;
-   vertical-align middle keeps the glyph dead-center inside the button frame
-   (baseline alignment pushed it up, leaving a gap under the border) */
-.oc-preset-table .btn-xs .bi { font-size: 1.05rem; line-height: 1; vertical-align: middle; }
+/* Action buttons (apply/edit/delete): inline-flex so the icon glyph centers
+   inside the frame regardless of the text strut — inline baseline/middle
+   alignment parked the glyph on the bottom or the top edge (the
+   bootstrap-icons baseline sits at the glyph's bottom edge), and the glyph
+   even overflowed the border. Real vertical padding (btn-xs 0.15rem, py-0
+   dropped from the markup) gives equal air above and below the glyph. */
+.oc-preset-table .btn-xs { display: inline-flex; align-items: center; justify-content: center; gap: 4px; line-height: 1; }
+.oc-preset-table .btn-xs .bi { display: block; line-height: 1; font-size: 1.05rem; }
+.oc-preset-table .btn-xs .bi::before { display: block; line-height: 1; vertical-align: baseline; }
 /* Preset name: the narrowed column stays tidy — long names ellipsize, full name in the tooltip */
 .oc-preset-table .oc-preset-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* Algorithm select: selected value centered, like the other columns */
