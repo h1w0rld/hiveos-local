@@ -1110,7 +1110,7 @@ function renderRigScopeMenu() {
             '<i class="bi bi-hdd-network me-2"></i>' + escapeHtml(selfRig.name) + ' <span class="small text-muted">(local)</span></button></li>');
         items.push('<li><hr class="dropdown-divider"></li>');
     }
-    clusterData.rigs.filter(r => !r.is_self).forEach(rig => {
+    clusterData.rigs.filter(r => !r.is_self).sort(naturalRigCompare).forEach(rig => {
         if (filter && !filter.has(rig.id)) return;
         const active = currentRigId === rig.id;
         const off = !rig.online;
@@ -2095,14 +2095,35 @@ function updateLastSyncDisplay() {
     el.className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
 }
 
+// Natural sort by rig name: RIG1, RIG2, ..., RIG10 (numbers compared numerically)
+function naturalRigCompare(a, b) {
+    const an = String((a && (a.name || a.id)) || '').toLowerCase();
+    const bn = String((b && (b.name || b.id)) || '').toLowerCase();
+    const ap = an.split(/(\d+)/);
+    const bp = bn.split(/(\d+)/);
+    for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+        const x = ap[i], y = bp[i];
+        if (x === undefined) return -1;
+        if (y === undefined) return 1;
+        if (/^\d+$/.test(x) && /^\d+$/.test(y)) {
+            const d = parseInt(x, 10) - parseInt(y, 10);
+            if (d) return d;
+        } else if (x !== y) {
+            return x < y ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
 function renderCluster() {
     if (!clusterData || !clusterData.rigs) return;
+    const sortedRigs = clusterData.rigs.slice().sort(naturalRigCompare);
     const container = document.getElementById('clusterRigsContainer');
     container.dataset.loaded = '1';
 
     document.getElementById('clusterSyncStatus').textContent = clusterData.last_sync_message || '';
-    const online = clusterData.rigs.filter(r => r.online).length;
-    document.getElementById('clusterOnline').textContent = online + ' / ' + clusterData.rigs.length;
+    const online = sortedRigs.filter(r => r.online).length;
+    document.getElementById('clusterOnline').textContent = online + ' / ' + sortedRigs.length;
     // Keep the header rig/cluster dropdowns populated with all cluster rigs
     updateRigScopeUi();
 
@@ -2110,7 +2131,7 @@ function renderCluster() {
 
     // Farm-wide totals: only online rigs count (offline stats are stale)
     let totalPower = 0, totalGpus = 0, tempSum = 0, tempCount = 0, totalMh = 0;
-    clusterData.rigs.forEach(rig => {
+    sortedRigs.forEach(rig => {
         const stats = rig.stats;
         if (!stats || !rig.online) return;
         totalMh += (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
@@ -2129,12 +2150,12 @@ function renderCluster() {
     // Cluster sections (rig groups) + unassigned rigs
     const clusters = clusterData.clusters || [];
     const rigById = {};
-    clusterData.rigs.forEach(r => { rigById[r.id] = r; });
+    sortedRigs.forEach(r => { rigById[r.id] = r; });
     const assigned = new Set();
     container.innerHTML = '';
 
     clusters.forEach(cl => {
-        const members = (cl.rig_ids || []).map(id => rigById[id]).filter(Boolean);
+        const members = (cl.rig_ids || []).map(id => rigById[id]).filter(Boolean).sort(naturalRigCompare);
         members.forEach(m => assigned.add(m.id));
         const section = document.createElement('div');
         section.className = 'col-12';
@@ -2167,7 +2188,7 @@ function renderCluster() {
         container.appendChild(section);
     });
 
-    const unassigned = clusterData.rigs.filter(r => !assigned.has(r.id));
+    const unassigned = sortedRigs.filter(r => !assigned.has(r.id));
     if (unassigned.length) {
         const section = document.createElement('div');
         section.className = 'col-12';
@@ -2643,7 +2664,7 @@ function renderAccessRoutes() {
     // Fresh data -> dots back to gray "not checked" until re-tested
     accessTestResults = {};
     const rows = [];
-    clusterData.rigs.forEach(rig => {
+    clusterData.rigs.slice().sort(naturalRigCompare).forEach(rig => {
         const rigLabel = escapeHtml(rig.name || rig.id) +
             (rig.is_self ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1 small">this rig</span>' : '');
         if (!rig.accesses.length) {
@@ -5807,7 +5828,8 @@ async function openShareTargets() {
         if (d.success) clusterData = d;
     } catch (e) { /* fall back to the cached list */ }
     const rigs = ((clusterData && clusterData.rigs) || [])
-        .filter(r => r.id !== currentRigId && !(currentRigId === 'self' && r.is_self));
+        .filter(r => r.id !== currentRigId && !(currentRigId === 'self' && r.is_self))
+        .sort(naturalRigCompare);
     shareCtx.rigs = rigs;
     shareCtx.checks = {};
     shareModalEl('shareTargetsTitle').innerHTML =
