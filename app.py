@@ -1,8 +1,13 @@
 import os
 import re
+import csv
+import io
 import json
 import glob
+import base64
+import hashlib
 import hmac
+import tarfile
 import uuid
 import signal
 import shlex
@@ -15,6 +20,7 @@ import logging
 import threading
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import urllib.request
 from flask import Flask, jsonify, request, render_template, session, Response, has_request_context
@@ -722,6 +728,793 @@ def cluster_remote_api(rig, method, path, body=None, timeout=40):
             continue
         return True, data, http_code, "", access_name
     return False, None, 0, last_error, ""
+
+# ---------------- CSV cluster import: parse & validate ----------------
+
+IMPORT_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+IMPORT_REMOTE_DIR = "/root/hiveos-local"
+IMPORT_INSTALL_TIMEOUT = 300
+
+def _det_id(*parts):
+    """Deterministic short id: same input -> same id on every node (idempotent import)."""
+    return hashlib.sha1("|".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:12]
+
+def _split_import_sections(line):
+    """Split a CSV line into ';'-separated sections. Quote characters are kept
+    verbatim (the csv module decodes them later)."""
+    parts, buf, in_quotes = [], [], False
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_quotes:
+            buf.append(ch)
+            if ch == '"':
+                if i + 1 < n and line[i + 1] == '"':
+                    buf.append('"')  # doubled quote stays doubled for csv module
+                    i += 1
+                else:
+                    in_quotes = False
+        elif ch == '"':
+            in_quotes = True
+            buf.append(ch)
+        elif ch == ';':
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+def _detect_import_delimiter(lines):
+    """Field delimiter inside a section: ',' if any line has one, else tab, else whitespace runs."""
+    joined = "\n".join(lines)
+    if "," in joined:
+        return ","
+    if "\t" in joined:
+        return "\t"
+    return None  # whitespace
+
+def _split_fields(section, delimiter):
+    """Split one CSV section into fields. Returns list of (field, quoted) or None on parse error."""
+    if delimiter:
+        try:
+            rows = list(csv.reader([section], delimiter=delimiter, skipinitialspace=True))
+        except Exception:
+            return None
+        if len(rows) != 1:
+            return None
+        raw_fields = rows[0]
+    else:
+        raw_fields = re.split(r'\s+', section.strip())
+    fields = []
+    for f in raw_fields:
+        fields.append(f)
+    return fields
+
+def parse_cluster_csv(text):
+    """Parse and validate the cluster import CSV.
+
+    Format per line:  name;access[;jump]
+      access = host,port,user,password
+      jump   = host,port,user,password (full definition) | host (reference) | '' (direct)
+    Same name on several lines = one node, each line adds a route.
+
+    Returns dict with:
+      ok           - True when no validation errors
+      delimiter    - detected field delimiter ('\\n' means whitespace)
+      nodes        - ordered list of {name, accesses: [{line, host, port, user, password, jump_key|None}], dup_lines}
+      jumps        - {key: {host, port, user, password, lines}}
+      errors       - [{line, message}]
+    """
+    errors = []
+
+    def err(line_no, msg):
+        errors.append({"line": line_no, "message": msg})
+
+    raw_lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    code_lines = []  # (line_no, content) of meaningful lines
+    for idx, line in enumerate(raw_lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        code_lines.append((idx, line))
+
+    delimiter = _detect_import_delimiter([c for _, c in code_lines])
+
+    node_order = []
+    nodes = {}
+    jumps = {}      # key: host|port|user -> def
+    jump_order = []
+
+    for line_no, line in code_lines:
+        sections = _split_import_sections(line)
+        # trailing empty sections are harmless ("...;" means direct)
+        while len(sections) > 1 and not sections[-1].strip():
+            sections.pop()
+        # Tab/whitespace input usually comes without ';' separators: a single
+        # section then holds name+access (5 fields) or name+access+jump (9 fields)
+        if len(sections) == 1 and delimiter in ("\t", None):
+            flat = _split_fields(sections[0], delimiter)
+            if flat and len(flat) in (5, 9):
+                d = delimiter or " "
+                sections = [flat[0], d.join(flat[1:5])]
+                if len(flat) == 9:
+                    sections.append(d.join(flat[5:9]))
+        name = sections[0].strip()
+        if not name:
+            err(line_no, "Node name is empty (first section before ';').")
+            continue
+        if delimiter == "," and "," in name:
+            err(line_no, "Missing node name (start the line with the name: "
+                         "name;ip,port,login,password[;jump]).")
+            continue
+        if len(name) > 60 or not re.match(r'^[A-Za-z0-9_\-\s\.]+$', name):
+            err(line_no, "Invalid node name (1-60 chars: letters, digits, space, -_.).")
+            continue
+        if len(sections) < 2:
+            err(line_no, "Missing access section (expected: name;ip,port,login,password[;jump]).")
+            continue
+        if len(sections) > 3:
+            err(line_no, "Too many ';'-sections (max 3: name;access;jump).")
+            continue
+
+        access_fields = _split_fields(sections[1], delimiter)
+        if access_fields is None:
+            err(line_no, "Malformed access section (check quotes).")
+            continue
+        if not any(f.strip() for f in access_fields):
+            err(line_no, "Access section is empty.")
+            continue
+
+        a_host, a_port, a_user, a_password = None, 22, None, ""
+        if len(access_fields) != 4:
+            err(line_no, "Access must have 4 fields: ip,port,login,password (got %d)." % len(access_fields))
+            continue
+        a_host = access_fields[0].strip()
+        a_user = access_fields[2].strip()
+        a_password = access_fields[3]
+        if not VALID_HOST_RE.match(a_host):
+            err(line_no, "Invalid access host/IP: '%s'." % a_host[:40])
+            continue
+        port_txt = access_fields[1].strip()
+        if port_txt:
+            try:
+                a_port = int(port_txt)
+            except ValueError:
+                err(line_no, "Access port must be an integer.")
+                continue
+            if not (1 <= a_port <= 65535):
+                err(line_no, "Access port must be between 1 and 65535.")
+                continue
+        if not VALID_USER_RE.match(a_user):
+            err(line_no, "Invalid SSH login: '%s'." % a_user[:40])
+            continue
+        if len(a_password) > 128:
+            err(line_no, "SSH password is too long (max 128).")
+            continue
+
+        jump_key = None
+        if len(sections) == 3 and sections[2].strip():
+            j_fields = _split_fields(sections[2], delimiter)
+            if j_fields is None:
+                err(line_no, "Malformed jump section (check quotes).")
+                continue
+            j_nz = [f for f in j_fields if f.strip()]
+            if len(j_nz) == 1:
+                # Reference to a jump host defined elsewhere (full def in this text or in the library)
+                j_ref = next(f for f in j_fields if f.strip()).strip()
+                j_ref = j_ref.strip()
+                if not VALID_HOST_RE.match(j_ref):
+                    err(line_no, "Invalid jump reference host/IP: '%s'." % j_ref[:40])
+                    continue
+                jump_key = "ref:%s" % j_ref.lower()
+            elif len(j_fields) == 4:
+                j_host = j_fields[0].strip()
+                j_user = j_fields[2].strip()
+                j_password = j_fields[3]
+                j_port = 22
+                port_txt = j_fields[1].strip()
+                if not VALID_HOST_RE.match(j_host):
+                    err(line_no, "Invalid jump host/IP: '%s'." % j_host[:40])
+                    continue
+                if port_txt:
+                    try:
+                        j_port = int(port_txt)
+                    except ValueError:
+                        err(line_no, "Jump port must be an integer.")
+                        continue
+                    if not (1 <= j_port <= 65535):
+                        err(line_no, "Jump port must be between 1 and 65535.")
+                        continue
+                if not VALID_USER_RE.match(j_user):
+                    err(line_no, "Invalid jump login: '%s'." % j_user[:40])
+                    continue
+                if len(j_password) > 128:
+                    err(line_no, "Jump password is too long (max 128).")
+                    continue
+                key = "%s|%d|%s" % (j_host.lower(), j_port, j_user)
+                if key not in jumps:
+                    jumps[key] = {"host": j_host, "port": j_port, "user": j_user,
+                                  "password": j_password, "lines": []}
+                    jump_order.append(key)
+                else:
+                    if jumps[key]["password"] != j_password:
+                        err(line_no, "Jump %s:%d (%s) is defined with a different password "
+                                     "on line(s) %s - passwords must match." %
+                            (j_host, j_port, j_user, ", ".join(str(x) for x in jumps[key]["lines"])))
+                        continue
+                jumps[key]["lines"].append(line_no)
+                jump_key = key
+            else:
+                err(line_no, "Jump section must be a full definition (ip,port,login,password) "
+                             "or a single host reference (got %d fields)." % len(j_fields))
+                continue
+
+        key = name.lower()
+        if key not in nodes:
+            nodes[key] = {"name": name, "accesses": [], "lines": []}
+            node_order.append(key)
+        node = nodes[key]
+        akey = "%s|%d|%s|%s" % (a_host.lower(), a_port, a_user, jump_key or "")
+        if any(a["key"] == akey for a in node["accesses"]):
+            # exact duplicate route for the same node - idempotent, just remember the line
+            node["lines"].append(line_no)
+            continue
+        node["accesses"].append({"key": akey, "line": line_no, "host": a_host,
+                                 "port": a_port, "user": a_user, "password": a_password,
+                                 "jump_key": jump_key})
+        node["lines"].append(line_no)
+
+    # Resolve jump references (ref:host) against full defs in this text, then the library
+    lib_hosts = {}
+    try:
+        for j in load_cluster_state().get("jump_hosts", []):
+            lib_hosts.setdefault(str(j.get("host", "")).lower(), []).append(j)
+    except Exception:
+        pass
+    for key in node_order:
+        for acc in nodes[key]["accesses"]:
+            jk = acc.get("jump_key")
+            if not (jk and jk.startswith("ref:")):
+                continue
+            ref_host = jk[4:]
+            full_keys = [k for k in jump_order if jumps[k]["host"].lower() == ref_host]
+            if len(full_keys) == 1:
+                acc["jump_key"] = full_keys[0]
+                continue
+            if full_keys:
+                # several local defs on the same host - ambiguous unless the library has a matching one
+                err(acc["line"],
+                    "Ambiguous jump reference '%s' (defined several times with different port/login)." % ref_host)
+                continue
+            # fall back to a direct access of a node in this import (the gateway is
+            # usually listed as a node itself; its direct credentials become the jump)
+            node_matches = {}
+            for nk in node_order:
+                for a2 in nodes[nk]["accesses"]:
+                    if a2["host"].lower() == ref_host and a2["jump_key"] is None:
+                        node_matches.setdefault((a2["port"], a2["user"]), set()).add(a2["password"])
+            if len(node_matches) == 1:
+                (j_port, j_user), passwords = next(iter(node_matches.items()))
+                if len(passwords) > 1:
+                    err(acc["line"], "Ambiguous jump reference '%s' (nodes disagree on its password)." % ref_host)
+                    continue
+                j_host = next(a2["host"] for nk in node_order for a2 in nodes[nk]["accesses"]
+                              if a2["host"].lower() == ref_host and a2["jump_key"] is None)
+                key2 = "%s|%d|%s" % (ref_host, j_port, j_user)
+                if key2 not in jumps:
+                    jumps[key2] = {"host": j_host, "port": j_port, "user": j_user,
+                                   "password": next(iter(passwords)), "lines": []}
+                    jump_order.append(key2)
+                acc["jump_key"] = key2
+                continue
+            if len(node_matches) > 1:
+                err(acc["line"], "Ambiguous jump reference '%s' (several nodes use this host "
+                                 "with different port/login - define the jump explicitly)." % ref_host)
+                continue
+            lib_matches = lib_hosts.get(ref_host, [])
+            if len(lib_matches) == 1:
+                j = lib_matches[0]
+                key2 = "%s|%d|%s" % (str(j.get("host", "")).lower(), int(j.get("port", 22) or 22),
+                                     str(j.get("user", "")))
+                if key2 not in jumps:
+                    jumps[key2] = {"host": j.get("host", ""), "port": int(j.get("port", 22) or 22),
+                                   "user": j.get("user", ""), "password": j.get("password", ""),
+                                   "lines": []}
+                    jump_order.append(key2)
+                acc["jump_key"] = key2
+            elif len(lib_matches) > 1:
+                err(acc["line"], "Ambiguous jump reference '%s' (library has several jumps on this host - "
+                                 "use the full definition ip,port,login,password)." % ref_host)
+            else:
+                err(acc["line"], "Jump host '%s' is not defined (add a full definition "
+                                 "ip,port,login,password on any line)." % ref_host)
+
+    return {"ok": not errors, "delimiter": delimiter or "whitespace",
+            "nodes": [nodes[k] for k in node_order],
+            "jumps": [dict(jumps[k], key=k) for k in jump_order],
+            "errors": errors}
+
+# ---------------- CSV cluster import: background job ----------------
+
+_import_jobs = {}
+_import_jobs_lock = threading.Lock()
+_IMPORT_MAX_PARALLEL = 6
+_IMPORT_MAX_NODES = 200
+_IMPORT_MAX_TEXT = 256 * 1024
+
+def _import_access_dict(acc, jump_entries):
+    """Build an access dict (inline jump fields) for run_ssh_command."""
+    access = {
+        "id": _det_id("acc", acc["host"].lower(), acc["port"], acc["user"]),
+        "name": "%s@%s" % (acc["user"], acc["host"]),
+        "type": "direct",
+        "host": acc["host"], "port": acc["port"], "user": acc["user"],
+        "auth": "password", "password": acc["password"],
+    }
+    jk = acc.get("jump_key")
+    if jk and jk in jump_entries:
+        jd = jump_entries[jk]
+        access["type"] = "jump"
+        access["jump_host"] = jd["host"]
+        access["jump_port"] = jd["port"]
+        access["jump_user"] = jd["user"]
+        access["jump_auth"] = "password"
+        access["jump_password"] = jd["password"]
+    return access
+
+def _import_build_tar():
+    """Tar.gz of the application files for uploading to nodes (in memory)."""
+    buf = io.BytesIO()
+    try:
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name in ("app.py", "install.sh", "requirements.txt", "version.txt"):
+                path = os.path.join(IMPORT_APP_DIR, name)
+                if os.path.isfile(path):
+                    tar.add(path, arcname=name)
+            for dirname in ("templates", "static"):
+                path = os.path.join(IMPORT_APP_DIR, dirname)
+                if os.path.isdir(path):
+                    tar.add(path, arcname=dirname)
+    except Exception as e:
+        logging.error(f"Cluster import: failed to pack app files: {e}")
+        return None
+    return buf.getvalue()
+
+def _import_ssh_ok(res, marker=None):
+    ok, out, err = res
+    if not ok:
+        return False, (err or "connection failed")
+    if marker and marker not in out:
+        return False, (err or "unexpected output")
+    return True, ""
+
+def _import_install_node(access):
+    """Upload the app code to a node and install/refresh the service.
+    Returns (ok, action, message) where action is 'installed'|'updated'|''."""
+    ok, out, err = run_ssh_command(access, "id -u", timeout=30)
+    if not (ok and out.strip() == "0"):
+        return False, "", "SSH user must be root (got uid %s)" % (out.strip() or "?")
+    ok, out, err = run_ssh_command(
+        access, "systemctl is-active hiveos-local.service 2>/dev/null || true", timeout=30)
+    was_active = ok and out.strip() == "active"
+    tar_bytes = _import_build_tar()
+    if not tar_bytes:
+        return False, "", "failed to pack local application files"
+    ok, msg = _import_ssh_ok(
+        run_ssh_command(access, "mkdir -p %s && tar -xzf - -C %s && echo __TAR_OK__"
+                        % (IMPORT_REMOTE_DIR, IMPORT_REMOTE_DIR),
+                        timeout=180, stdin_data=tar_bytes), "__TAR_OK__")
+    if not ok:
+        return False, "", "code upload failed: %s" % msg
+    if was_active:
+        ok, msg = _import_ssh_ok(
+            run_ssh_command(access, "systemctl restart hiveos-local.service && echo __SVC_OK__",
+                            timeout=90), "__SVC_OK__")
+        if not ok:
+            return False, "", "service restart failed: %s" % msg
+        return True, "updated", ""
+    ok, out, err = run_ssh_command(
+        access, "cd %s && chmod +x install.sh && ./install.sh > /tmp/hiveos-local-install.log 2>&1 "
+                "&& echo __INSTALLED__ || tail -n 5 /tmp/hiveos-local-install.log" % IMPORT_REMOTE_DIR,
+        timeout=IMPORT_INSTALL_TIMEOUT)
+    if ok and "__INSTALLED__" in out:
+        return True, "installed", ""
+    detail = (err or out or "unknown error").strip().splitlines()
+    return False, "", "install failed: %s" % (detail[-1][:200] if detail else "unknown error")
+
+def _import_ensure_key(access, force_set, self_password):
+    """Read the node's dashboard key; on a fresh install overwrite it with the
+    farm password so the whole cluster shares one dashboard password.
+    Returns (key, kept|set) or ('', error_message)."""
+    if not force_set:
+        ok, out, err = run_ssh_command(
+            access, "cat /hive-config/dashboard.key 2>/dev/null || true", timeout=30)
+        key = out.strip() if ok else ""
+        if key and len(key) <= 128 and "[ERROR" not in key:
+            return key, "kept"
+    b64 = base64.b64encode(str(self_password).encode("utf-8")).decode("ascii")
+    ok, msg = _import_ssh_ok(
+        run_ssh_command(access,
+                        "mkdir -p /hive-config && echo '%s' | base64 -d > /hive-config/dashboard.key "
+                        "&& chmod 600 /hive-config/dashboard.key "
+                        "&& systemctl restart hiveos-local.service && echo __KEY_OK__" % b64,
+                        timeout=90), "__KEY_OK__")
+    if not ok:
+        return "", "dashboard key setup failed: %s" % msg
+    return str(self_password), "set"
+
+def _import_upsert_jump_entries(state, jump_entries):
+    """Merge the import's jump definitions into the local library by natural key
+    (host+port+user); keeps existing ids, refreshes passwords (newer wins on sync)."""
+    now = int(time.time())
+    for jk, jd in jump_entries.items():
+        existing = None
+        for j in state.get("jump_hosts", []):
+            if (str(j.get("host", "")).lower() == jd["host"].lower()
+                    and int(j.get("port", 22) or 22) == jd["port"]
+                    and str(j.get("user", "")) == jd["user"]):
+                existing = j
+                break
+        if existing is None:
+            state.setdefault("jump_hosts", []).append(dict(jd))
+        else:
+            existing["password"] = jd["password"]
+            existing["auth"] = "password"
+            existing["updated_at"] = now
+            jd["id"] = existing["id"]  # accesses must reference the kept id
+
+def _import_make_access_list(accs, jump_entries):
+    """Access dicts for rig entries (jump referenced via jump_id), validated.
+    Deterministic ids: re-import upserts the same route instead of duplicating it."""
+    result = []
+    for acc in accs:
+        payload = {
+            "id": _det_id("acc", acc["host"].lower(), acc["port"], acc["user"]),
+            "name": "%s@%s" % (acc["user"], acc["host"]),
+            "type": "jump" if (acc.get("jump_key") and acc["jump_key"] in jump_entries) else "direct",
+            "host": acc["host"], "port": acc["port"], "user": acc["user"],
+            "auth": "password", "password": acc["password"],
+        }
+        if payload["type"] == "jump":
+            payload["jump_id"] = jump_entries[acc["jump_key"]]["id"]
+        clean, err = validate_access_payload(payload)
+        if clean:
+            result.append(clean)
+    return result
+
+def _import_cluster_payload(state, entries, self_entry, jump_entries):
+    """Full cluster snapshot to push to imported nodes."""
+    rigs = []
+    if isinstance(self_entry, dict) and self_entry.get("id"):
+        rigs.append(self_entry)
+    for e in entries:
+        if e.get("id") != (self_entry or {}).get("id"):
+            rigs.append(e)
+    return {
+        "cluster_name": state.get("cluster_name", ""),
+        "rigs": rigs,
+        "removed": [],
+        "jump_hosts": [dict(j) for j in jump_entries.values()],
+        "clusters": state.get("clusters", []),
+        "from_id": state.get("self_id", ""),
+    }
+
+def _import_bootstrap_node(access, st, node_entry, payload, sync_interval):
+    """Teach the imported node about the whole cluster.
+
+    Virgin node (no peers/jumps in its cluster.json): write a complete
+    cluster.json + self-id sidecar directly (deterministic self_id -> idempotent).
+    Established node: merge via its local API, renaming its entry to the real
+    self_id so no duplicate of itself appears."""
+    st["status"] = "bootstrapping"
+    ok, out, err = run_ssh_command(
+        access, "cat /hive-config/cluster.json 2>/dev/null || true", timeout=30)
+    remote = None
+    if ok and out.strip():
+        try:
+            remote = json.loads(out)
+        except Exception:
+            remote = None
+    virgin = not (isinstance(remote, dict)
+                  and (len([r for r in remote.get("rigs", []) if isinstance(r, dict)]) > 1
+                       or remote.get("jump_hosts")))
+    if virgin:
+        body = dict(payload)
+        body["self_id"] = node_entry["id"]
+        body["sync_interval"] = sync_interval
+        body["rigs"] = [dict(node_entry, is_self=True)] + \
+                       [r for r in payload.get("rigs", []) if r.get("id") != node_entry["id"]]
+        b64 = base64.b64encode(json.dumps(body).encode("utf-8")).decode("ascii")
+        ok, msg = _import_ssh_ok(
+            run_ssh_command(access,
+                            "mkdir -p /hive-config && echo '%s' | base64 -d > /hive-config/cluster.json.tmp "
+                            "&& chmod 600 /hive-config/cluster.json.tmp "
+                            "&& mv /hive-config/cluster.json.tmp /hive-config/cluster.json "
+                            "&& echo '%s' | base64 -d > /hive-config/cluster-self-id "
+                            "&& chmod 600 /hive-config/cluster-self-id && echo __W_OK__"
+                            % (b64, base64.b64encode(str(node_entry["id"]).encode()).decode()),
+                            timeout=60), "__W_OK__")
+        if not ok:
+            st["status"] = "failed"
+            st["message"] = "cluster config write failed: %s" % msg
+            return False
+        return True
+    # Established node: merge through its own API; adopt its real self_id
+    remote_self_id = str(remote.get("self_id", ""))
+    entry = json.loads(json.dumps(node_entry))
+    entry["id"] = remote_self_id or entry["id"]
+    body = dict(payload)
+    body["rigs"] = [r for r in payload.get("rigs", []) if r.get("id") != node_entry["id"]] + [entry]
+    curl_cmd = build_curl_command("POST", "api/cluster/sync", True, st.get("key", ""))
+    ok, out, err = run_ssh_command(access, curl_cmd, timeout=60,
+                                   stdin_data=json.dumps(body).encode("utf-8"))
+    if not ok:
+        st["status"] = "failed"
+        st["message"] = "cluster merge failed: %s" % (err or "connection failed")
+        return False
+    body_text, code = _parse_curl_output(out)
+    if code >= 400:
+        st["status"] = "failed"
+        st["message"] = "cluster merge failed: HTTP %d" % code
+        return False
+    return True
+
+def _import_job_snapshot(job):
+    """Password-free view of a job for the UI."""
+    with _import_jobs_lock:
+        nodes = []
+        for key in job["_order"]:
+            st = job["nodes"][key]
+            nodes.append({
+                "name": st["name"],
+                "status": st["status"],
+                "message": st.get("message", ""),
+                "accesses": [{k: a[k] for k in
+                              ("host", "port", "user", "jump_label", "result", "error") if k in a}
+                             for a in st["accesses"]],
+                "action": st.get("action", ""),
+                "key_state": st.get("key_state", ""),
+                "rig_id": st.get("rig_id", ""),
+            })
+        return {"job_id": job["id"], "done": job["done"], "canceled": bool(job["cancel"]),
+                "summary": job.get("summary", ""), "nodes": nodes}
+
+def _import_process_node(job, st, jump_entries, self_password):
+    """Per-node pipeline: verify every route, install/refresh the app, set up the dashboard key."""
+    if job["cancel"]:
+        st["status"] = "skipped"
+        return
+    # 1. Route test: every access must be verified from here
+    st["status"] = "testing"
+    good = []
+    for acc in st["accesses"]:
+        if job["cancel"]:
+            break
+        access = _import_access_dict(acc, jump_entries)
+        ok, out, err = run_ssh_command(access, "hostname && echo __OK__", timeout=45)
+        if ok and "__OK__" in out:
+            acc["result"] = "ok"
+            good.append(access)
+        else:
+            acc["result"] = "fail"
+            acc["error"] = (err or "connection failed")[:200]
+    if not good:
+        st["status"] = "failed"
+        st["message"] = "No working SSH route"
+        return
+    if job["cancel"]:
+        st["status"] = "skipped"
+        return
+    # 2. Install / refresh the app on the node
+    st["status"] = "installing"
+    ok, action, msg = _import_install_node(good[0])
+    st["action"] = action
+    if not ok:
+        st["status"] = "failed"
+        st["message"] = msg
+        return
+    if job["cancel"]:
+        st["status"] = "skipped"
+        return
+    # 3. Dashboard key: fresh installs get the farm password, existing keep theirs
+    st["status"] = "key"
+    key, key_state = _import_ensure_key(good[0], force_set=(action == "installed"),
+                                        self_password=self_password)
+    if not key:
+        st["status"] = "failed"
+        st["message"] = key_state
+        return
+    st["key"] = key
+    st["key_state"] = key_state
+    st["status"] = "ready"
+
+def _cluster_import_worker(job, parsed):
+    self_password = str(app.config.get('ACCESS_PASSWORD', ''))
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    now = int(time.time())
+
+    # Jump library: merge by natural key, reuse existing ids
+    jump_entries = {}
+    for jd in parsed["jumps"]:
+        entry = {
+            "id": _det_id("jump", jd["host"].lower(), jd["port"], jd["user"]),
+            "name": "jump-%s" % jd["host"],
+            "host": jd["host"], "port": jd["port"], "user": jd["user"],
+            "auth": "password", "password": jd["password"], "updated_at": now,
+        }
+        for j in state.get("jump_hosts", []):
+            if (str(j.get("host", "")).lower() == jd["host"].lower()
+                    and int(j.get("port", 22) or 22) == jd["port"]
+                    and str(j.get("user", "")) == jd["user"]):
+                entry["id"] = j.get("id") or entry["id"]
+                break
+        jump_entries[jd["key"]] = entry
+
+    for node in parsed["nodes"]:
+        key = node["name"].lower()
+        accesses = []
+        for acc in node["accesses"]:
+            jk = acc.get("jump_key")
+            label = "direct"
+            if jk and jk in jump_entries:
+                jj = jump_entries[jk]
+                label = "%s:%d (%s)" % (jj["host"], jj["port"], jj["user"])
+            accesses.append({"host": acc["host"], "port": acc["port"], "user": acc["user"],
+                             "password": acc["password"], "jump_key": jk, "jump_label": label,
+                             "result": "", "error": ""})
+        job["nodes"][key] = {"name": node["name"], "status": "queued",
+                             "message": "", "accesses": accesses,
+                             "action": "", "key_state": "", "key": "", "rig_id": ""}
+    with _import_jobs_lock:
+        job["_order"] = [node["name"].lower() for node in parsed["nodes"]]
+
+    def process_node(key):
+        st = job["nodes"][key]
+        try:
+            _import_process_node(job, st, jump_entries, self_password)
+        except Exception as e:
+            logging.error(f"Cluster import: node '{st['name']}' processing error: {e}")
+            st["status"] = "failed"
+            st["message"] = "internal error: %s" % str(e)[:150]
+
+    keys = list(job["nodes"].keys())
+    with ThreadPoolExecutor(max_workers=max(1, min(_IMPORT_MAX_PARALLEL, len(keys)))) as pool:
+        list(pool.map(process_node, keys))
+
+    ready_keys = [k for k in keys if job["nodes"][k]["status"] == "ready"]
+    if job["cancel"]:
+        for k in keys:
+            if job["nodes"][k]["status"] in ("queued", "testing", "installing", "key", "ready"):
+                job["nodes"][k]["status"] = "skipped"
+        ready_keys = [k for k in ready_keys if job["nodes"][k]["status"] == "ready"]
+
+    # 4. Build the entries this node will own locally, then push the full state to nodes.
+    # A node whose name matches an existing rig (including this rig itself) merges into
+    # that entry - keeping its real id so the payload cannot duplicate it after sync.
+    entries = {}
+    for k in ready_keys:
+        st = job["nodes"][k]
+        node = next(n for n in parsed["nodes"] if n["name"].lower() == k)
+        # only verified routes are stored in the entry (dead routes slow every SSH call)
+        verified = [a for a in node["accesses"]
+                    if any(x["host"] == a["host"] and x["port"] == a["port"]
+                           and x["user"] == a["user"] and x["result"] == "ok" for x in st["accesses"])]
+        new_accesses = _import_make_access_list(verified, jump_entries)
+        existing = next((r for r in state["rigs"]
+                         if str(r.get("name", "")).strip().lower() == st["name"].lower()), None)
+        if existing is not None:
+            entry = json.loads(json.dumps(existing))
+            by_id = {a.get("id"): a for a in entry.get("accesses", []) if isinstance(a, dict)}
+            for a in new_accesses:
+                by_id[a["id"]] = a
+            entry["accesses"] = list(by_id.values())
+            if entry.get("id") != state["self_id"]:
+                entry["password"] = st["key"]
+            entry["host_label"] = existing.get("host_label") or st["accesses"][0]["host"]
+            entry.setdefault("added_at", now)
+            entry["updated_at"] = now
+        else:
+            entry = {
+                "id": _det_id("rig", k),
+                "name": st["name"],
+                "host_label": st["accesses"][0]["host"],
+                "is_self": False,
+                "password": st["key"],
+                "accesses": new_accesses,
+                "updated_at": now,
+                "added_at": now,
+            }
+        entries[k] = entry
+    if ready_keys:
+        payload = _import_cluster_payload(state, [entries[k] for k in ready_keys],
+                                          next((r for r in state["rigs"] if r.get("id") == state["self_id"]), None),
+                                          jump_entries)
+
+        def bootstrap_node(key):
+            st = job["nodes"][key]
+            try:
+                if job["cancel"]:
+                    st["status"] = "skipped"
+                    return
+                # reuse the first verified access of this node
+                access = None
+                for acc in st["accesses"]:
+                    if acc["result"] == "ok":
+                        access = _import_access_dict(acc, jump_entries)
+                        break
+                if access is None:
+                    st["status"] = "failed"
+                    st["message"] = "no verified route left for bootstrap"
+                    return
+                if not _import_bootstrap_node(access, st, entries[key], payload,
+                                              state.get("sync_interval", DEFAULT_SYNC_INTERVAL)):
+                    return
+                st["status"] = "done"
+                st["message"] = "cluster config %s" % ("merged" if st.get("key_state") == "kept" else "written")
+            except Exception as e:
+                logging.error(f"Cluster import: node '{st['name']}' bootstrap error: {e}")
+                st["status"] = "failed"
+                st["message"] = "internal error: %s" % str(e)[:150]
+
+        with ThreadPoolExecutor(max_workers=max(1, min(_IMPORT_MAX_PARALLEL, len(ready_keys)))) as pool:
+            list(pool.map(bootstrap_node, ready_keys))
+
+    # 5. Local upsert on this node + one sync cycle to propagate everywhere
+    done_keys = [k for k in ready_keys if job["nodes"][k]["status"] == "done"]
+    for k in ready_keys:
+        st = job["nodes"][k]
+        if st["status"] == "bootstrapping":
+            st["status"] = "failed"
+            st["message"] = "bootstrap interrupted"
+    if done_keys or job["cancel"]:
+        state = load_cluster_state()
+        _CURRENT_SELF_ID["value"] = state["self_id"]
+        now = int(time.time())
+        _import_upsert_jump_entries(state, jump_entries)
+        for k in ready_keys:
+            st = job["nodes"][k]
+            existing = next((r for r in state["rigs"]
+                             if str(r.get("name", "")).strip().lower() == st["name"].lower()), None)
+            node = next(n for n in parsed["nodes"] if n["name"].lower() == k)
+            verified = [a for a in node["accesses"]
+                        if any(x["host"] == a["host"] and x["port"] == a["port"]
+                               and x["user"] == a["user"] and x["result"] == "ok" for x in st["accesses"])]
+            new_accesses = _import_make_access_list(verified, jump_entries)
+            if existing is not None:
+                by_id = {a.get("id"): a for a in existing.get("accesses", []) if isinstance(a, dict)}
+                for a in new_accesses:
+                    by_id[a["id"]] = a
+                existing["accesses"] = list(by_id.values())
+                if existing.get("id") != state["self_id"]:
+                    existing["password"] = st["key"]
+                existing.setdefault("added_at", now)
+                existing["updated_at"] = now
+                if not existing.get("host_label"):
+                    existing["host_label"] = st["accesses"][0]["host"]
+                st["rig_id"] = existing["id"]
+                st["message"] = (st["message"] + "; merged into existing rig entry").strip("; ")
+            else:
+                state["rigs"].append(entries[k])
+                st["rig_id"] = entries[k]["id"]
+        save_cluster_state(state)
+        if done_keys and not job["cancel"]:
+            try:
+                run_sync_cycle(triggered_by="import")
+            except Exception as e:
+                logging.error(f"Cluster import: post-import sync failed: {e}")
+
+    added = len([k for k in ready_keys if job["nodes"][k]["status"] == "done"])
+    failed = len([k for k in keys if job["nodes"][k]["status"] == "failed"])
+    skipped = len([k for k in keys if job["nodes"][k]["status"] == "skipped"])
+    job["summary"] = ("%d added/merged, %d failed, %d skipped" % (added, failed, skipped)
+                      if job["cancel"] and skipped else
+                      "%d added/merged, %d failed" % (added, failed))
+    job["done"] = True
+    job["finished_at"] = int(time.time())
+    logging.info(f"Cluster import job {job['id']}: {job['summary']}")
 
 # ---------------- Cluster stats cache ----------------
 
@@ -3024,6 +3817,9 @@ def save_oc_preset():
                     "is_default": False, "values": clean,
                     "created_at": now, "updated_at": now
                 }
+                # A share/import payload may carry is_default on a fresh preset
+                if make_default:
+                    preset["is_default"] = True
                 presets.append(preset)
                 msg = f"OC preset '{name}' saved."
         if make_default:
@@ -4906,6 +5702,87 @@ def api_cluster_sync_push():
         state["cluster_name"] = str(data["cluster_name"])
     saved = save_cluster_state(state)
     return jsonify({"success": bool(saved), "message": "Cluster state merged." if saved else "Failed to persist merged state."})
+
+# ---------------- CSV cluster import API ----------------
+
+@app.route('/api/cluster/import/parse', methods=['POST'])
+def api_cluster_import_parse():
+    """Live CSV validation for the import dialog (no state changes, no passwords echoed)."""
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", ""))
+    if len(text) > _IMPORT_MAX_TEXT:
+        return jsonify({"success": False, "errors": [{"line": 0, "message": "Input is too large (max 256 KB)."}]}), 400
+    parsed = parse_cluster_csv(text)
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    existing = {str(r.get("name", "")).strip().lower(): r for r in state["rigs"]}
+    nodes = []
+    for node in parsed["nodes"]:
+        row = {
+            "name": node["name"],
+            "lines": node["lines"],
+            "accesses": [{"host": a["host"], "port": a["port"], "user": a["user"],
+                          "jump": (a["jump_key"] or "").replace("|", ":")} for a in node["accesses"]],
+        }
+        ex = existing.get(node["name"].lower())
+        if ex is not None:
+            row["match"] = "self" if ex.get("id") == state["self_id"] else "merge"
+        else:
+            row["match"] = "new"
+        nodes.append(row)
+    return jsonify({
+        "success": parsed["ok"],
+        "delimiter": parsed["delimiter"],
+        "nodes": nodes,
+        "jumps": [{"host": j["host"], "port": j["port"], "user": j["user"],
+                   "lines": j["lines"]} for j in parsed["jumps"]],
+        "errors": parsed["errors"],
+    })
+
+@app.route('/api/cluster/import', methods=['POST'])
+def api_cluster_import_start():
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", ""))
+    if len(text) > _IMPORT_MAX_TEXT:
+        return jsonify({"success": False, "message": "Input is too large (max 256 KB)."}), 400
+    parsed = parse_cluster_csv(text)
+    if not parsed["ok"]:
+        return jsonify({"success": False, "errors": parsed["errors"]}), 400
+    if not parsed["nodes"]:
+        return jsonify({"success": False, "errors": [{"line": 0, "message": "Nothing to import."}]}), 400
+    if len(parsed["nodes"]) > _IMPORT_MAX_NODES:
+        return jsonify({"success": False, "errors": [{"line": 0, "message": "Too many nodes (max %d per import)." % _IMPORT_MAX_NODES}]}), 400
+    jid = uuid.uuid4().hex[:10]
+    job = {"id": jid, "cancel": False, "done": False, "started_at": int(time.time()),
+           "finished_at": 0, "summary": "", "nodes": {}, "_order": []}
+    with _import_jobs_lock:
+        _import_jobs[jid] = job
+        # keep only the recent jobs around
+        finished = [k for k, v in _import_jobs.items() if v["done"]]
+        if len(finished) > 4:
+            for k in finished[:-4]:
+                _import_jobs.pop(k, None)
+    t = threading.Thread(target=_cluster_import_worker, args=(job, parsed),
+                         daemon=True, name="cluster-import-%s" % jid)
+    t.start()
+    logging.info(f"Cluster import job {jid} started: {len(parsed['nodes'])} nodes "
+                 f"by IP: {request.remote_addr}")
+    return jsonify({"success": True, "job_id": jid})
+
+@app.route('/api/cluster/import/status/<jid>', methods=['GET'])
+def api_cluster_import_status(jid):
+    job = _import_jobs.get(jid)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found."}), 404
+    return jsonify({"success": True, "job": _import_job_snapshot(job)})
+
+@app.route('/api/cluster/import/cancel/<jid>', methods=['POST'])
+def api_cluster_import_cancel(jid):
+    job = _import_jobs.get(jid)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found."}), 404
+    job["cancel"] = True
+    return jsonify({"success": True, "message": "Cancel requested."})
 
 # ---------------- Remote rig proxy (full dashboard over SSH) ----------------
 

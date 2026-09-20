@@ -144,6 +144,10 @@ Each rig runs a background worker that, for every known peer, pulls the peer's r
 
 Requirements on every rig: `curl` (present on HiveOS by default) and `sshpass` for password-based accesses (installed by `install.sh`, or auto-installed on demand).
 
+### CSV cluster import (SSH Accesses page)
+
+The **Import Cluster** button bootstraps a whole farm from one paste. Line format: `name;ip,port,login,password[;jump]` — the third section is either a full jump-server definition (`ip,port,login,password`), a bare host reference to a jump already listed in the text or the library, or empty (direct connection). Several lines sharing the same name describe one node with several routes. On **Apply** the rig verifies every SSH route, installs/refreshes the app on each node (root SSH required), unifies the dashboard password (fresh installs get this rig's password, existing installs keep theirs), links all nodes to each other and triggers a sync. The import is idempotent: nodes and routes get deterministic ids, re-importing the same list updates credentials in place instead of creating duplicates. Tip: add a line with this rig's own name (and its SSH credentials) so imported nodes get a route back to it.
+
 ---
 
 ## Centralized Monitoring (Fleet Manager) — Deprecated

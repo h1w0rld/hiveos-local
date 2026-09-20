@@ -95,6 +95,75 @@ body {
     animation: pulse 1.2s infinite;
 }
 
+/* Orange "no info / no access" state (static, unlike the pulsing check-in-progress warn) */
+.conn-dot-unknown {
+    background: #f59e0b;
+    opacity: 0.75;
+}
+
+/* Share dialogs (sync entities between rigs) */
+.share-list {
+    max-height: 46vh;
+    overflow-y: auto;
+}
+
+.share-item {
+    padding: 0.35rem 0.25rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.share-item:last-child {
+    border-bottom: 0;
+}
+
+.share-item-label {
+    font-weight: 600;
+    font-size: 0.9rem;
+    line-height: 1.2;
+}
+
+.share-item-sub {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    word-break: break-all;
+}
+
+.share-rig-detail {
+    font-size: 0.78rem;
+    color: #94a3b8;
+}
+
+.share-legend .conn-dot {
+    margin-right: 4px;
+    vertical-align: middle;
+}
+
+.share-progress {
+    height: 8px;
+}
+
+.share-progress-log {
+    max-height: 32vh;
+    overflow-y: auto;
+    font-size: 0.85rem;
+}
+
+.share-progress-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.share-progress-line:last-child {
+    border-bottom: 0;
+}
+
+.share-progress-line .text-break {
+    color: #94a3b8;
+}
+
 /* Cluster rig cards are fully clickable (open dashboard on click) */
 .rig-card-clickable {
     cursor: pointer;

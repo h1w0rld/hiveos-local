@@ -832,6 +832,30 @@ document.addEventListener('DOMContentLoaded', function() {
 
     document.getElementById('ocEditCancelBtn').addEventListener('click', () => setOcEditMode(null));
 
+    // Share buttons (wallets / flight sheets / OC presets / overclock / fans)
+    document.getElementById('walletShareBtn').addEventListener('click', () => openShareDialog('wallets'));
+    document.getElementById('fsShareBtn').addEventListener('click', () => openShareDialog('fsheets'));
+    document.getElementById('ocPresetShareBtn').addEventListener('click', () => openShareDialog('presets'));
+    document.getElementById('ocAllShareBtn').addEventListener('click', () => openShareDialog('oc'));
+    document.getElementById('afShareBtn').addEventListener('click', () => openShareDialog('fans'));
+    document.getElementById('shareSelectNextBtn').addEventListener('click', shareSelectNext);
+    document.getElementById('shareTargetsOkBtn').addEventListener('click', shareTargetsConfirm);
+    document.getElementById('shareCheckBtn').addEventListener('click', function() { window.shareCheckTargets(this); });
+    document.getElementById('shareAllEntities').addEventListener('change', function() {
+        document.querySelectorAll('.share-entity-check').forEach(b => { b.checked = this.checked; });
+        shareSyncEntityState();
+    });
+    document.getElementById('shareEntitiesList').addEventListener('change', function(e) {
+        if (e.target.classList.contains('share-entity-check')) shareSyncEntityState();
+    });
+    document.getElementById('shareAllRigs').addEventListener('change', function() {
+        document.querySelectorAll('.share-rig-check').forEach(b => { b.checked = this.checked; });
+        shareSyncRigState();
+    });
+    document.getElementById('shareRigsList').addEventListener('change', function(e) {
+        if (e.target.classList.contains('share-rig-check')) shareSyncRigState();
+    });
+
     // 6. Main view routing (Cluster / SSH Accesses / Rig Dashboard)
     document.querySelectorAll('#mainNavTabs .nav-link').forEach(link => {
         link.addEventListener('click', function(e) {
@@ -899,6 +923,10 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('jumpServerPasswordBlock').classList.toggle('d-none', this.value !== 'password');
         document.getElementById('jumpServerKeyBlock').classList.toggle('d-none', this.value !== 'key');
     });
+    document.getElementById('importClusterBtn').addEventListener('click', clusterImportOpen);
+    document.getElementById('clusterImportText').addEventListener('input', clusterImportScheduleParse);
+    document.getElementById('clusterImportApplyBtn').addEventListener('click', clusterImportStart);
+    document.getElementById('clusterImportCancelBtn').addEventListener('click', clusterImportCancelJob);
 
     // 7. Auto-refresh interval dropdowns (Off/5s/10s/30s/1m)
 
@@ -3030,6 +3058,219 @@ window.deleteJump = async function(jumpId) {
     }
 };
 
+// ---------------- Cluster CSV import ----------------
+
+let clusterImportJobId = null;
+let clusterImportTimer = null;
+let clusterImportParseTimer = null;
+
+function clusterImportOpen() {
+    const modalEl = document.getElementById('clusterImportModal');
+    document.getElementById('clusterImportText').value = '';
+    document.getElementById('clusterImportErrors').innerHTML = '';
+    document.getElementById('clusterImportPreview').innerHTML = '';
+    document.getElementById('clusterImportEdit').classList.remove('d-none');
+    document.getElementById('clusterImportProgress').classList.add('d-none');
+    document.getElementById('clusterImportSummary').innerHTML = '';
+    const applyBtn = document.getElementById('clusterImportApplyBtn');
+    applyBtn.disabled = true;
+    applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    setTimeout(() => document.getElementById('clusterImportText').focus(), 300);
+}
+
+function clusterImportScheduleParse() {
+    clearTimeout(clusterImportParseTimer);
+    clusterImportParseTimer = setTimeout(clusterImportParse, 400);
+}
+
+async function clusterImportParse() {
+    const text = document.getElementById('clusterImportText').value;
+    const errorsEl = document.getElementById('clusterImportErrors');
+    const previewEl = document.getElementById('clusterImportPreview');
+    const applyBtn = document.getElementById('clusterImportApplyBtn');
+    if (!text.trim()) {
+        errorsEl.innerHTML = '';
+        previewEl.innerHTML = '';
+        applyBtn.disabled = true;
+        return;
+    }
+    let data;
+    try {
+        const response = await fetch('/api/cluster/import/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ text: text })
+        });
+        data = await response.json();
+    } catch (e) {
+        errorsEl.innerHTML = '<div class="alert alert-danger small py-2 px-3 mb-0">Network error while validating input.</div>';
+        previewEl.innerHTML = '';
+        applyBtn.disabled = true;
+        return;
+    }
+    const errors = (data && data.errors) || [];
+    if (errors.length) {
+        errorsEl.innerHTML =
+            '<div class="alert alert-danger small py-2 px-3 mb-2"><i class="bi bi-exclamation-triangle-fill me-1"></i>' +
+            errors.length + ' problem' + (errors.length === 1 ? '' : 's') + ' — fix the highlighted lines. Apply is disabled.</div>' +
+            errors.map(e =>
+                '<div class="small text-danger mb-1"><span class="badge bg-danger-subtle text-danger me-1">line ' +
+                escapeHtml(String(e.line)) + '</span> ' + escapeHtml(e.message) + '</div>').join('');
+    } else {
+        errorsEl.innerHTML = '<div class="alert alert-success small py-2 px-3 mb-0"><i class="bi bi-check-circle-fill me-1"></i>' +
+            'Input is valid. Review the plan below and click Apply.</div>';
+    }
+    const nodes = (data && data.nodes) || [];
+    const jumps = (data && data.jumps) || [];
+    const matchBadge = {
+        'new': '<span class="badge bg-success-subtle text-success">new</span>',
+        'merge': '<span class="badge bg-info-subtle text-info">merge into existing</span>',
+        'self': '<span class="badge bg-warning-subtle text-warning">this rig</span>'
+    };
+    previewEl.innerHTML =
+        (jumps.length ? '<div class="small text-muted mb-1">Jump servers: ' +
+            jumps.map(j => '<code>' + escapeHtml(j.host + ':' + j.port + ' (' + j.user + ')') + '</code>').join(', ') + '</div>' : '') +
+        (nodes.length ? '<div class="table-responsive"><table class="table table-sm table-borderless align-middle mb-0" style="font-size: 0.85rem;">' +
+            '<thead><tr class="text-muted border-bottom border-secondary-subtle">' +
+            '<th>Node</th><th>Routes</th><th>Status</th></tr></thead><tbody>' +
+            nodes.map(n => {
+                const routes = (n.accesses || []).map(a =>
+                    '<div class="font-monospace">' + escapeHtml(a.host + ':' + a.port + ' (' + a.user + ')') +
+                    (a.jump ? ' <span class="text-info">via ' + escapeHtml(a.jump) + '</span>'
+                            : ' <span class="text-muted">direct</span>') + '</div>').join('');
+                return '<tr><td class="fw-semibold">' + escapeHtml(n.name) + '</td>' +
+                    '<td>' + routes + '</td><td>' + (matchBadge[n.match] || escapeHtml(n.match || '')) + '</td></tr>';
+            }).join('') + '</tbody></table></div>' : '');
+    applyBtn.disabled = !!(errors.length || !nodes.length);
+}
+
+async function clusterImportStart() {
+    const text = document.getElementById('clusterImportText').value;
+    const applyBtn = document.getElementById('clusterImportApplyBtn');
+    applyBtn.disabled = true;
+    applyBtn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Starting...';
+    let data;
+    try {
+        const response = await fetch('/api/cluster/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ text: text })
+        });
+        data = await response.json();
+    } catch (e) {
+        showToast('Network error while starting the import.', false);
+        applyBtn.disabled = false;
+        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+        return;
+    }
+    if (!data || !data.success || !data.job_id) {
+        const errors = (data && data.errors) || [{ line: 0, message: data && data.message || 'Failed to start import.' }];
+        document.getElementById('clusterImportErrors').innerHTML = errors.map(e =>
+            '<div class="small text-danger mb-1"><span class="badge bg-danger-subtle text-danger me-1">line ' +
+            escapeHtml(String(e.line)) + '</span> ' + escapeHtml(e.message) + '</div>').join('');
+        applyBtn.disabled = false;
+        applyBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Apply &amp; Install';
+        return;
+    }
+    clusterImportJobId = data.job_id;
+    document.getElementById('clusterImportEdit').classList.add('d-none');
+    document.getElementById('clusterImportProgress').classList.remove('d-none');
+    const cancelBtn = document.getElementById('clusterImportCancelBtn');
+    cancelBtn.classList.remove('d-none');
+    const bar = document.getElementById('clusterImportProgressBar');
+    bar.classList.add('progress-bar-animated');
+    bar.classList.remove('bg-danger');
+    bar.style.width = '0%';
+    document.getElementById('clusterImportNodes').innerHTML =
+        '<div class="text-muted"><i class="bi bi-arrow-repeat spin-animation me-1"></i>Preparing import...</div>';
+    clusterImportPoll();
+}
+
+async function clusterImportPoll() {
+    if (!clusterImportJobId) return;
+    let job = null;
+    let gone = false;
+    try {
+        const response = await fetch('/api/cluster/import/status/' + encodeURIComponent(clusterImportJobId));
+        if (response.status === 404) {
+            gone = true;
+        } else {
+            const data = await response.json();
+            job = data && data.job;
+        }
+    } catch (e) { /* transient network error - keep polling */ }
+    if (gone) {
+        clusterImportJobId = null;
+        document.getElementById('clusterImportSummary').innerHTML =
+            '<span class="text-danger">Import job expired.</span>';
+        return;
+    }
+    if (!job) {
+        clusterImportTimer = setTimeout(clusterImportPoll, 1500);
+        return;
+    }
+    const nodesEl = document.getElementById('clusterImportNodes');
+    const barEl = document.getElementById('clusterImportProgressBar');
+    const summaryEl = document.getElementById('clusterImportSummary');
+    const statusBadge = {
+        'queued': '<span class="badge bg-secondary-subtle text-secondary">queued</span>',
+        'testing': '<span class="badge bg-info-subtle text-info">testing SSH...</span>',
+        'installing': '<span class="badge bg-primary-subtle text-primary">installing app...</span>',
+        'key': '<span class="badge bg-primary-subtle text-primary">dashboard key...</span>',
+        'bootstrapping': '<span class="badge bg-primary-subtle text-primary">linking cluster...</span>',
+        'ready': '<span class="badge bg-info-subtle text-info">ready</span>',
+        'done': '<span class="badge bg-success-subtle text-success">done</span>',
+        'failed': '<span class="badge bg-danger-subtle text-danger">failed</span>',
+        'skipped': '<span class="badge bg-secondary-subtle text-secondary">skipped</span>'
+    };
+    const weights = { queued: 0, testing: 20, installing: 50, key: 70, bootstrapping: 85, ready: 90, done: 100, failed: 100, skipped: 100 };
+    const list = (job.nodes || []);
+    nodesEl.innerHTML = list.map(n => {
+        const routes = (n.accesses || []).map(a => {
+            const icon = a.result === 'ok' ? '<i class="bi bi-check-circle-fill text-success"></i>'
+                : a.result === 'fail' ? '<i class="bi bi-x-circle-fill text-danger"></i>'
+                : '<i class="bi bi-circle text-muted"></i>';
+            const err = a.error ? ' <span class="text-danger">' + escapeHtml(a.error) + '</span>' : '';
+            return '<div class="font-monospace">' + icon + ' ' + escapeHtml(a.host + ':' + a.port + ' (' + a.user + ')') +
+                (a.jump_label && a.jump_label !== 'direct' ? ' <span class="text-info">via ' + escapeHtml(a.jump_label) + '</span>' : '') + err + '</div>';
+        }).join('');
+        const msg = n.message ? '<div class="text-muted">' + escapeHtml(n.message) + '</div>' : '';
+        return '<div class="border-bottom border-secondary-subtle py-1">' +
+            '<div class="d-flex justify-content-between align-items-center"><span class="fw-semibold">' +
+            escapeHtml(n.name) + '</span>' + (statusBadge[n.status] || escapeHtml(n.status)) + '</div>' +
+            routes + msg + '</div>';
+    }).join('');
+    const doneCount = list.filter(n => ['done', 'failed', 'skipped'].includes(n.status)).length;
+    const pct = job.done ? 100 : Math.round(list.reduce((s, n) => s + (weights[n.status] || 0), 0) / Math.max(1, list.length));
+    barEl.style.width = pct + '%';
+    if (job.done) {
+        barEl.classList.remove('progress-bar-animated');
+        barEl.classList.toggle('bg-danger', (job.summary || '').indexOf('0 added') === 0 && list.length > 0);
+        summaryEl.innerHTML = '<i class="bi bi-clipboard-check me-1"></i>' + escapeHtml(job.summary || 'Finished.') +
+            ' <span class="text-muted small">The node list refreshes as the cluster syncs. Re-apply to retry failed nodes.</span>';
+        document.getElementById('clusterImportCancelBtn').classList.add('d-none');
+        const applyBtn = document.getElementById('clusterImportApplyBtn');
+        applyBtn.disabled = false;
+        applyBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Re-apply / Retry';
+        clusterImportJobId = null;
+        loadClusterData(true);
+        loadAccessList();
+        return;
+    }
+    clusterImportTimer = setTimeout(clusterImportPoll, 1200);
+}
+
+async function clusterImportCancelJob() {
+    if (!clusterImportJobId) return;
+    try {
+        await fetch('/api/cluster/import/cancel/' + encodeURIComponent(clusterImportJobId), {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': csrfToken }
+        });
+    } catch (e) { /* ignore */ }
+}
+
 // ---------------- Flight sheets & wallets (cloud-style) ----------------
 
 // Bundled HiveOS catalogs (miners with N/A/C platforms, pools per coin, coins)
@@ -4939,27 +5180,7 @@ function afSetEnabledVisibility() {
 }
 
 function applyAutofanData(data) {
-    // Per-GPU effective values: fall back to the global scalar, then the default
-    // (the Hive cloud SPA merges globals into every item the same way)
-    const items = (data.gpus || []).map(g => ({
-        index: g.index,
-        mode: g.mode === 1 ? 'static' : 'auto',
-        static_fan: (g.static && g.static > 0) ? g.static : AF_DEFAULTS.static_fan,
-        min_fan: g.min !== null && g.min !== undefined ? g.min : (data.min_fan ? parseInt(data.min_fan, 10) || AF_DEFAULTS.min_fan : AF_DEFAULTS.min_fan),
-        max_fan: g.max !== null && g.max !== undefined ? g.max : (data.max_fan ? parseInt(data.max_fan, 10) || AF_DEFAULTS.max_fan : AF_DEFAULTS.max_fan),
-        target_temp: g.target_core !== null && g.target_core !== undefined ? g.target_core : (data.target_temp ? parseInt(data.target_temp, 10) || AF_DEFAULTS.target_temp : AF_DEFAULTS.target_temp),
-        target_mem_temp: g.target_mem !== null && g.target_mem !== undefined ? g.target_mem : (data.target_mem_temp ? parseInt(data.target_mem_temp, 10) || AF_DEFAULTS.target_mem_temp : AF_DEFAULTS.target_mem_temp),
-        critical_temp: g.critical !== null && g.critical !== undefined ? g.critical : (data.critical_temp ? parseInt(data.critical_temp, 10) || AF_DEFAULTS.critical_temp : AF_DEFAULTS.critical_temp)
-    }));
-    afApplyState({
-        enabled: data.enabled === '1',
-        critical_temp: data.critical_temp,
-        critical_action: data.critical_action || '',
-        reboot_on_errors: data.reboot_on_errors === '1',
-        smart_mode: data.smart_mode === '1',
-        no_amd: data.no_amd === '1',
-        items: items
-    });
+    afApplyState(shareAfNormalize(data));
 }
 
 function afApplyState(state) {
@@ -5037,6 +5258,673 @@ function afCollectPayload() {
         gpus: gpus
     };
 }
+
+// ---------------- Share entities with other rigs ----------------
+// A three-step flow shared by the Wallets, Flight Sheets, OC Presets,
+// Overclock and Fans forms: (1) pick the entities of the current form,
+// (2) pick target rigs and check which entities already exist there
+// (green = present, red = missing, orange = no access), (3) push with a
+// live progress. All traffic goes through the /api/remote/<id>/ SSH proxy,
+// so the same code works when managing a remote rig.
+
+const SHARE_SOURCES = {
+    wallets: { title: 'Share wallets',
+        hint: 'Select the wallets to copy to other rigs. An existing wallet with the same address is updated, not duplicated.',
+        empty: 'No wallets in the library yet.' },
+    fsheets: { title: 'Share flight sheets',
+        hint: 'Select the flight sheets to copy. Wallets used by the selected sheets are shared automatically when missing on the target rig. A sheet that is active on the target rig is re-applied after the update (the miner restarts).',
+        empty: 'No flight sheets saved yet.' },
+    presets: { title: 'Share OC presets',
+        hint: 'Select the OC presets to copy. Algorithm bindings and the default flag are shared as well; an existing preset with the same name is updated.',
+        empty: 'No OC presets saved yet.' },
+    oc: { title: 'Share overclock settings',
+        hint: 'The values currently filled in the "Set settings for all GPUs" form will be applied on the selected rigs. Empty fields are left unchanged there.',
+        empty: '' },
+    fans: { title: 'Share fan settings',
+        hint: 'Select the fan settings to copy. AutoFan is applied per GPU; when the GPU count differs, only uniform settings can be shared.',
+        empty: '' }
+};
+
+let shareCtx = null;
+
+function shareModalEl(id) {
+    return document.getElementById(id);
+}
+
+function shareModal(id) {
+    return bootstrap.Modal.getOrCreateInstance(shareModalEl(id));
+}
+
+function shareOcMatchesLive(values, live) {
+    // Mirrors the backend _oc_matches_live(): compare only the fields the
+    // share actually carries (empty clock fields are left unchanged on apply)
+    for (const k of ['core', 'lcore', 'mem', 'lmem', 'pl', 'fan']) {
+        const v = String(values[k] ?? '').trim();
+        if (v && v !== '0' && String(live[k] ?? '').trim() !== v) return false;
+    }
+    const d = String(values.delay ?? '').trim();
+    if (d && d !== '0' && String(live.delay ?? '').trim() !== d) return false;
+    for (const f of ['led', 'p0', 'idle', 'pill']) {
+        if ((String(values[f] ?? '0') === '1') !== (String(live[f] ?? '0') === '1')) return false;
+    }
+    return true;
+}
+
+// Effective per-GPU AutoFan state of a raw /api/autofan payload (same
+// mapping the fans tab applies; shared with the compare and push paths)
+function shareAfNormalize(d) {
+    const items = (d.gpus || []).map(g => ({
+        index: g.index,
+        mode: g.mode === 1 ? 'static' : 'auto',
+        static_fan: (g.static && g.static > 0) ? g.static : AF_DEFAULTS.static_fan,
+        min_fan: g.min !== null && g.min !== undefined ? g.min : (d.min_fan ? parseInt(d.min_fan, 10) || AF_DEFAULTS.min_fan : AF_DEFAULTS.min_fan),
+        max_fan: g.max !== null && g.max !== undefined ? g.max : (d.max_fan ? parseInt(d.max_fan, 10) || AF_DEFAULTS.max_fan : AF_DEFAULTS.max_fan),
+        target_temp: g.target_core !== null && g.target_core !== undefined ? g.target_core : (d.target_temp ? parseInt(d.target_temp, 10) || AF_DEFAULTS.target_temp : AF_DEFAULTS.target_temp),
+        target_mem_temp: g.target_mem !== null && g.target_mem !== undefined ? g.target_mem : (d.target_mem_temp ? parseInt(d.target_mem_temp, 10) || AF_DEFAULTS.target_mem_temp : AF_DEFAULTS.target_mem_temp),
+        critical_temp: g.critical !== null && g.critical !== undefined ? g.critical : (d.critical_temp ? parseInt(d.critical_temp, 10) || AF_DEFAULTS.critical_temp : AF_DEFAULTS.critical_temp)
+    }));
+    return {
+        enabled: d.enabled === '1',
+        critical_temp: d.critical_temp,
+        critical_action: d.critical_action || '',
+        reboot_on_errors: d.reboot_on_errors === '1',
+        smart_mode: d.smart_mode === '1',
+        no_amd: d.no_amd === '1',
+        items: items
+    };
+}
+
+function shareAfMatches(remoteData, srcState) {
+    const remote = shareAfNormalize(remoteData || {});
+    if (!!srcState.enabled !== !!remote.enabled) return false;
+    if ((srcState.critical_action || '') !== (remote.critical_action || '')) return false;
+    if (!!srcState.reboot_on_errors !== !!remote.reboot_on_errors) return false;
+    if (!!srcState.smart_mode !== !!remote.smart_mode) return false;
+    const rItems = new Map((remote.items || []).map(it => [String(it.index), it]));
+    for (const it of (srcState.items || [])) {
+        const r = rItems.get(String(it.index));
+        if (!r) return false;
+        if ((it.mode === 'static') !== (r.mode === 'static')) return false;
+        if (it.mode === 'static' && (parseInt(it.static_fan, 10) || 0) !== (parseInt(r.static_fan, 10) || 0)) return false;
+        for (const k of ['min_fan', 'max_fan', 'target_temp', 'target_mem_temp', 'critical_temp']) {
+            if ((parseInt(it[k], 10) || 0) !== (parseInt(r[k], 10) || 0)) return false;
+        }
+    }
+    return true;
+}
+
+function shareMknetMatches(fansData, cfg) {
+    const mk = (fansData || {}).mknet;
+    if (!mk || !mk.present) return false;
+    const rc = mk.config || {};
+    const n = v => { const x = parseInt(v, 10); return Number.isNaN(x) ? null : x; };
+    if (!!rc.auto !== !!cfg.auto) return false;
+    for (const k of ['target_temp', 'target_mem_temp', 'min_fan', 'max_fan']) {
+        if (n(rc[k]) !== n(cfg[k])) return false;
+    }
+    if (!cfg.auto && n(rc.static_speed) !== n(cfg.static_speed)) return false;
+    return true;
+}
+
+// Build the target-rig autofan payload from the source form state.
+// Same GPU count -> 1:1 copy; otherwise uniform values are broadcast to every
+// target GPU and non-uniform per-GPU values make the share impossible.
+function shareBuildAutofanPayload(srcState, targetGpus) {
+    const items = (srcState.items || []).filter(it => it && it.index !== undefined);
+    if (!items.length) throw new Error('Source rig has no AutoFan per-GPU settings.');
+    if (!targetGpus.length) throw new Error('Target rig has no NVIDIA GPUs for AutoFan.');
+    const payload = {
+        enabled: srcState.enabled ? '1' : '0',
+        critical_action: srcState.critical_action || '',
+        reboot_on_errors: srcState.reboot_on_errors ? '1' : '0',
+        smart_mode: srcState.smart_mode ? '1' : '0',
+        gpus: []
+    };
+    const entry = (it, index) => ({
+        index: index,
+        mode: it.mode === 'static' ? 'static' : 'auto',
+        static: parseInt(it.static_fan, 10) || 0,
+        min: parseInt(it.min_fan, 10) || 0,
+        max: parseInt(it.max_fan, 10) || 0,
+        target_core: parseInt(it.target_temp, 10) || 0,
+        target_mem: parseInt(it.target_mem_temp, 10) || 0,
+        critical: parseInt(it.critical_temp, 10) || 0
+    });
+    if (targetGpus.length === items.length) {
+        payload.gpus = items.map((it, i) => entry(it, targetGpus[i].index ?? i));
+        return payload;
+    }
+    const fields = ['mode', 'static_fan', 'min_fan', 'max_fan', 'target_temp', 'target_mem_temp', 'critical_temp'];
+    const uniform = {};
+    for (const f of fields) {
+        const vals = items.map(it => (f === 'mode' ? it.mode : (parseInt(it[f], 10) || 0)));
+        uniform[f] = (new Set(vals)).size <= 1 ? vals[0] : null;
+    }
+    const nonUniform = fields.filter(f => uniform[f] === null);
+    if (nonUniform.length) {
+        throw new Error('GPU count differs (' + items.length + ' on source, ' + targetGpus.length +
+            ' on this rig) and per-GPU values are not uniform: ' + nonUniform.join(', ') + '.');
+    }
+    payload.gpus = targetGpus.map((g, i) => ({
+        index: g.index ?? i,
+        mode: uniform.mode === 'static' ? 'static' : 'auto',
+        static: uniform.static_fan || 0,
+        min: uniform.min_fan || 0,
+        max: uniform.max_fan || 0,
+        target_core: uniform.target_temp || 0,
+        target_mem: uniform.target_mem_temp || 0,
+        critical: uniform.critical_temp || 0
+    }));
+    return payload;
+}
+
+function shareBuildMknetPayload(cfg) {
+    const n = (v, def) => { const x = parseInt(v, 10); return Number.isNaN(x) ? (def || 0) : x; };
+    return {
+        mode: cfg.auto ? 'auto' : 'static',
+        target_temp: n(cfg.target_temp, 60),
+        target_mem_temp: n(cfg.target_mem_temp, 90),
+        min_fan: n(cfg.min_fan, 5),
+        max_fan: n(cfg.max_fan, 100),
+        static_speed: n(cfg.static_speed, 70)
+    };
+}
+
+// API call against a target rig through the SSH proxy (same route the
+// remote dashboard UI uses). Throws Error with the server's message.
+async function shareApi(rig, path, method = 'GET', body = null) {
+    const url = '/api/remote/' + encodeURIComponent(rig.id) + '/' + path.replace(/^\//, '');
+    let resp;
+    try {
+        resp = await fetch(url, {
+            method: method,
+            headers: Object.assign({ 'X-CSRF-Token': csrfToken },
+                body !== null ? { 'Content-Type': 'application/json' } : {}),
+            body: body !== null ? JSON.stringify(body) : undefined
+        });
+    } catch (e) {
+        throw new Error('network error');
+    }
+    if (resp.status === 401) { showLoginOverlay(); throw new Error('session expired'); }
+    let data = null;
+    try { data = await resp.json(); } catch (e) { /* non-JSON */ }
+    if (!resp.ok || !data || data.success === false) {
+        throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    }
+    return data;
+}
+
+async function shareCheckRig(rig, entities) {
+    const res = { reachable: false, exists: false, missing: [], error: '' };
+    const cache = {};
+    const get = async path => (cache[path] = cache[path] || shareApi(rig, path, 'GET'));
+    try {
+        const missing = [];
+        for (const e of entities) {
+            if (e.kind === 'wallet') {
+                const d = await get('api/wallets');
+                const found = (d.wallets || []).some(x => x.id === e.id || x.address === e.payload.address);
+                if (!found) missing.push(e.label);
+            } else if (e.kind === 'fsheet') {
+                const d = await get('api/fsheets');
+                const found = (d.fsheets || []).some(x => x.id === e.id ||
+                    String(x.name || '').toLowerCase() === String(e.payload.name || '').toLowerCase());
+                if (!found) missing.push(e.label);
+            } else if (e.kind === 'oc_preset') {
+                const d = await get('api/oc-presets');
+                const found = (d.presets || []).some(x => x.id === e.id ||
+                    String(x.name || '').toLowerCase() === String(e.payload.name || '').toLowerCase());
+                if (!found) missing.push(e.label);
+            } else if (e.kind === 'oc_current') {
+                const d = await get('api/oc-presets');
+                if (!shareOcMatchesLive(e.values, d.live || {})) missing.push(e.label);
+            } else if (e.kind === 'autofan') {
+                const d = await get('api/autofan');
+                if (!shareAfMatches(d, e.state)) missing.push(e.label);
+            } else if (e.kind === 'mknet') {
+                const d = await get('api/fans');
+                if (!shareMknetMatches(d, e.config)) missing.push(e.label);
+            }
+        }
+        res.reachable = true;
+        res.missing = missing;
+        res.exists = missing.length === 0;
+    } catch (err) {
+        res.reachable = false;
+        res.error = err.message || 'no access';
+    }
+    return res;
+}
+
+// Push the selected entities to one rig. Returns the list of shared labels.
+// onStep(text) reports intra-rig substeps for the progress dialog.
+async function sharePushRig(rig, entities, onStep) {
+    const labels = [];
+    const byKind = k => entities.filter(e => e.kind === k);
+
+    // Wallets: update by id; when the remote library already holds the same
+    // address under another id, update that entry instead (no duplicates)
+    const wallets = byKind('wallet');
+    if (wallets.length) {
+        const remote = (await shareApi(rig, 'api/wallets', 'GET')).wallets || [];
+        for (const e of wallets) {
+            onStep('wallet ' + e.label);
+            const match = remote.find(x => x.id === e.id) ||
+                remote.find(x => x.address === e.payload.address);
+            await shareApi(rig, 'api/wallets/save', 'POST',
+                { wallet: Object.assign({}, e.payload, { id: match ? match.id : e.payload.id }) });
+            labels.push(e.label);
+        }
+    }
+
+    // Flight sheets: item wallet references are resolved to addresses against
+    // the source library; wallets referenced by the shared sheets are pushed
+    // first when the target library does not have them yet
+    const fsheets = byKind('fsheet');
+    if (fsheets.length) {
+        const remote = await shareApi(rig, 'api/fsheets', 'GET');
+        const remoteFs = remote.fsheets || [];
+        const remoteWallets = remote.wallets || [];
+        const srcWallets = shareCtx.srcWallets || [];
+        const knownAddr = {};
+        for (const e of fsheets) {
+            for (const it of e.payload.items) {
+                const addr = resolveItemWallet(it, srcWallets);
+                if (!addr) continue;
+                it.wallet = addr;
+                if (knownAddr[addr] || remoteWallets.some(x => x.address === addr)) {
+                    knownAddr[addr] = true;
+                    continue;
+                }
+                const src = srcWallets.find(x => x.address === addr);
+                if (src) {
+                    onStep('wallet ' + (src.name || addr));
+                    await shareApi(rig, 'api/wallets/save', 'POST',
+                        { wallet: { id: src.id, coin: src.coin || '', name: src.name || '', address: src.address } });
+                    knownAddr[addr] = true;
+                }
+            }
+        }
+        for (const e of fsheets) {
+            onStep('flight sheet ' + e.label);
+            const match = remoteFs.find(x => x.id === e.id) ||
+                remoteFs.find(x => String(x.name || '').toLowerCase() === String(e.payload.name || '').toLowerCase());
+            await shareApi(rig, 'api/fsheets/save', 'POST',
+                { fsheet: Object.assign({}, e.payload, { id: match ? match.id : '' }) });
+            labels.push(e.label);
+        }
+    }
+
+    // OC presets: update by id/name; the default flag is carried over
+    const presets = byKind('oc_preset');
+    if (presets.length) {
+        const remote = (await shareApi(rig, 'api/oc-presets', 'GET')).presets || [];
+        for (const e of presets) {
+            onStep('preset ' + e.label);
+            const match = remote.find(x => x.id === e.id) ||
+                remote.find(x => String(x.name || '').toLowerCase() === String(e.payload.name || '').toLowerCase());
+            const body = { name: e.payload.name, algo: e.payload.algo || '',
+                           values: e.payload.values, is_default: !!e.payload.is_default };
+            if (match) body.id = match.id;
+            await shareApi(rig, 'api/oc-presets/save', 'POST', body);
+            labels.push(e.label);
+        }
+    }
+
+    // Overclock form: apply the carried values on the target rig
+    for (const e of byKind('oc_current')) {
+        onStep('applying overclock settings');
+        await shareApi(rig, 'api/overclock', 'POST', e.payload);
+        labels.push(e.label);
+    }
+
+    // AutoFan: read the target GPU list first (per-GPU payload must match it)
+    for (const e of byKind('autofan')) {
+        onStep('reading GPU list');
+        const targetGpus = (await shareApi(rig, 'api/autofan', 'GET')).gpus || [];
+        onStep('applying AutoFan settings');
+        await shareApi(rig, 'api/autofan/save-all', 'POST',
+            shareBuildAutofanPayload(e.state, targetGpus));
+        labels.push(e.label);
+    }
+
+    // 8MK_NET controller settings
+    for (const e of byKind('mknet')) {
+        onStep('applying 8MK_NET settings');
+        await shareApi(rig, 'api/fans/mknet', 'POST', shareBuildMknetPayload(e.config));
+        labels.push(e.label);
+    }
+
+    return labels;
+}
+
+// ---- Step 1: entities of the current form ----
+
+async function openShareDialog(source) {
+    const meta = SHARE_SOURCES[source];
+    let entities = [];
+    shareCtx = { source: source, entities: [], srcWallets: [], checks: {} };
+    try {
+        if (source === 'wallets') {
+            const d = await (await apiFetch('/api/wallets')).json();
+            shareCtx.srcWallets = d.wallets || [];
+            entities = (d.wallets || []).map(w => ({
+                kind: 'wallet', id: w.id,
+                label: w.name || '(unnamed wallet)',
+                sub: (w.coin ? w.coin + ' · ' : '') + (w.address || ''),
+                payload: { id: w.id, coin: w.coin || '', name: w.name || '', address: w.address || '' }
+            }));
+        } else if (source === 'fsheets') {
+            const d = await (await apiFetch('/api/fsheets')).json();
+            shareCtx.srcWallets = d.wallets || [];
+            entities = (d.fsheets || []).map(f => ({
+                kind: 'fsheet', id: f.id,
+                label: f.name || '(unnamed sheet)',
+                sub: (f.coin ? f.coin + ' · ' : '') + ((f.items || []).length) + ' miner item(s)' +
+                     (f.fav ? ' · favorite' : ''),
+                payload: { id: f.id, name: f.name || '', coin: f.coin || '', fav: !!f.fav,
+                           items: (f.items || []).map(it => Object.assign({}, it)) }
+            }));
+        } else if (source === 'presets') {
+            const d = await (await apiFetch('/api/oc-presets')).json();
+            entities = (d.presets || []).map(p => ({
+                kind: 'oc_preset', id: p.id,
+                label: p.name || '(unnamed preset)',
+                subHtml: (p.is_default ? '<i class="bi bi-star-fill text-warning me-1" title="Default preset"></i>' : '') +
+                         (p.algo ? escapeHtml(p.algo) + ' · ' : '') +
+                         (ocSummaryHtml(p.values || {}) || '<span class="fst-italic">empty</span>'),
+                payload: { id: p.id, name: p.name || '', algo: p.algo || '',
+                           is_default: !!p.is_default, values: Object.assign({}, p.values || {}) }
+            }));
+        } else if (source === 'oc') {
+            const fields = { core: 'nvAllCore', lcore: 'nvAllLcore', mem: 'nvAllMem', lmem: 'nvAllLmem',
+                             pl: 'nvAllPl', fan: 'nvAllFan', delay: 'nvAllDelay' };
+            const values = {};
+            for (const [k, id] of Object.entries(fields)) {
+                const v = (document.getElementById(id).value || '').trim();
+                if (v !== '') values[k] = v;
+            }
+            values.led = document.getElementById('nvAllLed').checked ? '1' : '0';
+            values.pill = document.getElementById('nvAllPill').checked ? '1' : '0';
+            values.p0 = document.getElementById('nvAllP0').checked ? '1' : '0';
+            values.idle = document.getElementById('nvAllIdle').checked ? '1' : '0';
+            const payload = Object.assign({ brand: 'NVIDIA', gpu: 'all' }, values);
+            entities = [{
+                kind: 'oc_current', id: 'current',
+                label: 'Current overclock settings (all NVIDIA GPUs)',
+                subHtml: ocSummaryHtml(values) || '<span class="fst-italic">only flags/delay will be applied</span>',
+                payload: payload, values: values
+            }];
+        } else if (source === 'fans') {
+            if (!window._af) {
+                showToast('Fan settings are not loaded yet. Open the fans tab and try again.', false);
+                return;
+            }
+            const state = shareAfNormalize(shareAfStateToData(window._af));
+            entities = [{
+                kind: 'autofan', id: 'current',
+                label: 'AutoFan settings',
+                sub: (state.enabled ? 'enabled' : 'disabled') + ', ' +
+                     (state.critical_action ? 'on critical: ' + state.critical_action + ' · ' : '') +
+                     (state.items || []).length + ' GPU(s)',
+                state: state
+            }];
+            try {
+                const d = await (await apiFetch('/api/fans')).json();
+                if (d.mknet && d.mknet.present) {
+                    const c = d.mknet.config || {};
+                    entities.push({
+                        kind: 'mknet', id: 'current',
+                        label: '8MK_NET controller settings',
+                        sub: (c.auto ? 'auto' : 'static ' + c.static_speed + '%') +
+                             ', target ' + c.target_temp + '°C / mem ' + c.target_mem_temp + '°C' +
+                             ', min ' + c.min_fan + '%, max ' + c.max_fan + '%',
+                        config: Object.assign({}, c)
+                    });
+                }
+            } catch (e) { /* the mknet entity is simply not offered */ }
+        }
+    } catch (e) {
+        console.error('Share: failed to load source data:', e);
+        showToast('Failed to load the data for sharing.', false);
+        return;
+    }
+    if (!entities.length) {
+        showToast(meta.empty || 'Nothing to share yet.', false);
+        return;
+    }
+    shareCtx.entities = entities;
+    shareModalEl('shareSelectTitle').innerHTML =
+        '<i class="bi bi-share-fill text-info me-2"></i>' + escapeHtml(meta.title);
+    shareModalEl('shareSelectHint').textContent = meta.hint;
+    renderShareEntities();
+    shareModal('shareSelectModal').show();
+}
+
+// The fans dialog works on the UI state (window._af); wrap it into the same
+// shape shareAfNormalize produces so compare/push use one representation.
+function shareAfStateToData(state) {
+    return {
+        enabled: state.enabled ? '1' : '0',
+        critical_action: state.critical_action || '',
+        reboot_on_errors: state.reboot_on_errors ? '1' : '0',
+        smart_mode: state.smart_mode ? '1' : '0',
+        gpus: (state.items || []).map(it => ({
+            index: it.index,
+            mode: it.mode === 'static' ? 1 : 0,
+            static: parseInt(it.static_fan, 10) || 0,
+            min: parseInt(it.min_fan, 10) || 0,
+            max: parseInt(it.max_fan, 10) || 0,
+            target_core: parseInt(it.target_temp, 10) || 0,
+            target_mem: parseInt(it.target_mem_temp, 10) || 0,
+            critical: parseInt(it.critical_temp, 10) || 0
+        }))
+    };
+}
+
+function renderShareEntities() {
+    const list = shareModalEl('shareEntitiesList');
+    list.innerHTML = (shareCtx.entities || []).map((e, i) =>
+        '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0 share-item">' +
+        '<input class="form-check-input share-entity-check" type="checkbox" id="shareEntity_' + i + '" data-idx="' + i + '" checked>' +
+        '<label class="form-check-label flex-grow-1" for="shareEntity_' + i + '">' +
+        '<span class="share-item-label">' + escapeHtml(e.label) + '</span>' +
+        (e.subHtml ? '<span class="share-item-sub d-block">' + e.subHtml + '</span>'
+                   : (e.sub ? '<span class="share-item-sub d-block">' + escapeHtml(e.sub) + '</span>' : '')) +
+        '</label></div>').join('');
+    shareSyncEntityState();
+}
+
+function shareSyncEntityState() {
+    const boxes = [...document.querySelectorAll('.share-entity-check')];
+    shareUpdateParent('shareAllEntities', boxes);
+    shareModalEl('shareSelectNextBtn').disabled = !boxes.some(b => b.checked);
+    shareModalEl('shareEntitiesCount').textContent =
+        boxes.filter(b => b.checked).length + ' of ' + boxes.length + ' selected';
+}
+
+function shareUpdateParent(parentId, boxes) {
+    const parent = shareModalEl(parentId);
+    if (!parent) return;
+    const checked = boxes.filter(b => b.checked).length;
+    parent.disabled = boxes.length === 0;
+    parent.checked = boxes.length > 0 && checked === boxes.length;
+    parent.indeterminate = checked > 0 && checked < boxes.length;
+}
+
+// Step 1 OK -> refresh the rig list and open the targets dialog
+function shareSelectNext() {
+    const selected = [...document.querySelectorAll('.share-entity-check')]
+        .filter(b => b.checked).map(b => shareCtx.entities[parseInt(b.dataset.idx, 10)]);
+    if (!selected.length) return;
+    shareCtx.selected = selected;
+    // Let the first dialog finish closing before the next one opens
+    const el = shareModalEl('shareSelectModal');
+    el.addEventListener('hidden.bs.modal', function h() {
+        el.removeEventListener('hidden.bs.modal', h);
+        openShareTargets();
+    });
+    shareModal('shareSelectModal').hide();
+}
+
+// ---- Step 2: target rigs + existence check ----
+
+async function openShareTargets() {
+    // Fresh rig list (the cluster state may be stale)
+    try {
+        const d = await (await fetch('/api/cluster/rigs')).json();
+        if (d.success) clusterData = d;
+    } catch (e) { /* fall back to the cached list */ }
+    const rigs = ((clusterData && clusterData.rigs) || [])
+        .filter(r => r.id !== currentRigId && !(currentRigId === 'self' && r.is_self));
+    shareCtx.rigs = rigs;
+    shareCtx.checks = {};
+    shareModalEl('shareTargetsTitle').innerHTML =
+        '<i class="bi bi-hdd-rack text-info me-2"></i>' +
+        escapeHtml(SHARE_SOURCES[shareCtx.source].title) + ' to rigs';
+    shareModalEl('shareTargetsHint').textContent =
+        'Select the rigs to share ' +
+        (shareCtx.selected.length === 1 ? '"' + shareCtx.selected[0].label + '"' :
+            shareCtx.selected.length + ' selected item(s)') + ' with, then press Check to see what is already there.';
+    const list = shareModalEl('shareRigsList');
+    if (!rigs.length) {
+        list.innerHTML = '<div class="text-muted small py-3 text-center">No other rigs in the cluster. Add rigs on the SSH Accesses tab first.</div>';
+    } else {
+        list.innerHTML = rigs.map(r => {
+            const offline = !r.online && !r.is_self;
+            return '<div class="form-check d-flex align-items-center gap-2 py-1 mb-0 share-item">' +
+                '<input class="form-check-input share-rig-check" type="checkbox" id="shareRig_' + r.id + '" data-rig="' + r.id + '">' +
+                '<label class="form-check-label flex-grow-1" for="shareRig_' + r.id + '">' +
+                '<span class="share-item-label">' + escapeHtml(r.name || r.id) + '</span>' +
+                (offline ? ' <span class="badge bg-secondary-subtle text-secondary-emphasis small ms-1" title="Last known state: the rig is offline">offline</span>' : '') +
+                '</label>' +
+                '<span class="conn-dot" id="share-dot_' + r.id + '" title="Not checked yet"></span>' +
+                '<span class="share-rig-detail d-none" id="share-detail_' + r.id + '" style="max-width: 40%;"></span>' +
+                '</div>';
+        }).join('');
+    }
+    shareSyncRigState();
+    shareModal('shareTargetsModal').show();
+}
+
+function shareSyncRigState() {
+    const boxes = [...document.querySelectorAll('.share-rig-check')];
+    shareUpdateParent('shareAllRigs', boxes);
+    shareModalEl('shareTargetsOkBtn').disabled = !boxes.some(b => b.checked);
+}
+
+window.shareCheckTargets = async function(btn) {
+    if (!shareCtx || !shareCtx.rigs) return;
+    const rigs = shareCtx.rigs;
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Checking...';
+    shareModalEl('shareTargetsOkBtn').disabled = true;
+    let existCount = 0, missCount = 0, noAccess = 0;
+    for (const rig of rigs) {
+        const dot = shareModalEl('share-dot_' + rig.id);
+        const detail = shareModalEl('share-detail_' + rig.id);
+        if (dot) { dot.className = 'conn-dot conn-dot-warn'; dot.title = 'Checking...'; }
+        const res = await shareCheckRig(rig, shareCtx.selected);
+        shareCtx.checks[rig.id] = res;
+        if (!res.reachable) {
+            noAccess++;
+            if (dot) { dot.className = 'conn-dot conn-dot-unknown'; dot.title = res.error || 'No access'; }
+            if (detail) { detail.classList.remove('d-none'); detail.textContent = res.error || 'no access'; }
+        } else if (res.exists) {
+            existCount++;
+            if (dot) { dot.className = 'conn-dot conn-dot-ok'; dot.title = 'All selected entities are already on this rig'; }
+            if (detail) { detail.classList.remove('d-none'); detail.textContent = 'already there'; }
+        } else {
+            missCount++;
+            if (dot) { dot.className = 'conn-dot conn-dot-fail'; dot.title = 'Missing: ' + res.missing.join(', '); }
+            if (detail) {
+                detail.classList.remove('d-none');
+                detail.textContent = 'missing: ' + res.missing.slice(0, 3).join(', ') +
+                    (res.missing.length > 3 ? ' +' + (res.missing.length - 3) : '');
+            }
+        }
+    }
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    shareSyncRigState();
+    if (rigs.length) {
+        showToast('Checked ' + rigs.length + ' rig(s): ' + existCount + ' already have everything, ' +
+            missCount + ' missing something, ' + noAccess + ' unreachable.',
+            noAccess === 0);
+    }
+};
+
+// ---- Step 3: push with progress ----
+
+function shareTargetsConfirm() {
+    const selected = [...document.querySelectorAll('.share-rig-check')]
+        .filter(b => b.checked).map(b => {
+            const rig = shareCtx.rigs.find(r => r.id === b.dataset.rig);
+            return rig ? { rig: rig, check: shareCtx.checks[rig.id] || null } : null;
+        }).filter(Boolean);
+    if (!selected.length) return;
+    shareCtx.targets = selected;
+    shareModalEl('shareProgressLog').innerHTML = '';
+    setShareProgress(0, selected.length);
+    shareModalEl('shareProgressText').textContent = 'Preparing...';
+    shareModalEl('shareProgressSub').textContent = '';
+    const el = shareModalEl('shareTargetsModal');
+    el.addEventListener('hidden.bs.modal', function h() {
+        el.removeEventListener('hidden.bs.modal', h);
+        shareModal('shareProgressModal').show();
+        runSharePush();
+    });
+    shareModal('shareTargetsModal').hide();
+}
+
+function setShareProgress(done, total) {
+    const pct = total ? Math.round(done * 100 / total) : 100;
+    const bar = shareModalEl('shareProgressBar');
+    bar.style.width = pct + '%';
+    bar.setAttribute('aria-valuenow', String(pct));
+}
+
+function shareLogLine(rigName, ok, text) {
+    const log = shareModalEl('shareProgressLog');
+    const line = document.createElement('div');
+    line.className = 'share-progress-line';
+    line.innerHTML = '<i class="bi ' + (ok ? 'bi-check-circle-fill text-success' : 'bi-x-circle-fill text-danger') + '"></i>' +
+        '<span class="fw-semibold">' + escapeHtml(rigName) + '</span>' +
+        '<span class="text-break small">' + escapeHtml(text) + '</span>';
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function runSharePush() {
+    const targets = shareCtx.targets || [];
+    const total = targets.length;
+    let done = 0, okCount = 0;
+    for (const t of targets) {
+        const rig = t.rig;
+        shareModalEl('shareProgressText').textContent =
+            'Syncing ' + (done + 1) + '/' + total + ' — ' + (rig.name || rig.id);
+        shareModalEl('shareProgressSub').textContent = '';
+        const onStep = txt => { shareModalEl('shareProgressSub').textContent = txt; };
+        try {
+            const labels = await sharePushRig(rig, shareCtx.selected, onStep);
+            okCount++;
+            shareLogLine(rig.name || rig.id, true,
+                labels.length + ' item(s) shared' + (t.check && t.check.exists ? ' (was already present)' : ''));
+        } catch (err) {
+            shareLogLine(rig.name || rig.id, false, err.message || 'sync failed');
+        }
+        done++;
+        setShareProgress(done, total);
+    }
+    shareModalEl('shareProgressText').textContent = 'Done — ' + okCount + '/' + total + ' rig(s) updated';
+    shareModalEl('shareProgressSub').textContent = '';
+    if (total) {
+        showToast('Sharing finished: ' + okCount + ' of ' + total + ' rig(s) updated.', okCount === total);
+    }
+}
+
+
 
 // ---------------- Password change ----------------
 
