@@ -4270,7 +4270,7 @@ async function renderWallets() {
     try {
         const response = await apiFetch('/api/wallets');
         const data = await response.json();
-        window._walletsData = { wallets: data.wallets || [], rig_config: data.rig_config || {} };
+        window._walletsData = { wallets: data.wallets || [], rig_used_in: data.rig_used_in || 0, rig_config: data.rig_config || {} };
         // keep the fsheet builder wallet selects in sync with the library
         window._fsData = Object.assign({}, window._fsData || {}, { wallets: window._walletsData.wallets });
         renderWalletChips();
@@ -4315,9 +4315,10 @@ function renderWalletTable() {
     const wallets = data.wallets;
     const rc = data.rig_config || {};
     const filter = window._walletCoinFilter || '';
-    // Live wallet currently used by the rig's mining config (may not exist in the library)
+    // Live wallet currently used by the rig's mining config (may not exist in the library);
+    // rig_used_in = live config itself + saved sheets referencing the same wallet value
     const liveWallet = (rc.wallet && !wallets.some(w => walletMatchesLive(w.address, rc.wallet)))
-        ? [{ id: '__rig__', coin: rc.coin || '', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true, active: true }]
+        ? [{ id: '__rig__', coin: rc.coin || '', name: (rc.coin ? rc.coin + ' wallet' : 'Active wallet') + ' (rig)', address: rc.wallet, live: true, active: true, used_in: data.rig_used_in }]
         : [];
     const rows = liveWallet.concat(wallets.filter(w => !filter || (w.coin || '').toUpperCase() === filter));
     if (!rows.length) {
@@ -4332,8 +4333,8 @@ function renderWalletTable() {
             ? '<span class="badge bg-warning-glow text-warning small" title="Wallet of the active flight sheet / live mining config">ACTIVE</span>'
             : '<span class="text-muted small">&mdash;</span>';
         const sheets = used > 0
-            ? '<span class="fs-used-badge" title="Used in ' + used + ' flight sheet' + (used > 1 ? 's' : '') + '"><i class="bi bi-rocket-takeoff-fill"></i>' + used + '</span>'
-            : '<span class="fs-used-badge fs-used-none" title="Not referenced by any flight sheet"><i class="bi bi-rocket-takeoff"></i>0</span>';
+            ? '<span class="fs-used-badge" title="Used by ' + used + ': flight sheet(s) and/or the live mining config"><i class="bi bi-rocket-takeoff-fill"></i>' + used + '</span>'
+            : '<span class="fs-used-badge fs-used-none" title="Not used by any flight sheet or the live config"><i class="bi bi-rocket-takeoff"></i>0</span>';
         return '<tr class="' + (isActive ? 'wallet-row-active' : '') + '">' +
             '<td>' + coinAvatarHtml(w.coin) + '</td>' +
             '<td>' + status + '</td>' +

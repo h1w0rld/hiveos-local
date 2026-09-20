@@ -3424,8 +3424,11 @@ def _fsheet_wallet_refs(fsheet):
 
 def _wallet_usage_stats():
     """Wallet library enriched with usage info for the Wallets tab:
-    used_in — number of flight sheets referencing the wallet (by id or raw
-    address, a sheet counts once even with several items);
+    used_in — number of users of the wallet: flight sheets referencing it
+    (by id or raw address, a sheet counts once even with several items) plus
+    the live mining config when it mines with the same wallet value (last OR
+    condition: pure wallet-value match, worker-suffix tolerant; skipped when
+    the applied sheet already accounts for the wallet — no double counting);
     active  — wallet belongs to the currently applied flight sheet (any item)
     or matches the live mining config. Several wallets can be active at once
     when the active sheet (or live config) uses different wallets."""
@@ -3436,7 +3439,10 @@ def _wallet_usage_stats():
     def sheet_wallet_ids(refs):
         ids = set()
         for wid, w in by_id.items():
-            if wid in refs or (w.get("address") and str(w["address"]) in refs):
+            if wid in refs:
+                ids.add(wid)
+            elif w.get("address") and any(
+                    _wallet_matches_live(str(w["address"]), str(r)) for r in refs):
                 ids.add(wid)
         return ids
 
@@ -3448,14 +3454,18 @@ def _wallet_usage_stats():
         for wid in sheet_wallet_ids(refs):
             used_in[wid] = used_in.get(wid, 0) + 1
     active_ids = set()
+    applied_ids = set()
     active_sheet = next((f for f in fsheets if _fsheet_is_active(f)), None)
     if active_sheet:
-        active_ids |= sheet_wallet_ids(_fsheet_wallet_refs(active_sheet))
+        applied_ids = sheet_wallet_ids(_fsheet_wallet_refs(active_sheet))
+        active_ids |= applied_ids
     live_wallet = str(_read_active_mining_config().get("wallet") or "")
     if live_wallet:
         for wid, w in by_id.items():
             if _wallet_matches_live(w.get("address"), live_wallet):
                 active_ids.add(wid)
+                if wid not in applied_ids:
+                    used_in[wid] = used_in.get(wid, 0) + 1
     enriched = []
     for w in wallets:
         row = dict(w)
@@ -3464,6 +3474,21 @@ def _wallet_usage_stats():
         row["active"] = wid in active_ids
         enriched.append(row)
     return enriched
+
+def _rig_wallet_used_in():
+    """Usage count for the live-config wallet shown as the '(rig)' pseudo-row
+    when no library wallet matches it: the live config itself (the rig is
+    mining with this wallet right now) + saved sheets referencing the same
+    wallet value (worker-suffix tolerant)."""
+    live_wallet = str(_read_active_mining_config().get("wallet") or "")
+    if not live_wallet:
+        return 0
+    used = 1
+    for f in _load_fsheets_store():
+        if any(_wallet_matches_live(str(r), live_wallet)
+               for r in _fsheet_wallet_refs(f)):
+            used += 1
+    return used
 
 def _load_json_store(path, default):
     try:
@@ -3670,6 +3695,7 @@ def _pick_apply_item(fsheet):
 @app.route('/api/wallets', methods=['GET'])
 def list_wallets():
     return jsonify({"success": True, "wallets": _wallet_usage_stats(),
+                    "rig_used_in": _rig_wallet_used_in(),
                     "rig_config": _read_active_mining_config()})
 
 @app.route('/api/wallets/save', methods=['POST'])
