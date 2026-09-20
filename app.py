@@ -1090,57 +1090,96 @@ def _import_ssh_ok(res, marker=None):
         return False, (err or "unexpected output")
     return True, ""
 
-def _import_install_node(access):
+def _import_escalate(access):
+    """Detect how to run root commands on a node: direct root SSH, passwordless
+    sudo, or sudo with the SSH password. Returns (mode, pw64, error)."""
+    ok, out, err = run_ssh_command(access, "id -u", timeout=30)
+    if ok and out.strip() == "0":
+        return "root", "", ""
+    ok, out, err = run_ssh_command(access, "sudo -n id -u 2>/dev/null", timeout=30)
+    if ok and out.strip() == "0":
+        return "sudo-nopass", "", ""
+    ssh_pw = str(access.get("password", "") or "")
+    if ssh_pw:
+        pw64 = base64.b64encode(ssh_pw.encode("utf-8")).decode("ascii")
+        cmd = "printf '%s\\n' '" + pw64 + "' | base64 -d | sudo -S -p '' id -u"
+        ok, out, err = run_ssh_command(access, cmd, timeout=30)
+        if ok and out.strip() == "0":
+            return "sudo", pw64, ""
+    return None, "", "no root access (SSH user must be root, or have sudo rights with the same password)"
+
+def _import_root_cmd(mode, pw64, script):
+    """Wrap a shell script so it runs as root on the node (base64 transport).
+    The script must not read stdin: under a passworded sudo the password line
+    is piped in (and passes through untouched when the sudo timestamp is cached)."""
+    s64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    runner = 'bash -c "$(printf %s \'' + s64 + '\' | base64 -d)"'
+    if mode == "root":
+        return runner
+    if mode == "sudo-nopass":
+        return "sudo -n " + runner
+    return "printf '%s\\n' '" + pw64 + "' | base64 -d | sudo -S -p '' " + runner
+
+def _import_install_node(access, mode, pw64):
     """Upload the app code to a node and install/refresh the service.
     Returns (ok, action, message) where action is 'installed'|'updated'|''."""
-    ok, out, err = run_ssh_command(access, "id -u", timeout=30)
-    if not (ok and out.strip() == "0"):
-        return False, "", "SSH user must be root (got uid %s)" % (out.strip() or "?")
     ok, out, err = run_ssh_command(
         access, "systemctl is-active hiveos-local.service 2>/dev/null || true", timeout=30)
     was_active = ok and out.strip() == "active"
+    # existing installs may live outside /root (e.g. /home/user) - follow the unit
+    ok, out, err = run_ssh_command(
+        access, "systemctl show hiveos-local.service -p WorkingDirectory --value 2>/dev/null", timeout=30)
+    workdir = out.strip() if (ok and out.strip().startswith("/")) else ""
+    target_dir = workdir or IMPORT_REMOTE_DIR
     tar_bytes = _import_build_tar()
     if not tar_bytes:
         return False, "", "failed to pack local application files"
+    tmp_tar = "/tmp/hvl-%d.tar.gz" % random.randint(100000, 999999)
     ok, msg = _import_ssh_ok(
-        run_ssh_command(access, "mkdir -p %s && tar -xzf - -C %s && echo __TAR_OK__"
-                        % (IMPORT_REMOTE_DIR, IMPORT_REMOTE_DIR),
-                        timeout=180, stdin_data=tar_bytes), "__TAR_OK__")
+        run_ssh_command(access, "cat > " + tmp_tar, timeout=180, stdin_data=tar_bytes))
+    if not ok:
+        return False, "", "code upload failed: %s" % msg
+    script = ("mkdir -p '%s' && tar -xzf '%s' -C '%s' && rm -f '%s' && echo __TAR_OK__"
+              % (target_dir, tmp_tar, target_dir, tmp_tar))
+    ok, msg = _import_ssh_ok(
+        run_ssh_command(access, _import_root_cmd(mode, pw64, script), timeout=180), "__TAR_OK__")
     if not ok:
         return False, "", "code upload failed: %s" % msg
     if was_active:
         ok, msg = _import_ssh_ok(
-            run_ssh_command(access, "systemctl restart hiveos-local.service && echo __SVC_OK__",
+            run_ssh_command(access, _import_root_cmd(mode, pw64,
+                            "systemctl restart hiveos-local.service && echo __SVC_OK__"),
                             timeout=90), "__SVC_OK__")
         if not ok:
             return False, "", "service restart failed: %s" % msg
         return True, "updated", ""
+    script = ("cd '%s' && chmod +x install.sh && ./install.sh > /tmp/hiveos-local-install.log 2>&1 "
+              "&& echo __INSTALLED__ || tail -n 5 /tmp/hiveos-local-install.log" % target_dir)
     ok, out, err = run_ssh_command(
-        access, "cd %s && chmod +x install.sh && ./install.sh > /tmp/hiveos-local-install.log 2>&1 "
-                "&& echo __INSTALLED__ || tail -n 5 /tmp/hiveos-local-install.log" % IMPORT_REMOTE_DIR,
-        timeout=IMPORT_INSTALL_TIMEOUT)
+        access, _import_root_cmd(mode, pw64, script), timeout=IMPORT_INSTALL_TIMEOUT)
     if ok and "__INSTALLED__" in out:
         return True, "installed", ""
     detail = (err or out or "unknown error").strip().splitlines()
     return False, "", "install failed: %s" % (detail[-1][:200] if detail else "unknown error")
 
-def _import_ensure_key(access, force_set, self_password):
+def _import_ensure_key(access, mode, pw64, force_set, self_password):
     """Read the node's dashboard key; on a fresh install overwrite it with the
     farm password so the whole cluster shares one dashboard password.
     Returns (key, kept|set) or ('', error_message)."""
     if not force_set:
         ok, out, err = run_ssh_command(
-            access, "cat /hive-config/dashboard.key 2>/dev/null || true", timeout=30)
+            access, _import_root_cmd(mode, pw64,
+                                     "cat /hive-config/dashboard.key 2>/dev/null || true"),
+            timeout=30)
         key = out.strip() if ok else ""
         if key and len(key) <= 128 and "[ERROR" not in key:
             return key, "kept"
     b64 = base64.b64encode(str(self_password).encode("utf-8")).decode("ascii")
+    script = ("mkdir -p /hive-config && printf '%s' '" + b64 + "' | base64 -d > /hive-config/dashboard.key "
+              "&& chmod 600 /hive-config/dashboard.key "
+              "&& systemctl restart hiveos-local.service && echo __KEY_OK__")
     ok, msg = _import_ssh_ok(
-        run_ssh_command(access,
-                        "mkdir -p /hive-config && echo '%s' | base64 -d > /hive-config/dashboard.key "
-                        "&& chmod 600 /hive-config/dashboard.key "
-                        "&& systemctl restart hiveos-local.service && echo __KEY_OK__" % b64,
-                        timeout=90), "__KEY_OK__")
+        run_ssh_command(access, _import_root_cmd(mode, pw64, script), timeout=90), "__KEY_OK__")
     if not ok:
         return "", "dashboard key setup failed: %s" % msg
     return str(self_password), "set"
@@ -1201,7 +1240,7 @@ def _import_cluster_payload(state, entries, self_entry, jump_entries):
         "from_id": state.get("self_id", ""),
     }
 
-def _import_bootstrap_node(access, st, node_entry, payload, sync_interval):
+def _import_bootstrap_node(access, mode, pw64, st, node_entry, payload, sync_interval):
     """Teach the imported node about the whole cluster.
 
     Virgin node (no peers/jumps in its cluster.json): write a complete
@@ -1210,7 +1249,8 @@ def _import_bootstrap_node(access, st, node_entry, payload, sync_interval):
     self_id so no duplicate of itself appears."""
     st["status"] = "bootstrapping"
     ok, out, err = run_ssh_command(
-        access, "cat /hive-config/cluster.json 2>/dev/null || true", timeout=30)
+        access, _import_root_cmd(mode, pw64, "cat /hive-config/cluster.json 2>/dev/null || true"),
+        timeout=30)
     remote = None
     if ok and out.strip():
         try:
@@ -1226,16 +1266,15 @@ def _import_bootstrap_node(access, st, node_entry, payload, sync_interval):
         body["sync_interval"] = sync_interval
         body["rigs"] = [dict(node_entry, is_self=True)] + \
                        [r for r in payload.get("rigs", []) if r.get("id") != node_entry["id"]]
-        b64 = base64.b64encode(json.dumps(body).encode("utf-8")).decode("ascii")
+        body64 = base64.b64encode(json.dumps(body).encode("utf-8")).decode("ascii")
+        sid64 = base64.b64encode(str(node_entry["id"]).encode("utf-8")).decode("ascii")
+        script = ("mkdir -p /hive-config && printf '%s' '" + body64 + "' | base64 -d > /hive-config/cluster.json.tmp "
+                  "&& chmod 600 /hive-config/cluster.json.tmp "
+                  "&& mv /hive-config/cluster.json.tmp /hive-config/cluster.json "
+                  "&& printf '%s' '" + sid64 + "' | base64 -d > /hive-config/cluster-self-id "
+                  "&& chmod 600 /hive-config/cluster-self-id && echo __W_OK__")
         ok, msg = _import_ssh_ok(
-            run_ssh_command(access,
-                            "mkdir -p /hive-config && echo '%s' | base64 -d > /hive-config/cluster.json.tmp "
-                            "&& chmod 600 /hive-config/cluster.json.tmp "
-                            "&& mv /hive-config/cluster.json.tmp /hive-config/cluster.json "
-                            "&& echo '%s' | base64 -d > /hive-config/cluster-self-id "
-                            "&& chmod 600 /hive-config/cluster-self-id && echo __W_OK__"
-                            % (b64, base64.b64encode(str(node_entry["id"]).encode()).decode()),
-                            timeout=60), "__W_OK__")
+            run_ssh_command(access, _import_root_cmd(mode, pw64, script), timeout=60), "__W_OK__")
         if not ok:
             st["status"] = "failed"
             st["message"] = "cluster config write failed: %s" % msg
@@ -1247,9 +1286,27 @@ def _import_bootstrap_node(access, st, node_entry, payload, sync_interval):
     entry["id"] = remote_self_id or entry["id"]
     body = dict(payload)
     body["rigs"] = [r for r in payload.get("rigs", []) if r.get("id") != node_entry["id"]] + [entry]
-    curl_cmd = build_curl_command("POST", "api/cluster/sync", True, st.get("key", ""))
-    ok, out, err = run_ssh_command(access, curl_cmd, timeout=60,
-                                   stdin_data=json.dumps(body).encode("utf-8"))
+    # upload the payload to a temp file first: a passworded sudo may either consume
+    # its password line from stdin (uncached) or pass the whole stream through
+    # (cached timestamp) - only a file-based body is deterministic
+    tmp_body = "/tmp/hvl-%d.json" % random.randint(100000, 999999)
+    ok, msg = _import_ssh_ok(
+        run_ssh_command(access, "cat > " + tmp_body, timeout=60,
+                        stdin_data=json.dumps(body).encode("utf-8")))
+    if not ok:
+        st["status"] = "failed"
+        st["message"] = "cluster merge failed: payload upload: %s" % msg
+        return False
+    curl_cmd = ("export PATH=\"$PATH:/hive/sbin:/usr/local/bin\"; "
+                "curl -s -m 25 -X POST "
+                "-H " + shlex.quote("Authorization: Bearer " + str(st.get("key", ""))) + " "
+                "-H " + shlex.quote("Content-Type: application/json") + " "
+                "--data-binary @" + tmp_body + " "
+                "-w " + shlex.quote("\n__HC:%{http_code}") + " "
+                + shlex.quote("http://127.0.0.1:%d/api/cluster/sync" % DASHBOARD_PORT) +
+                "; rc=$?; rm -f " + tmp_body + "; exit $rc")
+    ok, out, err = run_ssh_command(
+        access, _import_root_cmd(mode, pw64, curl_cmd), timeout=60)
     if not ok:
         st["status"] = "failed"
         st["message"] = "cluster merge failed: %s" % (err or "connection failed")
@@ -1307,9 +1364,17 @@ def _import_process_node(job, st, jump_entries, self_password):
     if job["cancel"]:
         st["status"] = "skipped"
         return
+    # 1b. Root access detection: root SSH, passwordless sudo or sudo+SSH password
+    mode, pw64, esc_err = _import_escalate(good[0])
+    if mode is None:
+        st["status"] = "failed"
+        st["message"] = esc_err
+        return
+    st["root_mode"] = mode
+    st["pw64"] = pw64
     # 2. Install / refresh the app on the node
     st["status"] = "installing"
-    ok, action, msg = _import_install_node(good[0])
+    ok, action, msg = _import_install_node(good[0], mode, pw64)
     st["action"] = action
     if not ok:
         st["status"] = "failed"
@@ -1320,7 +1385,7 @@ def _import_process_node(job, st, jump_entries, self_password):
         return
     # 3. Dashboard key: fresh installs get the farm password, existing keep theirs
     st["status"] = "key"
-    key, key_state = _import_ensure_key(good[0], force_set=(action == "installed"),
+    key, key_state = _import_ensure_key(good[0], mode, pw64, force_set=(action == "installed"),
                                         self_password=self_password)
     if not key:
         st["status"] = "failed"
@@ -1449,7 +1514,8 @@ def _cluster_import_worker(job, parsed):
                     st["status"] = "failed"
                     st["message"] = "no verified route left for bootstrap"
                     return
-                if not _import_bootstrap_node(access, st, entries[key], payload,
+                if not _import_bootstrap_node(access, st.get("root_mode", "root"),
+                                              st.get("pw64", ""), st, entries[key], payload,
                                               state.get("sync_interval", DEFAULT_SYNC_INTERVAL)):
                     return
                 st["status"] = "done"
