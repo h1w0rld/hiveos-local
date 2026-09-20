@@ -5670,6 +5670,15 @@ def api_cluster_jump_test():
         port = int(incoming.get("port", 22))
     except (TypeError, ValueError):
         return jsonify({"success": False, "message": "Invalid jump server SSH port."}), 400
+    # The jump may be intentionally reachable only from clients (one-directional
+    # policy) - report that distinctly instead of a bare SSH timeout failure
+    if not _probe_tcp(host, port):
+        return jsonify({
+            "success": False,
+            "jump_unreachable": True,
+            "message": ("Jump host %s:%s is unreachable from this rig - it serves clients that "
+                        "can reach it directly (e.g. your Mac). Rigs use their direct routes." % (host, port))
+        })
     access = {
         "id": "jumptest", "name": "jump-test", "type": "direct",
         "host": host, "port": port,
@@ -5687,6 +5696,14 @@ def api_cluster_jump_test():
     return jsonify({"success": False, "message": "Jump server test failed: %s" % (ssh_err or "unknown error")})
 
 @app.route('/api/cluster/access/test', methods=['POST'])
+def _probe_tcp(host, port, timeout=4):
+    """Quick TCP reachability probe (no SSH). Returns True if connect succeeded."""
+    try:
+        with socket.create_connection((str(host), int(port or 22)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
 def api_cluster_access_test():
     """Test an SSH access (unsaved payload allowed) by running hostname over SSH."""
     data = request.get_json()
@@ -5720,6 +5737,21 @@ def api_cluster_access_test():
     if err:
         return jsonify({"success": False, "message": err}), 400
 
+    # A jump host may be intentionally unreachable from this rig (one-directional
+    # policy: the jump serves clients like the user's Mac, not the cluster nodes).
+    # Probe the jump first: unreachable -> 'client-side route' (not a failure),
+    # reachable -> verify the full SSH path through it as usual.
+    if clean.get("type") == "jump":
+        if not _probe_tcp(clean.get("jump_host"), clean.get("jump_port", 22)):
+            return jsonify({
+                "success": False,
+                "jump_unreachable": True,
+                "message": ("Jump host %s:%s is unreachable from this rig - this route is client-side: "
+                            "it works from devices that can reach the jump (e.g. your Mac). "
+                            "The rig itself uses its direct routes." %
+                            (clean.get("jump_host"), clean.get("jump_port", 22)))
+            })
+
     ok, out, ssh_err = run_ssh_command(clean, "hostname && echo __OK__", timeout=30)
     if ok and "__OK__" in out:
         hostname = out.replace("__OK__", "").strip().splitlines()
@@ -5743,6 +5775,20 @@ def api_cluster_rig_test():
 
     results = []
     for access in rig.get("accesses", []):
+        # jump routes: probe the jump first - unreachable means 'client-side route'
+        if str(access.get("type", "direct")) == "jump":
+            resolved = resolve_jump_host(dict(access))
+            if not _probe_tcp(resolved.get("jump_host"), resolved.get("jump_port", 22)):
+                results.append({
+                    "id": access.get("id"),
+                    "name": access.get("name"),
+                    "ok": False,
+                    "jump_unreachable": True,
+                    "detail": ("jump %s:%s is unreachable from this rig - "
+                               "client-side route (e.g. used from the Mac)" %
+                               (resolved.get("jump_host"), resolved.get("jump_port", 22)))
+                })
+                continue
         ok, out, ssh_err = run_ssh_command(access, "hostname && echo __OK__", timeout=30)
         results.append({
             "id": access.get("id"),

@@ -1160,14 +1160,17 @@ window.selectClusterGlobal = function(cid) {
 };
 
 // Toast notification helper
-function showToast(message, isSuccess = true) {
+function showToast(message, isSuccess = true, isWarn = false) {
     const toastEl = document.getElementById('statusToast');
     const toastMessage = document.getElementById('toastMessage');
     const toastIcon = document.getElementById('toastIcon');
-    
+
     toastMessage.textContent = message;
-    
-    if (isSuccess) {
+
+    if (isWarn) {
+        toastEl.className = 'toast align-items-center text-bg-warning border-0 show';
+        toastIcon.className = 'bi bi-exclamation-triangle-fill fs-5';
+    } else if (isSuccess) {
         toastEl.className = 'toast align-items-center text-bg-success border-0 show';
         toastIcon.className = 'bi bi-check-circle-fill fs-5';
     } else {
@@ -2640,8 +2643,10 @@ function renderJumpsTable() {
         jumpBody.innerHTML = jumps.map(j => {
             const auth = j.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
             const dotState = jumpTestResults[j.id];
-            const dotCls = dotState === undefined ? '' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail');
-            const dotTitle = dotState === undefined ? 'Not checked yet' : (dotState ? 'Connection OK' : 'Connection failed');
+            const dotCls = dotState === undefined ? '' : (dotState === 'unknown' ? 'conn-dot-unknown' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail'));
+            const dotTitle = dotState === undefined ? 'Not checked yet'
+                : (dotState === 'unknown' ? 'Client-side jump: unreachable from this rig (works from devices that can reach it, e.g. the Mac)'
+                : (dotState ? 'Connection OK' : 'Connection failed'));
             return '<tr>' +
                 '<td class="small text-muted"><i class="bi bi-router-fill text-info me-1"></i>All rigs</td>' +
                 '<td class="fw-semibold">' + escapeHtml(j.name) + '</td>' +
@@ -2678,8 +2683,10 @@ function renderAccessRoutes() {
                 (a.type === 'jump' ? ' <i class="bi bi-arrow-right-short"></i> <span class="text-info">' + escapeHtml(jumpName || '?') + '</span>' : '');
             const auth = a.auth === 'key' ? '<i class="bi bi-file-earmark-key"></i> key' : '<i class="bi bi-shield-lock"></i> password';
             const dotState = accessTestResults[a.id];
-            const dotCls = dotState === undefined ? '' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail');
-            const dotTitle = dotState === undefined ? 'Not checked yet' : (dotState ? 'Connection OK' : 'Connection failed');
+            const dotCls = dotState === undefined ? '' : (dotState === 'unknown' ? 'conn-dot-unknown' : (dotState ? 'conn-dot-ok' : 'conn-dot-fail'));
+            const dotTitle = dotState === undefined ? 'Not checked yet'
+                : (dotState === 'unknown' ? 'Client-side route: the jump host is unreachable from this rig (works from devices that can reach it, e.g. the Mac)'
+                : (dotState ? 'Connection OK' : 'Connection failed'));
             rows.push('<tr' + (idx === 0 ? ' class="access-group-start"' : '') + '>' +
                 (idx === 0 ? '<td rowspan="' + rig.accesses.length + '" class="fw-semibold align-middle">' + rigLabel + '</td>' : '') +
                 '<td class="fw-semibold">' + escapeHtml(a.name) + '</td>' +
@@ -2718,11 +2725,19 @@ function jumpNameById(jumpId) {
 let accessTestResults = {};
 let jumpTestResults = {};
 
-function paintConnDot(dotId, ok) {
+function setConnDotState(dotId, state, title) {
+    // state: 'ok' | 'fail' | 'unknown' (amber: client-side route, jump unreachable from this rig)
     const dot = document.getElementById(dotId);
     if (!dot) return;
-    dot.className = 'conn-dot ' + (ok ? 'conn-dot-ok' : 'conn-dot-fail');
-    dot.title = ok ? 'Connection OK' : 'Connection failed';
+    const cls = state === 'ok' ? 'conn-dot-ok' : (state === 'unknown' ? 'conn-dot-unknown' : 'conn-dot-fail');
+    dot.className = 'conn-dot ' + cls;
+    dot.title = title || (state === 'ok' ? 'Connection OK'
+        : state === 'unknown' ? 'Client-side route: the jump host is unreachable from this rig (works from devices that can reach it, e.g. the Mac)'
+        : 'Connection failed');
+}
+
+function paintConnDot(dotId, ok) {
+    setConnDotState(dotId, ok ? 'ok' : 'fail');
 }
 
 window.checkAllAccesses = async function(btn) {
@@ -2732,12 +2747,12 @@ window.checkAllAccesses = async function(btn) {
     btn.disabled = true;
     const orig = btn.innerHTML;
     btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Checking...';
-    let okCount = 0;
+    let okCount = 0, unknownCount = 0;
     for (const item of items) {
         const dotId = 'acc-dot_' + item.access.id;
         const dot = document.getElementById(dotId);
         if (dot) dot.className = 'conn-dot conn-dot-warn';
-        let ok = false;
+        let state = 'fail';
         try {
             const response = await fetch('/api/cluster/access/test', {
                 method: 'POST',
@@ -2745,15 +2760,18 @@ window.checkAllAccesses = async function(btn) {
                 body: JSON.stringify({ rig_id: item.rigId, access: item.access })
             });
             const data = await response.json();
-            ok = !!data.success;
-        } catch (e) { ok = false; }
-        accessTestResults[item.access.id] = ok;
-        if (ok) okCount += 1;
-        paintConnDot(dotId, ok);
+            state = data.jump_unreachable ? 'unknown' : (data.success ? 'ok' : 'fail');
+        } catch (e) { state = 'fail'; }
+        accessTestResults[item.access.id] = state === 'unknown' ? 'unknown' : (state === 'ok');
+        if (state === 'ok') okCount += 1;
+        if (state === 'unknown') unknownCount += 1;
+        setConnDotState(dotId, state);
     }
     btn.disabled = false;
     btn.innerHTML = orig;
-    showToast('Checked ' + items.length + ' access(es): ' + okCount + ' OK, ' + (items.length - okCount) + ' failed.', okCount === items.length);
+    const failed = items.length - okCount - unknownCount;
+    showToast('Checked ' + items.length + ' access(es): ' + okCount + ' OK, ' +
+        unknownCount + ' client-side, ' + failed + ' failed.', failed === 0, okCount < items.length);
 };
 
 window.checkAllJumps = async function(btn) {
@@ -2762,12 +2780,12 @@ window.checkAllJumps = async function(btn) {
     btn.disabled = true;
     const orig = btn.innerHTML;
     btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Checking...';
-    let okCount = 0;
+    let okCount = 0, unknownCount = 0;
     for (const j of jumps) {
         const dotId = 'jump-dot_' + j.id;
         const dot = document.getElementById(dotId);
         if (dot) dot.className = 'conn-dot conn-dot-warn';
-        let ok = false;
+        let state = 'fail';
         try {
             const response = await fetch('/api/cluster/jump/test', {
                 method: 'POST',
@@ -2775,15 +2793,18 @@ window.checkAllJumps = async function(btn) {
                 body: JSON.stringify({ jump: { id: j.id } })
             });
             const data = await response.json();
-            ok = !!data.success;
-        } catch (e) { ok = false; }
-        jumpTestResults[j.id] = ok;
-        if (ok) okCount += 1;
-        paintConnDot(dotId, ok);
+            state = data.jump_unreachable ? 'unknown' : (data.success ? 'ok' : 'fail');
+        } catch (e) { state = 'fail'; }
+        jumpTestResults[j.id] = state === 'unknown' ? 'unknown' : (state === 'ok');
+        if (state === 'ok') okCount += 1;
+        if (state === 'unknown') unknownCount += 1;
+        setConnDotState(dotId, state);
     }
     btn.disabled = false;
     btn.innerHTML = orig;
-    showToast('Checked ' + jumps.length + ' jump server(s): ' + okCount + ' OK, ' + (jumps.length - okCount) + ' failed.', okCount === jumps.length);
+    const failed = jumps.length - okCount - unknownCount;
+    showToast('Checked ' + jumps.length + ' jump server(s): ' + okCount + ' OK, ' +
+        unknownCount + ' client-side, ' + failed + ' failed.', failed === 0, okCount < jumps.length);
 };
 
 window.testAccess = async function(rigId, accessId, btn) {
@@ -2800,9 +2821,15 @@ window.testAccess = async function(rigId, accessId, btn) {
             body: JSON.stringify({ rig_id: rigId, access: access })
         });
         const data = await response.json();
-        accessTestResults[accessId] = !!data.success;
-        paintConnDot('acc-dot_' + accessId, !!data.success);
-        showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+        if (data.jump_unreachable) {
+            accessTestResults[accessId] = 'unknown';
+            setConnDotState('acc-dot_' + accessId, 'unknown');
+            showToast(data.message, false, true);
+        } else {
+            accessTestResults[accessId] = !!data.success;
+            paintConnDot('acc-dot_' + accessId, !!data.success);
+            showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+        }
     } catch (e) {
         accessTestResults[accessId] = false;
         paintConnDot('acc-dot_' + accessId, false);
@@ -2825,9 +2852,16 @@ window.testJump = async function(jumpId, btn) {
             body: JSON.stringify({ jump: { id: jumpId } })
         });
         const data = await response.json();
-        jumpTestResults[jumpId] = !!data.success;
-        paintConnDot('jump-dot_' + jumpId, !!data.success);
-        showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+        if (data.jump_unreachable) {
+            jumpTestResults[jumpId] = 'unknown';
+            setConnDotState('jump-dot_' + jumpId, 'unknown',
+                'Jump host is unreachable from this rig - it serves clients that can reach it directly (e.g. the Mac)');
+            showToast(data.message, false, true);
+        } else {
+            jumpTestResults[jumpId] = !!data.success;
+            paintConnDot('jump-dot_' + jumpId, !!data.success);
+            showToast(data.message || (data.success ? 'OK' : 'Test failed'), !!data.success);
+        }
     } catch (e) {
         jumpTestResults[jumpId] = false;
         paintConnDot('jump-dot_' + jumpId, false);
