@@ -5958,7 +5958,6 @@ def api_cluster_jump_test():
                         "hostname": hostname})
     return jsonify({"success": False, "message": "Jump server test failed: %s" % (ssh_err or "unknown error")})
 
-@app.route('/api/cluster/access/test', methods=['POST'])
 def _probe_tcp(host, port, timeout=4):
     """Quick TCP reachability probe (no SSH). Returns True if connect succeeded."""
     try:
@@ -5967,6 +5966,7 @@ def _probe_tcp(host, port, timeout=4):
     except Exception:
         return False
 
+@app.route('/api/cluster/access/test', methods=['POST'])
 def api_cluster_access_test():
     """Test an SSH access (unsaved payload allowed) by running hostname over SSH."""
     data = request.get_json()
