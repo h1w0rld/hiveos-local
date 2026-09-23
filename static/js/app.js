@@ -1811,68 +1811,139 @@ function ocAlgoSelectHtml(p) {
     return `<select class="form-select form-select-sm bg-dark-input text-white border-secondary-subtle oc-algo-select" data-oc-id="${p.id}" title="Auto-applies this preset when the rig mines the chosen algorithm">${options.join('')}</select>`;
 }
 
-// Write values into the preset dialog (Edit prefills the preset's values,
-// Add passes {} so every field starts empty). Scalar values fill the common
-// fields; per-GPU lists fill the table cells.
+// Per-GPU values, fans-Advanced style: the common clock fields accept one
+// number (every GPU) or a space-separated list (value per GPU order, 0 =
+// leave that GPU unchanged). Each GPU row gets a sliders button opening an
+// individual form whose OK writes tokens back into the list fields.
 const OC_FIELD_COMMON_IDS = { core: 'ocPCore', lcore: 'ocPLcore', mem: 'ocPMem', lmem: 'ocPLmem',
                               pl: 'ocPPl', fan: 'ocPFan' };
 const OC_PERGPU_FIELDS = ['core', 'lcore', 'mem', 'lmem', 'pl', 'fan'];
+const OC_GPU_FIELD_IDS = { core: 'ocGCore', lcore: 'ocGLcore', mem: 'ocGMem',
+                           lmem: 'ocGLmem', pl: 'ocGPl', fan: 'ocGFan' };
 
-function ocPerGpuInputs() {
-    return Array.from(document.querySelectorAll('#ocPerGpuRows input[data-oc-gpu]'));
+function ocGpuCount() {
+    return (window._ocGpus || []).length;
+}
+
+// Token of `field` at GPU `idx` from a list/scalar/empty common input
+function ocGpuToken(field, idx) {
+    const raw = (document.getElementById(OC_FIELD_COMMON_IDS[field]) || {}).value || '';
+    const toks = raw.trim().split(/\s+/).filter(Boolean);
+    if (!toks.length) return '';
+    const t = toks.length === 1 ? toks[0] : (toks[idx] || '0');
+    return t === '0' ? '' : t;
+}
+
+// Write `val` into GPU `idx` position of the field's list (scalar/empty input
+// is expanded to a full list first; empty val stores the 0 "untouched" token)
+function ocSetGpuToken(field, idx, val) {
+    const el = document.getElementById(OC_FIELD_COMMON_IDS[field]);
+    if (!el) return;
+    const n = Math.max(ocGpuCount(), idx + 1);
+    const toks = el.value.trim() ? el.value.trim().split(/\s+/) : [];
+    const list = toks.length <= 1 ? Array(n).fill(toks[0] || '0') : toks.slice();
+    while (list.length < n) list.push('0');
+    list[idx] = String(val).trim() || '0';
+    el.value = list.join(' ');
+    ocUpdateHint(el);
+}
+
+// Caret helper (fans-Advanced parity): shows which GPU the caret position
+// maps to; warns when a token sits beyond the GPU count
+function ocUpdateHint(el) {
+    const hint = document.getElementById('ocListHint');
+    if (!hint || !el || !Object.values(OC_FIELD_COMMON_IDS).includes(el.id)) return;
+    const raw = el.value;
+    if (!raw.trim()) { hint.textContent = ''; hint.className = 'form-text small text-info'; return; }
+    const toks = raw.trim().split(/\s+/);
+    const caret = el.selectionStart == null ? raw.length : el.selectionStart;
+    const before = raw.slice(0, caret);
+    const idx = before.trim() ? before.trim().split(/\s+/).length - 1 : 0;
+    const gpus = window._ocGpus || [];
+    if (toks.length > gpus.length && gpus.length) {
+        hint.textContent = `Out of GPU count range (rig has ${gpus.length})`;
+        hint.className = 'form-text small text-warning';
+        return;
+    }
+    const g = gpus[Math.min(idx, gpus.length - 1)];
+    if (!g) { hint.textContent = ''; return; }
+    hint.textContent = `GPU ${g.index}` + (g.bus ? ' · ' + g.bus : '') +
+        (g.name ? ' · ' + g.name : '') + (toks.length > 1 ? `  (token ${idx + 1}/${toks.length})` : '');
+    hint.className = 'form-text small text-info';
+}
+
+function bindOcListFields() {
+    for (const id of Object.values(OC_FIELD_COMMON_IDS)) {
+        const el = document.getElementById(id);
+        if (!el || el.dataset.ocListBound) continue;
+        el.dataset.ocListBound = '1';
+        ['focus', 'input', 'click', 'keyup'].forEach(ev =>
+            el.addEventListener(ev, () => ocUpdateHint(el)));
+    }
 }
 
 function renderOcPerGpuRows() {
     const gpus = window._ocGpus || [];
     const tbody = document.getElementById('ocPerGpuRows');
+    if (!tbody) return;
     if (!gpus.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted small py-2">No NVIDIA GPUs detected</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted small py-2">No NVIDIA GPUs detected</td></tr>';
         return;
     }
-    tbody.innerHTML = gpus.map(g => {
-        const label = `<td class="small">GPU ${g.index}${g.bus ? ' <span class="text-secondary">' + escapeHtml(g.bus) + '</span>' : ''}` +
-            (g.name ? `<div class="gpu-name small text-truncate" style="max-width:150px" title="${escapeHtml(g.name)}">${escapeHtml(g.name)}</div>` : '') + '</td>';
-        const cells = OC_PERGPU_FIELDS.map(f =>
-            `<td><input type="number" class="form-control form-control-sm bg-dark-input" data-oc-gpu="${f}" data-oc-index="${g.index}" placeholder="—" autocomplete="off"></td>`).join('');
-        return `<tr>${label}${cells}</tr>`;
-    }).join('');
+    tbody.innerHTML = gpus.map(g => `
+        <tr>
+            <td class="small">GPU ${g.index}${g.bus ? ' <span class="text-secondary">' + escapeHtml(g.bus) + '</span>' : ''}${g.name ? ` <span class="gpu-name">${escapeHtml(g.name)}</span>` : ''}</td>
+            <td class="text-end">
+                <button type="button" class="btn btn-xs btn-outline-secondary" data-oc-gpu-btn="${g.index}" title="Individual overclock for GPU ${g.index} — values land in the GPU's list position">
+                    <i class="bi bi-toggles"></i>
+                </button>
+            </td>
+        </tr>`).join('');
+    tbody.querySelectorAll('[data-oc-gpu-btn]').forEach(b =>
+        b.addEventListener('click', () => showOcGpuModal(parseInt(b.dataset.ocGpuBtn, 10))));
 }
 
-// Typing a common value distributes it into every per-GPU cell of that field
-// (fans-tab "Set settings for all GPU" behaviour); clearing empties the cells
-function bindOcCommonDistribute() {
-    for (const [field, id] of Object.entries(OC_FIELD_COMMON_IDS)) {
-        const el = document.getElementById(id);
-        if (!el || el.dataset.perGpuBound) continue;
-        el.dataset.perGpuBound = '1';
-        el.addEventListener('input', () => {
-            ocPerGpuInputs().filter(i => i.dataset.ocGpu === field)
-                .forEach(i => { i.value = el.value; });
-        });
+// Individual OC dialog: prefilled from the GPU's list tokens; OK writes the
+// tokens back into the common fields, Cancel leaves them untouched
+let _ocGpuEditIndex = -1;
+function showOcGpuModal(idx) {
+    const g = (window._ocGpus || [])[idx];
+    if (!g) return;
+    _ocGpuEditIndex = idx;
+    document.getElementById('ocGpuModalTitle').innerHTML =
+        `<i class="bi bi-toggles text-warning me-1"></i>GPU ${g.index}${g.name ? ' · ' + escapeHtml(g.name) : ''}`;
+    for (const [field, id] of Object.entries(OC_GPU_FIELD_IDS)) {
+        document.getElementById(id).value = ocGpuToken(field, idx);
     }
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('ocGpuModal')).show();
 }
 
+function bindOcGpuModal() {
+    const ok = document.getElementById('ocGpuOkBtn');
+    if (!ok || ok.dataset.bound) return;
+    ok.dataset.bound = '1';
+    ok.addEventListener('click', () => {
+        const idx = _ocGpuEditIndex;
+        if (idx >= 0) {
+            for (const [field, id] of Object.entries(OC_GPU_FIELD_IDS)) {
+                ocSetGpuToken(field, idx, document.getElementById(id).value);
+            }
+        }
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('ocGpuModal')).hide();
+    });
+}
+
+// Write values into the preset dialog (Edit prefills the preset's values,
+// Add passes {} so every field starts empty). List and scalar values both go
+// straight into the common fields (fans-Advanced list semantics).
 function fillOcPresetForm(v) {
-    const map = { ocPCore: 'core', ocPLcore: 'lcore', ocPMem: 'mem', ocPLmem: 'lmem',
-                  ocPPl: 'pl', ocPFan: 'fan', ocPDelay: 'delay' };
+    const map = Object.assign({ ocPDelay: 'delay' }, OC_FIELD_COMMON_IDS);
     for (const [id, field] of Object.entries(map)) {
         const el = document.getElementById(id);
         if (el) el.value = String(v[field] ?? '');
     }
-    // per-GPU cells: a list value ("280 0 100") fills its positions (0 -> empty);
-    // a scalar leaves the cells empty (the common field covers every GPU)
-    ocPerGpuInputs().forEach(i => { i.value = ''; });
-    for (const field of OC_PERGPU_FIELDS) {
-        const raw = String(v[field] ?? '').trim();
-        if (!raw.includes(' ')) continue;
-        const toks = raw.split(/\s+/);
-        ocPerGpuInputs().filter(i => i.dataset.ocGpu === field).forEach(i => {
-            const t = toks[parseInt(i.dataset.ocIndex, 10)];
-            i.value = (t && t !== '0') ? t : '';
-        });
-        const common = document.getElementById(OC_FIELD_COMMON_IDS[field]);
-        if (common) common.value = '';
-    }
+    const hint = document.getElementById('ocListHint');
+    if (hint) hint.textContent = '';
     const flags = { ocPLed: 'led', ocPPill: 'pill', ocPP0: 'p0', ocPIdle: 'idle' };
     for (const [id, flag] of Object.entries(flags)) {
         const el = document.getElementById(id);
@@ -1907,7 +1978,8 @@ function showOcPresetModal(entry) {
     const isEdit = !!(entry && entry.id);
     window._ocEditingAlgo = isEdit ? String(entry.algo || '') : '';
     renderOcPerGpuRows();
-    bindOcCommonDistribute();
+    bindOcListFields();
+    bindOcGpuModal();
     if (isEdit) {
         fillOcPresetForm(entry.values || {});
         document.getElementById('ocPresetName').value = entry.name || '';
@@ -1933,17 +2005,10 @@ function collectOcFormValues() {
         idle: document.getElementById('ocPIdle').checked ? '1' : '0',
         delay: val('ocPDelay')
     };
-    for (const field of OC_PERGPU_FIELDS) {
-        const common = val(OC_FIELD_COMMON_IDS[field]);
-        const cells = ocPerGpuInputs().filter(i => i.dataset.ocGpu === field)
-            .sort((a, b) => parseInt(a.dataset.ocIndex, 10) - parseInt(b.dataset.ocIndex, 10));
-        if (!cells.length) { values[field] = common; continue; }
-        const tokens = cells.map(i => i.value.trim() || common || '0');
-        const used = cells.some(i => i.value.trim() !== '');
-        if (!used) { values[field] = common; continue; }
-        // all tokens equal (and equal to the common value) -> store as a scalar
-        values[field] = tokens.every(t => t === tokens[0]) && (!common || tokens[0] === common)
-            ? (tokens[0] === '0' ? '' : tokens[0]) : tokens.join(' ');
+    // clock fields carry fans-Advanced list semantics verbatim: one number =
+    // every GPU, "a b c ..." = per GPU order (0 = unchanged)
+    for (const field of Object.keys(OC_FIELD_COMMON_IDS)) {
+        values[field] = val(OC_FIELD_COMMON_IDS[field]);
     }
     const payload = { name: name, algo: '', values: values };
     // Editing an existing preset: keep its algorithm binding

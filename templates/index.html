@@ -1981,27 +1981,27 @@
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPCore" class="form-label small fw-medium mb-1">Core Clock Offset, MHz</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPCore" placeholder="e.g. 280">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPCore" placeholder="e.g. 280 or 280 0 100 280">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPLcore" class="form-label small fw-medium mb-1">Fixed Core Clock, MHz</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPLcore" placeholder="e.g. 1410">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPLcore" placeholder="e.g. 1410 or 1410 0 0 1410">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPMem" class="form-label small fw-medium mb-1">Memory Clock Offset, MHz</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPMem" placeholder="e.g. 2000">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPMem" placeholder="e.g. 2000 or 0 2000 0 0">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPLmem" class="form-label small fw-medium mb-1">Lock Memory Clock, MHz</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPLmem" placeholder="e.g. 5000">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPLmem" placeholder="e.g. 5000 or 5000 0 5000 5000">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPPl" class="form-label small fw-medium mb-1">Power Limit, W</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPPl" placeholder="e.g. 130">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPPl" placeholder="e.g. 130 or 130 90 130 130">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPFan" class="form-label small fw-medium mb-1">Fan Speed, %</label>
-                                <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPFan" min="0" max="100" placeholder="0 = auto">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPFan" min="0" max="100" placeholder="0 = auto; list = per GPU">
                             </div>
                             <div class="col-md-3 col-6">
                                 <label for="ocPDelay" class="form-label small fw-medium mb-1">Delay before applying OC, s</label>
@@ -2035,34 +2035,62 @@
                             </div>
                         </div>
                         <hr class="border-secondary-subtle my-3">
-                        <div class="d-flex align-items-center gap-2 mb-2">
+                        <div class="d-flex align-items-center gap-2 mb-1">
                             <i class="bi bi-table text-secondary"></i>
                             <span class="small fw-medium">Per-GPU values</span>
-                            <span class="form-text small mb-0 ms-1">Empty cell uses the common value above; 0 = leave unchanged</span>
+                            <span class="form-text small mb-0 ms-1">One number applies to every GPU; a space-separated list sets values by GPU order (0 = leave unchanged)</span>
                         </div>
+                        <div id="ocListHint" class="form-text small text-info" style="min-height:1.2em"></div>
                         <div class="table-responsive">
                             <table class="table table-sm align-middle mb-0 oc-preset-pergpu-table">
                                 <thead>
                                     <tr class="small text-uppercase text-secondary">
                                         <th>GPU</th>
-                                        <th>Core +</th>
-                                        <th>Core lock</th>
-                                        <th>Mem +</th>
-                                        <th>Mem lock</th>
-                                        <th>PL</th>
-                                        <th>Fan</th>
+                                        <th class="text-end" style="width:120px">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="ocPerGpuRows"></tbody>
                             </table>
                         </div>
-                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. Common values apply to every GPU; a per-GPU value overrides the common one for that GPU only. Mark a preset as default with the star in the list.</div>
+                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. Set individual values by list order in the fields above, or with the sliders button next to a GPU. Mark a preset as default with the star in the list.</div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
                         <button type="submit" class="btn btn-sm btn-primary fw-semibold">Save</button>
                     </div>
                 </form>
+                            </div>
+        </div>
+    </div>
+
+<div class="modal fade" id="ocGpuModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-sm">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title fw-bold" id="ocGpuModalTitle">GPU</h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body py-2">
+                    <div class="row g-2">
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGCore">Core +</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGCore"></div>
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGLcore">Core lock</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGLcore"></div>
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGMem">Mem +</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGMem"></div>
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGLmem">Mem lock</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGLmem"></div>
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGPl">PL</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGPl"></div>
+                        <div class="col-6"><label class="form-label small mb-1" for="ocGFan">Fan</label>
+                            <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGFan"></div>
+                    </div>
+                    <div class="form-text small mt-2 mb-0">Values go into the GPU's position of the list fields. Empty = 0 (leave unchanged).</div>
+                </div>
+                <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-primary fw-semibold" id="ocGpuOkBtn">OK</button>
+                </div>
             </div>
         </div>
     </div>
