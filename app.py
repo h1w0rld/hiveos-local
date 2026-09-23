@@ -784,15 +784,15 @@ _ACCESS_HEALTH = {}  # "rig_id|access_id" -> {state, fails, probe_after, last_ok
 
 def _access_route_class(access):
     """(priority, class) for an SSH access: 0/lan, 1/netbird, 2/jump."""
+    if str(access.get("type", "direct")) == "jump":
+        return 2, "jump"
     try:
-        if str(access.get("type", "direct")) != "jump":
-            ip = ipaddress.ip_address(str(access.get("host", "")).strip())
-            if ip.version == 4 and ip in _NETBIRD_NET:
-                return 1, "netbird"
-            return 0, "lan"
+        ip = ipaddress.ip_address(str(access.get("host", "")).strip())
+        if ip.version == 4 and ip in _NETBIRD_NET:
+            return 1, "netbird"
     except ValueError:
         pass
-    return 2, "jump"
+    return 0, "lan"
 
 def _route_health_key(rig_id, access):
     return "%s|%s" % (rig_id, access.get("id"))
