@@ -44,6 +44,7 @@ OC_PRESETS_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_presets.json")
 OC_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_preset_state.json")
 CLUSTER_CONF = os.path.join(HIVE_CONFIG_DIR, "cluster.json")
 CLUSTER_SELF_ID_PATH = os.path.join(HIVE_CONFIG_DIR, "cluster-self-id")
+CLUSTER_SELF_ENTRY_PATH = os.path.join(HIVE_CONFIG_DIR, "cluster-self-entry.json")
 CLUSTER_CACHE = os.path.join(HIVE_CONFIG_DIR, "cluster-cache.json")
 DEFAULT_SYNC_INTERVAL = 60
 DASHBOARD_PORT = 1337
@@ -118,6 +119,26 @@ def get_local_ip():
 def make_self_rig_entry(state):
     rig_conf = parse_shell_config(RIG_CONF_PATH)
     now = int(time.time())
+    # A missing self entry is almost always data loss (unreadable cluster.json,
+    # import bootstrap racing the running panel), not a first boot: restore the
+    # rig's own name and SSH routes from the snapshot sidecar. Falling back to
+    # RIG_ID with empty accesses rebirths the rig under its worker id and
+    # strips its routes - the numeric-name rigs with no connections.
+    snap = _read_self_entry_snapshot()
+    if snap is not None:
+        logging.error("Self entry missing from cluster config - restoring name/routes "
+                      f"from snapshot ('{snap.get('name', '')}')")
+        return {
+            "id": state["self_id"],
+            "name": snap.get("name") or rig_conf.get("RIG_ID", "") or socket.gethostname(),
+            "host_label": snap.get("host_label") or get_local_ip(),
+            "is_self": True,
+            "password": str(app.config.get('ACCESS_PASSWORD', '')),
+            "accesses": [clean_access_entry(a) for a in snap.get("accesses", [])
+                         if isinstance(a, dict)],
+            "updated_at": now,
+            "added_at": now,
+        }
     return {
         "id": state["self_id"],
         "name": rig_conf.get("RIG_ID", "") or socket.gethostname(),
@@ -156,6 +177,48 @@ def _write_self_id_sidecar(self_id):
         return True
     except Exception as e:
         logging.error(f"Failed to save cluster identity sidecar: {e}")
+        return False
+
+_SELF_ENTRY_SNAPSHOT_FINGERPRINT = {"value": None}
+
+def _read_self_entry_snapshot():
+    """Reads the persisted self entry (name + SSH routes) or None."""
+    try:
+        with open(CLUSTER_SELF_ENTRY_PATH, 'r') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("name"), str) \
+                and isinstance(data.get("accesses", []), list):
+            return data
+    except Exception:
+        pass
+    return None
+
+def _self_entry_snapshot_payload(entry):
+    return {
+        "name": str(entry.get("name", "")),
+        "host_label": str(entry.get("host_label", "")),
+        "accesses": [clean_access_entry(a) for a in entry.get("accesses", [])
+                     if isinstance(a, dict)],
+    }
+
+def _write_self_entry_snapshot(entry):
+    """Persists the self entry data next to cluster.json (atomic, 0600)."""
+    payload = _self_entry_snapshot_payload(entry)
+    fingerprint = json.dumps(payload, sort_keys=True)
+    if fingerprint == _SELF_ENTRY_SNAPSHOT_FINGERPRINT.get("value"):
+        return True
+    try:
+        tmp_path = CLUSTER_SELF_ENTRY_PATH + ".tmp"
+        with open(tmp_path, 'w') as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, CLUSTER_SELF_ENTRY_PATH)
+        _SELF_ENTRY_SNAPSHOT_FINGERPRINT["value"] = fingerprint
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save cluster self entry snapshot: {e}")
         return False
 
 def load_cluster_state():
@@ -252,6 +315,12 @@ def save_cluster_state(state):
                 os.fsync(f.fileno())
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, CLUSTER_CONF)
+        # Keep the self-entry snapshot (name + SSH routes) in sync so a rebirth
+        # after data loss restores the rig instead of stripping it
+        self_entry = next((r for r in state.get("rigs", [])
+                           if isinstance(r, dict) and r.get("id") == state.get("self_id")), None)
+        if self_entry is not None:
+            _write_self_entry_snapshot(self_entry)
         return True
     except Exception as e:
         logging.error(f"Failed to save cluster config: {e}")
@@ -1437,11 +1506,17 @@ def _import_bootstrap_node(access, mode, pw64, st, node_entry, payload, sync_int
                        [r for r in payload.get("rigs", []) if r.get("id") != node_entry["id"]]
         body64 = base64.b64encode(json.dumps(body).encode("utf-8")).decode("ascii")
         sid64 = base64.b64encode(str(node_entry["id"]).encode("utf-8")).decode("ascii")
-        script = ("mkdir -p /hive-config && printf '%s' '" + body64 + "' | base64 -d > /hive-config/cluster.json.tmp "
+        # A running panel would clobber this file with its in-memory state at the
+        # end of the current sync cycle (a rebirth under the RIG_ID name with no
+        # SSH routes) - stop it around the write and let it boot from the new file
+        script = ("systemctl stop hiveos-local.service 2>/dev/null; "
+                  "mkdir -p /hive-config && printf '%s' '" + body64 + "' | base64 -d > /hive-config/cluster.json.tmp "
                   "&& chmod 600 /hive-config/cluster.json.tmp "
                   "&& mv /hive-config/cluster.json.tmp /hive-config/cluster.json "
                   "&& printf '%s' '" + sid64 + "' | base64 -d > /hive-config/cluster-self-id "
-                  "&& chmod 600 /hive-config/cluster-self-id && echo __W_OK__")
+                  "&& chmod 600 /hive-config/cluster-self-id; "
+                  "wrc=$?; systemctl start hiveos-local.service 2>/dev/null; "
+                  "[ $wrc -eq 0 ] && echo __W_OK__")
         ok, msg = _import_ssh_ok(
             run_ssh_command(access, _import_root_cmd(mode, pw64, script), timeout=60), "__W_OK__")
         if not ok:
@@ -1949,6 +2024,240 @@ def start_metrics_sampler():
     t.start()
     logging.info("Metrics sampler started")
 
+# =============================================================
+# Local config guard ("Local mode" per rig)
+# =============================================================
+# When enabled, THIS panel is the source of truth for the rig's mining
+# configuration (flight sheet, fans, overclock, autofan): a snapshot of the
+# config files is captured on enable (and refreshed after every local apply)
+# and enforced - at panel/rig start and on a periodic pass the files are
+# compared against the snapshot, and any foreign change (typically a config
+# pulled from the HiveOS cloud agent after a reboot, sometimes minutes or
+# hours later) is reverted and re-applied to the hardware. Cloud mode (the
+# default) changes nothing: no checks, no automatic applies - manual only.
+GUARD_CONF = os.path.join(HIVE_CONFIG_DIR, "local_guard.json")
+GUARD_FILES = ["rig.conf", "wallet.conf", "nvidia-oc.conf", "amd-oc.conf", "autofan.conf"]
+GUARD_CHECK_INTERVAL = 600    # periodic enforcement pass (10 min)
+# Early passes right after panel start (boot/reboot): hive's cloud agent may
+# pull its config a few minutes into the boot, so check twice early, then
+# settle into the periodic 10-min loop.
+GUARD_BOOT_DELAYS = (90, 300)
+
+_guard_state_lock = threading.Lock()
+_GUARD_STATE = {"loaded": False, "data": None}
+
+def _guard_default_state():
+    return {"enabled": False, "since": 0, "snapshot": {},
+            "last_check": 0, "last_drift": 0, "last_fix": 0, "last_action": ""}
+
+def _guard_load():
+    """In-memory cached guard state, seeded from /hive-config/local_guard.json."""
+    with _guard_state_lock:
+        if _GUARD_STATE["loaded"]:
+            return _GUARD_STATE["data"]
+        st = _guard_default_state()
+        try:
+            with open(GUARD_CONF, 'r') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                st["enabled"] = bool(disk.get("enabled"))
+                st["since"] = int(disk.get("since") or 0)
+                snap = disk.get("snapshot")
+                if isinstance(snap, dict):
+                    st["snapshot"] = {str(k): str(v) for k, v in snap.items()}
+                st["last_check"] = int(disk.get("last_check") or 0)
+                st["last_drift"] = int(disk.get("last_drift") or 0)
+                st["last_fix"] = int(disk.get("last_fix") or 0)
+                st["last_action"] = str(disk.get("last_action") or "")
+        except Exception:
+            pass
+        _GUARD_STATE["data"] = st
+        _GUARD_STATE["loaded"] = True
+        return st
+
+def _guard_save(st):
+    """Persist guard state atomically (local_guard.json, 0600) and refresh the cache."""
+    with _guard_state_lock:
+        _GUARD_STATE["data"] = st
+        _GUARD_STATE["loaded"] = True
+        try:
+            with config_lock:
+                tmp_path = GUARD_CONF + ".tmp"
+                with open(tmp_path, 'w') as f:
+                    json.dump(st, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp_path, 0o600)
+                os.replace(tmp_path, GUARD_CONF)
+            return True
+        except Exception as e:
+            logging.error(f"Failed to save local guard state: {e}")
+            return False
+
+def _guard_reset_cache():
+    """Drop the in-memory cache (tests / manual state reload)."""
+    with _guard_state_lock:
+        _GUARD_STATE["loaded"] = False
+        _GUARD_STATE["data"] = None
+
+def _guard_read_file(name):
+    try:
+        with open(os.path.join(HIVE_CONFIG_DIR, name), 'r') as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _guard_write_file(name, content):
+    """Restore one config file atomically (tmp + fsync + rename, 0600)."""
+    path = os.path.join(HIVE_CONFIG_DIR, name)
+    try:
+        with config_lock:
+            tmp_path = path + ".guard-tmp"
+            with open(tmp_path, 'w') as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        return True
+    except Exception as e:
+        logging.error(f"Local guard: failed to restore {name}: {e}")
+        return False
+
+def guard_capture_snapshot():
+    """Capture the CURRENT config files as the protected state (enable / refresh)."""
+    st = _guard_load()
+    snap = {}
+    for name in GUARD_FILES:
+        content = _guard_read_file(name)
+        if content is not None:
+            snap[name] = content
+    st["snapshot"] = snap
+    st["since"] = int(time.time())
+    _guard_save(st)
+    return st
+
+def guard_note_config_change():
+    """Hook fired after every config write made through this panel: refresh the
+    protected snapshot so the guard enforces the rig's newest settings, not a
+    stale copy. Cheap no-op while guard is disabled."""
+    try:
+        st = _guard_load()
+        if not st.get("enabled"):
+            return
+        guard_capture_snapshot()
+        logging.info("Local guard: snapshot refreshed after local config change")
+    except Exception as e:
+        logging.error(f"Local guard: snapshot refresh failed: {e}")
+
+def guard_run_check(apply=True):
+    """One enforcement pass: compare config files against the snapshot, restore
+    drifted files and re-apply them to the hardware. Returns a report dict."""
+    st = _guard_load()
+    now = int(time.time())
+    report = {"enabled": bool(st.get("enabled")), "checked": now, "drifted": [], "fixed": False, "action": ""}
+    if not report["enabled"]:
+        return report
+    st["last_check"] = now
+    snapshot = st.get("snapshot", {})
+    drifted = [name for name in snapshot if name in GUARD_FILES and _guard_read_file(name) != snapshot[name]]
+    report["drifted"] = drifted
+    if not drifted:
+        _guard_save(st)
+        return report
+
+    st["last_drift"] = now
+    logging.warning(f"Local guard: config drift detected ({', '.join(drifted)}) - restoring local settings")
+    restart_miner = run_nv = run_amd = False
+    restored = []
+    for name in drifted:
+        if name in ("rig.conf", "wallet.conf"):
+            restart_miner = True
+        elif name == "nvidia-oc.conf":
+            run_nv = True
+        elif name == "amd-oc.conf":
+            run_amd = True
+        if apply and _guard_write_file(name, snapshot[name]):
+            restored.append(name)
+
+    actions = []
+    if apply:
+        # autofan.conf needs no action: the daemon re-sources it every cycle
+        if run_nv:
+            run_nvidia_oc()
+            actions.append("nvidia-oc applied")
+        if run_amd:
+            run_command("sudo /hive/sbin/amd-oc")
+            actions.append("amd-oc applied")
+        if restart_miner:
+            run_command(MINER_RESTART_CMD)
+            actions.append("miner restarted")
+    st["last_fix"] = now
+    st["last_action"] = "reverted " + ", ".join(drifted) + ("; " + "; ".join(actions) if actions else "")
+    report["fixed"] = bool(restored)
+    report["action"] = st["last_action"]
+    _guard_save(st)
+    if apply and restored:
+        record_metrics_event("warning", "Local guard: config overwritten externally (" +
+                             ", ".join(drifted) + ") - local settings re-applied")
+    return report
+
+def _guard_worker():
+    for delay in GUARD_BOOT_DELAYS:
+        time.sleep(delay)
+        try:
+            guard_run_check(apply=True)
+        except Exception as e:
+            logging.error(f"Local guard boot check failed: {e}")
+    while True:
+        time.sleep(GUARD_CHECK_INTERVAL)
+        try:
+            guard_run_check(apply=True)
+        except Exception as e:
+            logging.error(f"Local guard check failed: {e}")
+
+def start_guard_worker():
+    t = threading.Thread(target=_guard_worker, daemon=True, name="local-guard")
+    t.start()
+    logging.info("Local guard worker started")
+
+def _guard_public(st):
+    return {"enabled": bool(st.get("enabled")),
+            "since": int(st.get("since") or 0),
+            "files": sorted(st.get("snapshot", {}).keys()),
+            "last_check": int(st.get("last_check") or 0),
+            "last_drift": int(st.get("last_drift") or 0),
+            "last_fix": int(st.get("last_fix") or 0),
+            "last_action": str(st.get("last_action") or "")}
+
+@app.route('/api/guard', methods=['GET', 'POST'])
+def api_guard():
+    """Config source mode per rig: Local (enforced snapshot) vs Cloud (default)."""
+    if request.method == 'GET':
+        return jsonify({"success": True, "guard": _guard_public(_guard_load())})
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled")
+    if enabled is not None:
+        want = bool(enabled)
+        st = _guard_load()
+        if want and not st.get("enabled"):
+            # Enabling: protect the rig's CURRENT settings from now on
+            st = guard_capture_snapshot()
+            st["enabled"] = True
+            _guard_save(st)
+            logging.info(f"Local guard ENABLED by request from {request.remote_addr} "
+                         f"({len(st.get('snapshot', {}))} files protected)")
+            record_metrics_event("info", "Local mode enabled - rig settings are enforced locally")
+        elif not want and st.get("enabled"):
+            st["enabled"] = False
+            st["last_action"] = "disabled"
+            _guard_save(st)
+            logging.info(f"Local guard disabled by request from {request.remote_addr}")
+            record_metrics_event("info", "Local mode disabled - back to cloud behavior (no enforcement)")
+    if data.get("refresh_snapshot"):
+        guard_capture_snapshot()
+    return jsonify({"success": True, "guard": _guard_public(_guard_load())})
+
 _cluster_sync_lock = threading.Lock()
 _cluster_last_sync = {"ts": 0, "ok": True, "message": "Not synced yet"}
 
@@ -2021,6 +2330,23 @@ def run_sync_cycle(triggered_by="auto"):
 
             cache["rigs"][rig_id] = entry
 
+        # Re-read the file and fold it in before saving: UI edits, imports and
+        # API merges that landed while this cycle was talking to peers (offline
+        # peers stretch a cycle to minutes via timeouts) must survive this save
+        try:
+            fresh = load_cluster_state()
+            if fresh.get("self_id") == state.get("self_id"):
+                state["rigs"], state["removed"] = merge_rig_lists(
+                    fresh["rigs"], state["rigs"],
+                    base_removed=fresh.get("removed"), incoming_removed=state.get("removed"))
+                state["jump_hosts"] = merge_jump_hosts(
+                    fresh.get("jump_hosts", []), state.get("jump_hosts", []))
+                state["clusters"] = merge_clusters(
+                    fresh.get("clusters", []), state.get("clusters", []), state.get("removed", []))
+                if fresh.get("sync_interval"):
+                    state["sync_interval"] = fresh["sync_interval"]
+        except Exception as e:
+            logging.error(f"Cluster sync: pre-save reconcile failed: {e}")
         save_cluster_state(state)
         with _access_health_lock:
             cache["access_health"] = {k: dict(v) for k, v in _ACCESS_HEALTH.items()}
@@ -2147,6 +2473,9 @@ def write_shell_config(filepath, config):
                         f.write(f"{k}='{v}'\n")
                     else:
                         f.write(f'{k}="{v}"\n')
+            # Every panel-side write to a config file is a legitimate local change:
+            # keep the local-guard snapshot in sync so it never fights the user
+            guard_note_config_change()
             return True
         except Exception as e:
             logging.error(f"Error writing config file {filepath}: {e}")
@@ -3362,7 +3691,9 @@ def revert_overclock():
             run_nvidia_oc()
         if os.path.exists(amd_bak):
             run_command("sudo /hive/sbin/amd-oc")
-                     
+        # Reverted state becomes the locally protected state (guard hook)
+        guard_note_config_change()
+
         logging.info(f"Configurations successfully reverted by request from {request.remote_addr}")
         return jsonify({"success": True, "message": "Overclock settings reverted to previous configuration!"})
     except Exception as e:
@@ -6288,6 +6619,9 @@ if __name__ == '__main__':
 
     # Start the metrics history sampler (worker Statistics tab)
     start_metrics_sampler()
+
+    # Start the local config guard worker (Local mode enforcement: boot + every 10 min)
+    start_guard_worker()
 
     local_ip = get_local_ip()
     port = 1337
