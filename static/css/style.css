@@ -1570,3 +1570,11 @@ hr {
     font-variant-numeric: tabular-nums;
     flex: 0 0 130px;
 }
+
+/* OC preset modal per-GPU table: transparent like the wallet/preset tables,
+   hairline borders, compact number inputs per GPU row */
+.oc-preset-pergpu-table { --bs-table-bg: transparent; }
+.oc-preset-pergpu-table th, .oc-preset-pergpu-table td { border-color: rgba(255, 255, 255, 0.06); padding: 0.25rem 0.4rem; }
+.oc-preset-pergpu-table td:first-child { white-space: nowrap; }
+.oc-preset-pergpu-table .gpu-name { color: var(--bs-success); }
+.oc-preset-pergpu-table input { min-width: 64px; }

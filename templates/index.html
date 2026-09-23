@@ -2034,7 +2034,29 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. The last saved values stay in the fields. Mark a preset as default with the star in the list.</div>
+                        <hr class="border-secondary-subtle my-3">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <i class="bi bi-table text-secondary"></i>
+                            <span class="small fw-medium">Per-GPU values</span>
+                            <span class="form-text small mb-0 ms-1">Empty cell uses the common value above; 0 = leave unchanged</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0 oc-preset-pergpu-table">
+                                <thead>
+                                    <tr class="small text-uppercase text-secondary">
+                                        <th>GPU</th>
+                                        <th>Core +</th>
+                                        <th>Core lock</th>
+                                        <th>Mem +</th>
+                                        <th>Mem lock</th>
+                                        <th>PL</th>
+                                        <th>Fan</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ocPerGpuRows"></tbody>
+                            </table>
+                        </div>
+                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. Common values apply to every GPU; a per-GPU value overrides the common one for that GPU only. Mark a preset as default with the star in the list.</div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>

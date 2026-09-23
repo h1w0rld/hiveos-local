@@ -1983,6 +1983,23 @@ def is_safe_parameter_value(value):
 
 # Overclock Parameters range check validation
 def validate_overclock_ranges(brand, data):
+    # Per-GPU list values (space-separated, e.g. "280 280 100"): validate each
+    # token as a scalar of the same field ("0" token = "leave that GPU unchanged")
+    list_lens = [len(str(v).split()) for v in data.values()
+                 if isinstance(v, str) and len(str(v).split()) > 1]
+    if list_lens:
+        for tok_idx in range(max(list_lens)):
+            sub = {}
+            for k, v in data.items():
+                if isinstance(v, str) and len(v.split()) > 1:
+                    toks = v.split()
+                    sub[k] = toks[tok_idx] if tok_idx < len(toks) else "0"
+                else:
+                    sub[k] = v
+            is_valid, err = validate_overclock_ranges(brand, sub)
+            if not is_valid:
+                return False, err
+        return True, ""
     try:
         if brand == "NVIDIA":
             if "core" in data and data["core"] != "":
@@ -2950,12 +2967,22 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
     lmem += ["0"] * (max_idx + 1 - len(lmem))
 
     def _apply_values(field_key, lst, transform=None):
-        """Single-GPU mode: set one index. All-GPUs mode: empty values are skipped
-        (per-GPU differences are preserved), filled values go to every GPU."""
+        """Single-GPU mode: set one index (empty offset = no change; locked
+        clocks store explicit "0"). All-GPUs mode: an empty value is skipped
+        (per-GPU differences are preserved), a filled value goes to every GPU,
+        and a space-separated list sets tokens per GPU index ("0"/empty token
+        = leave that GPU's current value untouched)."""
         if field_key not in data:
             return
         raw = str(data[field_key]).strip()
         if apply_all:
+            tokens = raw.split()
+            if len(tokens) > 1:
+                for i, t in enumerate(tokens):
+                    if i >= len(lst) or t in ("", "0"):
+                        continue
+                    lst[i] = transform(t) if transform else t
+                return
             if raw == "":
                 return
             val = transform(raw) if transform else raw
@@ -3770,7 +3797,19 @@ def _oc_matches_live(values):
     for field, key in (("core", "CLOCK"), ("lcore", "LCLOCK"), ("mem", "MEM"),
                        ("lmem", "LMEM"), ("pl", "PLIMIT"), ("fan", "FAN")):
         want = str(values.get(field, "") or "").strip()
-        if want and want != "0" and uniform(key) != want:
+        if not want or want == "0":
+            continue
+        tokens = want.split()
+        if len(tokens) > 1:
+            # per-GPU list: every non-zero token must match the live conf at
+            # the same index; zero tokens are wildcards (untouched on apply)
+            live = str(nv.get(key, "") or "").split()
+            for i, t in enumerate(tokens):
+                if t in ("", "0"):
+                    continue
+                if i >= len(live) or live[i] != t:
+                    return False
+        elif uniform(key) != want:
             return False
     want_delay = str(values.get("delay", "") or "").strip()
     if want_delay and want_delay != "0":
@@ -3785,16 +3824,17 @@ def _oc_matches_live(values):
 
 
 def _apply_oc_preset_values(values):
-    """Push an OC preset to hardware: expand the all-GPU form values to every
-    NVIDIA GPU through the shared apply path (conf write, nvidia-oc run and
-    locked-clock verification included). Empty clock fields are left unchanged."""
+    """Push an OC preset to hardware: values may be uniform scalars (expanded to
+    every GPU) or space-separated per-GPU lists ("0" token = leave that GPU's
+    current value). Flags and delay are rig-wide. Empty clock fields are left
+    unchanged. Conf write, nvidia-oc run and locked-clock verification included."""
     payload = {}
     for field in OC_FORM_FIELDS:
         v = str(values.get(field, "") or "").strip()
         if field == "delay":
             payload[field] = v
         elif v and v != "0":
-            payload[field] = v
+            payload[field] = " ".join(v.split())
     for flag in OC_FLAGS:
         payload[flag] = "1" if str(values.get(flag, "0")) == "1" else "0"
     is_valid, err = validate_overclock_ranges("NVIDIA", payload)
@@ -3837,6 +3877,28 @@ def _auto_switch_oc_for_algo(algo):
     return f" OC preset '{preset.get('name')}' failed: {msg}"
 
 
+def _nvidia_gpu_list():
+    """[{index, name, bus}] of NVIDIA GPUs for the per-GPU preset table; falls
+    back to the live conf list length when stats are unavailable."""
+    gpus = []
+    try:
+        for g in get_gpu_stats().get("gpus", []):
+            if g.get("brand") == "NVIDIA":
+                gpus.append({"index": g.get("index", len(gpus)),
+                             "name": g.get("name", ""), "bus": g.get("bus_id", "")})
+    except Exception:
+        pass
+    if not gpus:
+        try:
+            nv = parse_shell_config(NVIDIA_OC_CONF)
+            n = max([len(str(nv.get(k, "") or "").split())
+                     for k in ("CLOCK", "LCLOCK", "MEM", "LMEM", "PLIMIT", "FAN")] or [0])
+            gpus = [{"index": i, "name": "", "bus": ""} for i in range(n)]
+        except Exception:
+            gpus = []
+    return gpus
+
+
 @app.route('/api/oc-presets', methods=['GET'])
 def list_oc_presets():
     applied_id = _load_oc_state().get("applied_id", "")
@@ -3853,7 +3915,8 @@ def list_oc_presets():
             # the live conf (manual OC edits clear the applied marker)
             "active": p.get("id", "") == applied_id and _oc_matches_live(p.get("values", {}))
         })
-    return jsonify({"success": True, "presets": presets, "live": _live_oc_form_values()})
+    return jsonify({"success": True, "presets": presets,
+                    "live": _live_oc_form_values(), "gpus": _nvidia_gpu_list()})
 
 
 @app.route('/api/oc-presets/save', methods=['POST'])
@@ -3874,7 +3937,7 @@ def save_oc_preset():
             return jsonify({"success": False, "message": "Invalid overclock values."}), 400
         clean = {}
         for field in OC_FORM_FIELDS:
-            v = str(values.get(field, "") or "").strip()
+            v = " ".join(str(values.get(field, "") or "").split())
             if v and not is_safe_parameter_value(v):
                 return jsonify({"success": False, "message": f"Invalid value for '{field}'."}), 400
             clean[field] = v
