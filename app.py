@@ -2962,6 +2962,12 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
             for i in range(len(lst)):
                 lst[i] = val
         else:
+            # Empty offset on a single GPU = "no change" (same as all-GPU mode);
+            # writing "" would leave a hole in the conf list that hive's
+            # word-splitting drops, shifting every following per-GPU value.
+            # Locked clocks keep their explicit ""->"0" transform (clear lock).
+            if raw == "" and transform is None:
+                return
             lst[gpu_index] = transform(raw) if transform else raw
 
     _apply_values("core", clock)
