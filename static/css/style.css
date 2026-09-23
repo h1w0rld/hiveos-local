@@ -101,6 +101,21 @@ body {
     opacity: 0.75;
 }
 
+/* Per-route connectivity dots on the Cluster tab rig cards (LAN / NB / JMP) */
+.route-dots .conn-dot {
+    margin-right: 0;
+    width: 8px;
+    height: 8px;
+}
+
+.route-dot-label {
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--bs-secondary-color, #94a3b8);
+    line-height: 1;
+}
+
 /* Share dialogs (sync entities between rigs) */
 .share-list {
     max-height: 46vh;
@@ -1312,6 +1327,8 @@ hr {
 
 /* Live per-GPU temp/fan chips on the Fans tab (same look as Extra Fans) */
 .af-live-col { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+/* Compact live-chip sizing (Fans tab GPU chips + Extra Fans fan channels) */
+.mk-chip.mk-live { flex: 0 0 auto; min-width: 78px; padding: 4px 8px; font-size: 0.92rem; }
 .af-live-col .mk-chip { flex: 0 0 auto; min-width: 78px; padding: 4px 8px; font-size: 0.92rem; }
 .af-live-col .af-live-gpu { font-size: 0.72rem; text-align: center; color: #6c757d; font-family: var(--bs-font-monospace); letter-spacing: 0.02em; }
 

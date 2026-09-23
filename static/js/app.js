@@ -4942,8 +4942,8 @@ function renderMknet(mk) {
             ? '<span class="mk-chip mk-temp" title="Controller thermosensor"><i class="bi bi-thermometer-half"></i> ' + sensor + '°C</span>'
             : '')
         + fans.map((v, i) =>
-            '<span class="mk-chip' + (v > 0 ? '' : ' mk-off') + '"' + (v > 0 ? speedColor(v) : '') +
-            ' title="Fan channel ' + (i + 1) + ' speed">F' + (i + 1) + ' ' + (v > 0 ? v + '%' : '—') + '</span>'
+            '<span class="mk-chip mk-live' + (v > 0 ? '' : ' mk-off') + '"' + (v > 0 ? speedColor(v) : '') +
+            ' title="Fan channel ' + (i + 1) + ' speed"><i class="bi bi-fan"></i> ' + (v > 0 ? v + '%' : '—') + '</span>'
         ).join('');
     const num = (v, d) => (v === null || v === undefined || v === '' || isNaN(v)) ? d : v;
     const fld = (id, label, v, def, extra) =>
