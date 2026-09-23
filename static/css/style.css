@@ -1578,3 +1578,7 @@ hr {
 .oc-preset-pergpu-table td:first-child { white-space: nowrap; }
 .oc-preset-pergpu-table .gpu-name { color: var(--bs-success); }
 .oc-preset-pergpu-table input { min-width: 64px; }
+
+/* OC preset modal GPU strip: horizontal row of GPU numbers with the
+   individual-OC button right under each number */
+#ocGpuStrip .btn-xs { display: inline-flex; align-items: center; justify-content: center; }

@@ -1974,40 +1974,45 @@
                                 <button type="button" id="ocEditCancelBtn" class="btn btn-xs btn-outline-secondary py-0 px-2 ms-auto" title="Stop editing without saving">Cancel</button>
                             </div>
                         </div>
+                        <div class="mb-3">
+                            <div class="small fw-medium mb-1">Individual setup</div>
+                            <div id="ocGpuStrip" class="d-flex flex-wrap gap-2"></div>
+                        </div>
                         <div class="row g-2">
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPresetName" class="form-label small fw-medium mb-1">Preset Name</label>
                                 <input type="text" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="ocPresetName" placeholder="e.g. Pearl 280 1300" required>
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPCore" class="form-label small fw-medium mb-1">Core Clock Offset, MHz</label>
                                 <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPCore" placeholder="e.g. 280 or 280 0 100 280">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPLcore" class="form-label small fw-medium mb-1">Fixed Core Clock, MHz</label>
                                 <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPLcore" placeholder="e.g. 1410 or 1410 0 0 1410">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPMem" class="form-label small fw-medium mb-1">Memory Clock Offset, MHz</label>
                                 <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPMem" placeholder="e.g. 2000 or 0 2000 0 0">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPLmem" class="form-label small fw-medium mb-1">Lock Memory Clock, MHz</label>
                                 <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPLmem" placeholder="e.g. 5000 or 5000 0 5000 5000">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPPl" class="form-label small fw-medium mb-1">Power Limit, W</label>
                                 <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPPl" placeholder="e.g. 130 or 130 90 130 130">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPFan" class="form-label small fw-medium mb-1">Fan Speed, %</label>
-                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPFan" min="0" max="100" placeholder="0 = auto; list = per GPU">
+                                <input type="text" inputmode="numeric" class="form-control form-control-sm bg-dark-input" id="ocPFan" placeholder="0 = auto; list = per GPU">
                             </div>
-                            <div class="col-md-3 col-6">
+                            <div class="col-12">
                                 <label for="ocPDelay" class="form-label small fw-medium mb-1">Delay before applying OC, s</label>
                                 <input type="number" class="form-control form-control-sm bg-dark-input" id="ocPDelay" placeholder="e.g. 30">
                             </div>
                         </div>
+                        <div id="ocListHint" class="form-text small text-info mt-1" style="min-height:1.2em"></div>
                         <div class="row g-2 mt-1 small">
                             <div class="col-md-3 col-6">
                                 <div class="form-check">
@@ -2034,25 +2039,7 @@
                                 </div>
                             </div>
                         </div>
-                        <hr class="border-secondary-subtle my-3">
-                        <div class="d-flex align-items-center gap-2 mb-1">
-                            <i class="bi bi-table text-secondary"></i>
-                            <span class="small fw-medium">Per-GPU values</span>
-                            <span class="form-text small mb-0 ms-1">One number applies to every GPU; a space-separated list sets values by GPU order (0 = leave unchanged)</span>
-                        </div>
-                        <div id="ocListHint" class="form-text small text-info" style="min-height:1.2em"></div>
-                        <div class="table-responsive">
-                            <table class="table table-sm align-middle mb-0 oc-preset-pergpu-table">
-                                <thead>
-                                    <tr class="small text-uppercase text-secondary">
-                                        <th>GPU</th>
-                                        <th class="text-end" style="width:120px">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="ocPerGpuRows"></tbody>
-                            </table>
-                        </div>
-                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. Set individual values by list order in the fields above, or with the sliders button next to a GPU. Mark a preset as default with the star in the list.</div>
+                        <div class="form-text small mt-2 mb-0">Empty clock/power fields are left unchanged when the preset applies. One number = every GPU; a space-separated list = values by GPU order (0 = leave unchanged). Mark a preset as default with the star in the list.</div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>

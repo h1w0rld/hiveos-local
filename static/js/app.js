@@ -1884,28 +1884,54 @@ function bindOcListFields() {
 
 function renderOcPerGpuRows() {
     const gpus = window._ocGpus || [];
-    const tbody = document.getElementById('ocPerGpuRows');
-    if (!tbody) return;
+    const strip = document.getElementById('ocGpuStrip');
+    if (!strip) return;
     if (!gpus.length) {
-        tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted small py-2">No NVIDIA GPUs detected</td></tr>';
+        strip.innerHTML = '<span class="text-muted small py-1">No NVIDIA GPUs detected</span>';
         return;
     }
-    tbody.innerHTML = gpus.map(g => `
-        <tr>
-            <td class="small">GPU ${g.index}${g.bus ? ' <span class="text-secondary">' + escapeHtml(g.bus) + '</span>' : ''}${g.name ? ` <span class="gpu-name">${escapeHtml(g.name)}</span>` : ''}</td>
-            <td class="text-end">
-                <button type="button" class="btn btn-xs btn-outline-secondary" data-oc-gpu-btn="${g.index}" title="Individual overclock for GPU ${g.index} — values land in the GPU's list position">
-                    <i class="bi bi-toggles"></i>
-                </button>
-            </td>
-        </tr>`).join('');
-    tbody.querySelectorAll('[data-oc-gpu-btn]').forEach(b =>
+    strip.innerHTML = gpus.map(g => `
+        <div class="text-center">
+            <div class="small text-secondary mb-1" title="${escapeHtml((g.bus ? g.bus + ' · ' : '') + (g.name || ''))}">${g.index}</div>
+            <button type="button" class="btn btn-xs btn-outline-secondary" data-oc-gpu-btn="${g.index}" title="Individual overclock for GPU ${g.index}${g.name ? ' · ' + escapeHtml(g.name) : ''} — values land in the GPU's list position">
+                <i class="bi bi-toggles"></i>
+            </button>
+        </div>`).join('');
+    strip.querySelectorAll('[data-oc-gpu-btn]').forEach(b =>
         b.addEventListener('click', () => showOcGpuModal(parseInt(b.dataset.ocGpuBtn, 10))));
 }
 
 // Individual OC dialog: prefilled from the GPU's list tokens; OK writes the
-// tokens back into the common fields, Cancel leaves them untouched
+// tokens back into the common fields, Cancel leaves them untouched.
+// Bootstrap cannot stack modals — the preset dialog hides while the GPU form
+// is open and comes back (field values intact) when it closes.
 let _ocGpuEditIndex = -1;
+function bindOcGpuModal() {
+    const gpuModal = document.getElementById('ocGpuModal');
+    const ok = document.getElementById('ocGpuOkBtn');
+    if (ok && !ok.dataset.bound) {
+        ok.dataset.bound = '1';
+        ok.addEventListener('click', () => {
+            const idx = _ocGpuEditIndex;
+            if (idx >= 0) {
+                for (const [field, id] of Object.entries(OC_GPU_FIELD_IDS)) {
+                    ocSetGpuToken(field, idx, document.getElementById(id).value);
+                }
+            }
+            bootstrap.Modal.getOrCreateInstance(gpuModal).hide();
+        });
+    }
+    if (gpuModal && !gpuModal.dataset.rebindBound) {
+        gpuModal.dataset.rebindBound = '1';
+        gpuModal.addEventListener('hidden.bs.modal', () => {
+            if (gpuModal.dataset.reopenPreset === '1') {
+                gpuModal.dataset.reopenPreset = '';
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('ocPresetModal')).show();
+            }
+        });
+    }
+}
+
 function showOcGpuModal(idx) {
     const g = (window._ocGpus || [])[idx];
     if (!g) return;
@@ -1915,22 +1941,17 @@ function showOcGpuModal(idx) {
     for (const [field, id] of Object.entries(OC_GPU_FIELD_IDS)) {
         document.getElementById(id).value = ocGpuToken(field, idx);
     }
-    bootstrap.Modal.getOrCreateInstance(document.getElementById('ocGpuModal')).show();
-}
-
-function bindOcGpuModal() {
-    const ok = document.getElementById('ocGpuOkBtn');
-    if (!ok || ok.dataset.bound) return;
-    ok.dataset.bound = '1';
-    ok.addEventListener('click', () => {
-        const idx = _ocGpuEditIndex;
-        if (idx >= 0) {
-            for (const [field, id] of Object.entries(OC_GPU_FIELD_IDS)) {
-                ocSetGpuToken(field, idx, document.getElementById(id).value);
-            }
-        }
-        bootstrap.Modal.getOrCreateInstance(document.getElementById('ocGpuModal')).hide();
-    });
+    const presetModal = document.getElementById('ocPresetModal');
+    const gpuModal = document.getElementById('ocGpuModal');
+    const presetOpen = presetModal.classList.contains('show');
+    gpuModal.dataset.reopenPreset = presetOpen ? '1' : '';
+    if (presetOpen) {
+        bootstrap.Modal.getOrCreateInstance(presetModal).hide();
+        presetModal.addEventListener('hidden.bs.modal', () =>
+            bootstrap.Modal.getOrCreateInstance(gpuModal).show(), { once: true });
+    } else {
+        bootstrap.Modal.getOrCreateInstance(gpuModal).show();
+    }
 }
 
 // Write values into the preset dialog (Edit prefills the preset's values,
