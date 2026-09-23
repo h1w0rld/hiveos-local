@@ -60,6 +60,24 @@
                     <h1 class="h5 fw-bold mb-0">HiveOS Local Manager</h1>
                     <span class="badge bg-dark-card border border-secondary-subtle text-secondary-emphasis small">v<span id="dashboardVersion">1.0.0</span></span>
                 </div>
+                <!-- Config source mode (Local guard / Cloud) per rig -->
+                <div class="dropdown" id="guardModeDropdown">
+                    <button class="btn btn-sm btn-dark-card border border-secondary-subtle d-flex align-items-center gap-1 py-2 px-3" id="guardModeBtn" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
+                            title="Config source per rig. Local: this panel enforces the rig's flight sheet, fans, overclock and autofan - re-applied at boot and every 10 min if overwritten (e.g. by cloud configs). Cloud: default behavior, nothing is enforced.">
+                        <i class="bi bi-shield-lock" id="guardModeIcon"></i>
+                        <span class="fw-semibold" id="guardModeLabel">Mode</span>
+                        <i class="bi bi-chevron-down small"></i>
+                    </button>
+                    <div class="dropdown-menu guard-dropdown shadow" id="guardModeMenu">
+                        <div class="guard-dropdown-head">
+                            <h6 class="mb-1 fw-bold"><i class="bi bi-shield-lock me-1 text-primary"></i>Config Source</h6>
+                            <p class="text-muted small mb-0">Local: settings from this panel are enforced - flight sheet, fans, presets, overclock are re-applied at boot and every 10 min if overwritten (e.g. by cloud configs). Cloud: default behavior, nothing is applied automatically.</p>
+                        </div>
+                        <div id="guardRigList" class="guard-rig-list">
+                            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="d-flex flex-wrap gap-2 align-items-center mt-2 mt-md-0">

@@ -320,6 +320,13 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(updateLastSyncDisplay, 1000); // Live Last Sync clock (independent of auto-refresh)
     setupAutoRefreshMenus(); // Per-section auto-refresh intervals (dropdowns)
 
+    // Config source mode (header shield): refresh states on every open,
+    // cheap self-only status right after the cluster data arrives
+    const guardDropdownEl = document.getElementById('guardModeDropdown');
+    if (guardDropdownEl) {
+        guardDropdownEl.addEventListener('show.bs.dropdown', () => loadGuardStates(false));
+    }
+
     // Manual Refresh button
     const refreshBtn = document.getElementById('refreshStatsBtn');
     refreshBtn.addEventListener('click', () => {
@@ -1156,6 +1163,119 @@ window.selectClusterGlobal = function(cid) {
     currentClusterId = (!cid || cid === 'all') ? null : cid;
     updateRigScopeUi();
 };
+
+// ---- Config source mode (Local guard / Cloud) ----
+// Local mode: the rig's own panel enforces its flight sheet, fans, overclock
+// and autofan (re-applied at boot and every 10 min if overwritten externally).
+// Cloud mode (default): stock behavior, nothing is applied automatically.
+let guardStates = {};        // rig_id -> {enabled, since, last_action, ...}
+let guardStatesLoaded = false;
+
+function guardModePath(rigId) {
+    const rig = (clusterData && clusterData.rigs || []).find(r => r.id === rigId);
+    return (rig && rig.is_self) ? '/api/guard' : '/api/remote/' + encodeURIComponent(rigId) + '/api/guard';
+}
+
+function updateGuardButton() {
+    const icon = document.getElementById('guardModeIcon');
+    const label = document.getElementById('guardModeLabel');
+    if (!icon || !clusterData || !clusterData.rigs) return;
+    const selfRig = clusterData.rigs.find(r => r.is_self);
+    const selfSt = selfRig ? guardStates[selfRig.id] : null;
+    const anyLocal = clusterData.rigs.some(r => guardStates[r.id] && guardStates[r.id].enabled);
+    icon.classList.toggle('text-success', !!(selfSt && selfSt.enabled));
+    label.textContent = (selfSt && selfSt.enabled) ? 'Local' : 'Cloud';
+    label.classList.toggle('text-success', !!(selfSt && selfSt.enabled));
+}
+
+function renderGuardMenu() {
+    const list = document.getElementById('guardRigList');
+    if (!list) return;
+    if (!clusterData || !clusterData.rigs || !clusterData.rigs.length) {
+        list.innerHTML = '<div class="text-muted small px-3 py-2">No rigs in the cluster yet.</div>';
+        updateGuardButton();
+        return;
+    }
+    if (!guardStatesLoaded) {
+        list.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>';
+        return;
+    }
+    const rigs = clusterData.rigs.slice().sort(naturalRigCompare);
+    list.innerHTML = rigs.map(r => {
+        const st = guardStates[r.id] || {};
+        const on = !!st.enabled;
+        const online = r.is_self || !!r.online;
+        const modeText = on
+            ? '<span class="text-success">Local</span> - enforced (boot + every 10 min)'
+            : '<span class="text-muted">Cloud</span> - default, nothing enforced';
+        const badge = r.is_self ? ' <span class="badge bg-dark-card border border-secondary-subtle text-secondary-emphasis small">THIS RIG</span>'
+                                : (online ? '' : ' <span class="badge bg-danger-glow text-danger small">OFFLINE</span>');
+        return '<div class="guard-rig-row" data-rig="' + escapeHtml(r.id) + '">' +
+            '<div class="guard-rig-info">' +
+                '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + badge + '</div>' +
+                '<div class="guard-rig-mode small">' + modeText + '</div>' +
+            '</div>' +
+            '<div class="form-check form-switch mb-0">' +
+                '<input class="form-check-input" type="checkbox" role="switch" ' + (on ? 'checked' : '') + (online ? '' : ' disabled') +
+                ' title="' + (online ? 'Switch config source: Local (enforced) / Cloud (default)' : 'Rig is offline') + '"' +
+                ' onchange="toggleGuardMode(\'' + r.id + '\', this)">' +
+            '</div>' +
+        '</div>';
+    }).join('');
+    updateGuardButton();
+}
+
+async function loadGuardStates(selfOnly = false) {
+    const rigs = clusterData && clusterData.rigs ? clusterData.rigs.slice() : [];
+    if (!rigs.length) { renderGuardMenu(); return; }
+    const targets = selfOnly ? rigs.filter(r => r.is_self) : rigs;
+    if (!selfOnly && !guardStatesLoaded) renderGuardMenu(); // spinner on first open
+    await Promise.allSettled(targets.map(async r => {
+        try {
+            const res = await fetch(guardModePath(r.id), { signal: AbortSignal.timeout(15000) });
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data && data.success && data.guard) guardStates[r.id] = data.guard;
+        } catch (e) { /* unreachable rig: keep the previous state */ }
+    }));
+    if (selfOnly) {
+        updateGuardButton();
+    } else {
+        guardStatesLoaded = true;
+        renderGuardMenu();
+    }
+}
+
+async function toggleGuardMode(rigId, checkbox) {
+    const enable = checkbox.checked;
+    const rig = (clusterData && clusterData.rigs || []).find(r => r.id === rigId);
+    const name = rig ? (rig.name || rig.id) : rigId;
+    checkbox.disabled = true;
+    try {
+        const res = await fetch(guardModePath(rigId), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ enabled: enable })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            guardStates[rigId] = data.guard || { enabled: enable };
+            showToast(enable
+                ? 'Local mode enabled on ' + name + ' - current settings captured and will be enforced (boot + every 10 min).'
+                : 'Cloud mode on ' + name + ' - nothing is enforced automatically (default behavior).', true);
+        } else {
+            checkbox.checked = !enable;
+            showToast(data.message || ('Failed to switch mode on ' + name + '.'), false);
+        }
+    } catch (e) {
+        checkbox.checked = !enable;
+        showToast('Network error switching mode on ' + name + '.', false);
+    } finally {
+        checkbox.disabled = false;
+        renderGuardMenu();
+    }
+}
+window.toggleGuardMode = toggleGuardMode;
 
 // Toast notification helper
 function showToast(message, isSuccess = true, isWarn = false) {
@@ -2230,6 +2350,8 @@ async function loadClusterData(silent = false) {
             renderCluster();
             // Keep sshpass availability warning on the accesses page up to date
             document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
+            // Cheap self-only guard status for the header Mode button (full list loads on dropdown open)
+            loadGuardStates(true);
         }
     } catch (error) {
         if (!silent) {
