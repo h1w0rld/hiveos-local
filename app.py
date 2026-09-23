@@ -828,7 +828,10 @@ def _mark_route_up(key, latency_ms=None):
 def _route_probe_target(access):
     """Host whose TCP reachability gates this route (jump: the gateway itself)."""
     if str(access.get("type", "")) == "jump":
-        return access.get("jump_host"), access.get("jump_port", 22)
+        acc = access
+        if str(access.get("jump_id") or "").strip() and not access.get("jump_host"):
+            acc = resolve_jump_host(dict(access))  # jump_id-only access: resolve gateway
+        return acc.get("jump_host"), acc.get("jump_port", 22)
     return access.get("host"), access.get("port", 22)
 
 def _route_failback_probes(rig):
