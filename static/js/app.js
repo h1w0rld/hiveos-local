@@ -1959,7 +1959,8 @@ function showOcGpuModal(idx) {
 // Add passes {} so every field starts empty). List and scalar values both go
 // straight into the common fields (fans-Advanced list semantics).
 function fillOcPresetForm(v) {
-    const map = Object.assign({ ocPDelay: 'delay' }, OC_FIELD_COMMON_IDS);
+    const map = { ocPDelay: 'delay' };
+    for (const [field, id] of Object.entries(OC_FIELD_COMMON_IDS)) map[id] = field;
     for (const [id, field] of Object.entries(map)) {
         const el = document.getElementById(id);
         if (el) el.value = String(v[field] ?? '');
@@ -2377,6 +2378,48 @@ function renderCluster() {
     }
 }
 
+// Per-route connectivity dots (LAN / NB / JMP) for a cluster rig card.
+// Green = route healthy (in use or probed reachable), red = down, gray = standby.
+// The overall card badge stays ONLINE when at least one route works, OFFLINE
+// when all configured routes are unavailable.
+function buildRouteDots(rig, isSelf) {
+    if (isSelf) {
+        return '<div class="d-flex align-items-center gap-2 mb-2 route-dots">' +
+            '<span class="d-flex align-items-center gap-1" title="This rig (local)"><span class="conn-dot conn-dot-ok"></span><span class="route-dot-label">LOCAL</span></span>' +
+            '</div>';
+    }
+    const routes = rig.routes || [];
+    if (!routes.length) return '';
+    const order = { lan: 0, netbird: 1, jump: 2 };
+    const labels = { lan: 'LAN', netbird: 'NB', jump: 'JMP' };
+    // Aggregate multiple accesses of the same class: best state wins
+    const byCls = {};
+    routes.forEach(r => {
+        const cls = r.cls || 'lan';
+        const cur = byCls[cls];
+        const score = x => (x.state === 'up' ? 3 : (x.state !== 'down' && x.probe === 'ok' ? 2 : (x.state === 'down' || x.probe === 'fail' ? 0 : 1)));
+        if (!cur || score(r) > score(cur)) byCls[cls] = r;
+    });
+    const sorted = Object.keys(byCls).sort((a, b) => (order[a] ?? 9) - (order[b] ?? 9));
+    return '<div class="d-flex align-items-center gap-3 mb-2 route-dots">' + sorted.map(cls => {
+        const r = byCls[cls];
+        const lat = r.latency_ms || r.probe_ms || 0;
+        let dotCls, tip = labels[cls] || cls;
+        if (r.state === 'up' || (r.state !== 'down' && r.probe === 'ok')) {
+            dotCls = 'conn-dot-ok';
+            tip += ' ' + (r.host || '') + (lat ? ' · ' + lat + 'ms' : '') + ' — reachable';
+        } else if (r.state === 'down' || r.probe === 'fail') {
+            dotCls = 'conn-dot-fail';
+            tip += ' ' + (r.host || '') + (r.err ? ' — ' + r.err : ' — unreachable');
+        } else {
+            dotCls = 'conn-dot-unknown';
+            tip += ' ' + (r.host || '') + ' — standby';
+        }
+        return '<span class="d-flex align-items-center gap-1" title="' + escapeHtml(tip) + '">' +
+            '<span class="conn-dot ' + dotCls + '"></span><span class="route-dot-label">' + (labels[cls] || '?') + '</span></span>';
+    }).join('') + '</div>';
+}
+
 // Build a rig card column (used inside cluster sections and the unassigned group)
 function buildRigCard(rig) {
     const stats = rig.stats;
@@ -2418,6 +2461,7 @@ function buildRigCard(rig) {
                 <p class="small text-muted mb-2 text-truncate" title="${escapeHtml(rig.host_label || '')}">
                     <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
                 </p>
+                ${buildRouteDots(rig, isSelf)}
                 <div class="row g-2 mt-0 pt-2 border-top border-secondary-subtle text-center">
                     <div class="col-4">
                         <div class="small text-muted">GPUs</div>

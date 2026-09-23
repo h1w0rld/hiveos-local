@@ -12,6 +12,7 @@ import uuid
 import signal
 import shlex
 import socket
+import ipaddress
 import shutil
 import tempfile
 import subprocess
@@ -567,10 +568,19 @@ def _write_temp_password(password, tmp_files):
 
 _SSH_BASE_OPTS = ["-o", "StrictHostKeyChecking=no",
                   "-o", "UserKnownHostsFile=/dev/null",
-                  "-o", "ConnectTimeout=12",
+                  "-o", "ConnectTimeout=6",
                   "-o", "ServerAliveInterval=5",
                   "-o", "ServerAliveCountMax=3",
                   "-o", "LogLevel=ERROR"]
+
+def _ssh_control_path(access):
+    """Deterministic per-route multiplex socket: distinct for LAN / netbird /
+    jump variants of the same rig so a master opened over one route is never
+    reused for another."""
+    sig = "%s@%s:%s|j=%s:%s|%s" % (access.get("user", ""), access.get("host", ""), access.get("port", 22),
+                                   access.get("jump_host", ""), access.get("jump_port", 22),
+                                   access.get("key_path", ""))
+    return "/tmp/hive-cm-" + hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
 
 def build_ssh_command(access, remote_cmd, tmp_files):
     """Build a safe argv list for ssh (direct connection or via jump server)."""
@@ -580,7 +590,7 @@ def build_ssh_command(access, remote_cmd, tmp_files):
     if access.get("type") == "jump":
         jopts = " ".join(["-o StrictHostKeyChecking=no",
                           "-o UserKnownHostsFile=/dev/null",
-                          "-o ConnectTimeout=12",
+                          "-o ConnectTimeout=6",
                           "-o LogLevel=ERROR"])
         if access.get("jump_auth") == "password":
             if not ensure_sshpass():
@@ -613,6 +623,12 @@ def build_ssh_command(access, remote_cmd, tmp_files):
             args += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
 
     args += _SSH_BASE_OPTS
+    # Connection multiplexing: one SSH handshake per route per ~2 minutes instead
+    # of one per API call (sync does 3 calls per rig per cycle) - keeps sync fast
+    # and reconnect churn low.
+    args += ["-o", "ControlMaster=auto",
+             "-o", "ControlPath=%s" % _ssh_control_path(access),
+             "-o", "ControlPersist=120s"]
     if proxy_arg:
         args += ["-o", proxy_arg]
     args += ["-p", str(access.get("port", 22)),
@@ -693,10 +709,14 @@ def _parse_curl_output(output):
     return body, code
 
 def cluster_remote_api(rig, method, path, body=None, timeout=40):
-    """Call a remote rig's dashboard API over its configured SSH accesses.
+    """Call a remote rig's dashboard API over its SSH routes.
 
-    Tries each access in order until one succeeds. Requires curl on the remote rig
-    and sshpass locally for password-based accesses.
+    Routes are tried in strict priority: lan (direct RFC1918) -> netbird
+    (direct overlay) -> jump (via gateway). Routes known to be down are
+    skipped while they cool down and cheaply re-probed afterwards, so the
+    cluster fails over to a backup route fast and falls back to the
+    preferred LAN route automatically once it is reachable again.
+    Requires curl on the remote rig and sshpass locally for password auth.
     Returns (ok, parsed_json_or_None, http_code, error_message, access_name).
     """
     password = str(rig.get("password", ""))
@@ -707,27 +727,166 @@ def cluster_remote_api(rig, method, path, body=None, timeout=40):
     else:
         raw = json.dumps(body).encode("utf-8")
     curl_cmd = build_curl_command(method.upper(), path, raw is not None, password)
+    _route_failback_probes(rig)
+    now = time.time()
     last_error = "No SSH accesses configured for this rig"
-    for access in rig.get("accesses", []):
+    for access in _ordered_rig_accesses(rig):
         access_name = access.get("name") or access.get("id", "?")
+        key = _route_health_key(rig.get("id"), access)
+        health = _get_route_health(key)
+        if health.get("state") == "down" and now < float(health.get("probe_after") or 0):
+            if last_error == "No SSH accesses configured for this rig":
+                last_error = "All routes are down (auto-retry in progress)"
+            continue  # route known down, cooling down - skip without waiting
+        t0 = time.monotonic()
         ok, out, ssh_err = run_ssh_command(access, curl_cmd, timeout=timeout, stdin_data=raw)
+        latency_ms = (time.monotonic() - t0) * 1000
         if not ok:
+            _mark_route_down(key, ssh_err)
             last_error = "%s: %s" % (access_name, ssh_err)
             continue
         body_text, http_code = _parse_curl_output(out)
         try:
             data = json.loads(body_text)
         except Exception:
+            _mark_route_up(key, latency_ms)  # SSH transport works, payload is odd
             last_error = "%s: invalid response from remote dashboard (HTTP %d)" % (access_name, http_code)
             continue
         if http_code >= 400:
+            _mark_route_up(key, latency_ms)
             msg = "HTTP %d" % http_code
             if isinstance(data, dict) and data.get("message"):
                 msg += " - %s" % data.get("message")
             last_error = "%s: %s" % (access_name, msg)
             continue
+        _mark_route_up(key, latency_ms)
         return True, data, http_code, "", access_name
     return False, None, 0, last_error, ""
+
+# ---------------- Cluster route health & smart failover ----------------
+# Rigs talk to each other over SSH "routes" with a strict priority:
+#   lan (direct RFC1918) -> netbird (direct 100.64/10 overlay) -> jump (gateway).
+# Per-route health is tracked in memory and persisted inside the cluster cache;
+# failing routes are skipped while they cool down (exponential backoff, capped)
+# and re-probed with a cheap TCP connect so the cluster returns to the
+# preferred LAN route automatically once it is reachable again.
+
+_NETBIRD_NET = ipaddress.ip_network("100.64.0.0/10")
+
+ROUTE_COOLDOWN_BASE = 5.0       # seconds before a failed route is re-probed
+ROUTE_COOLDOWN_MAX = 20.0       # cap: worst-case failback latency after failures
+ROUTE_PROBE_TCP_TIMEOUT = 1.5   # cheap reachability check, no SSH handshake
+ROUTE_BACKGROUND_PROBE_EVERY = 15  # background prober period (feeds UI dots)
+
+_access_health_lock = threading.Lock()
+_ACCESS_HEALTH = {}  # "rig_id|access_id" -> {state, fails, probe_after, last_ok,
+                     #    latency_ms, err, probe, probe_at, probe_ms}
+
+def _access_route_class(access):
+    """(priority, class) for an SSH access: 0/lan, 1/netbird, 2/jump."""
+    try:
+        if str(access.get("type", "direct")) != "jump":
+            ip = ipaddress.ip_address(str(access.get("host", "")).strip())
+            if ip.version == 4 and ip in _NETBIRD_NET:
+                return 1, "netbird"
+            return 0, "lan"
+    except ValueError:
+        pass
+    return 2, "jump"
+
+def _route_health_key(rig_id, access):
+    return "%s|%s" % (rig_id, access.get("id"))
+
+def _get_route_health(key):
+    with _access_health_lock:
+        h = _ACCESS_HEALTH.get(key)
+        return dict(h) if h else {}
+
+def _update_route_health(key, **fields):
+    with _access_health_lock:
+        h = _ACCESS_HEALTH.setdefault(key, {"state": "unknown", "fails": 0, "probe_after": 0.0,
+                                            "last_ok": 0, "latency_ms": 0, "err": "",
+                                            "probe": "unknown", "probe_at": 0, "probe_ms": 0})
+        h.update(fields)
+        return dict(h)
+
+def _route_cooldown(fails):
+    return min(ROUTE_COOLDOWN_BASE * (2 ** min(int(fails), 3)), ROUTE_COOLDOWN_MAX)
+
+def _mark_route_down(key, err=""):
+    h = _get_route_health(key)
+    fails = int(h.get("fails", 0)) + 1
+    _update_route_health(key, state="down", fails=fails, err=str(err)[:200],
+                         probe_after=time.time() + _route_cooldown(fails))
+
+def _mark_route_up(key, latency_ms=None):
+    fields = {"state": "up", "fails": 0, "err": "", "last_ok": int(time.time())}
+    if latency_ms is not None:
+        fields["latency_ms"] = int(latency_ms)
+    _update_route_health(key, **fields)
+
+def _route_probe_target(access):
+    """Host whose TCP reachability gates this route (jump: the gateway itself)."""
+    if str(access.get("type", "")) == "jump":
+        return access.get("jump_host"), access.get("jump_port", 22)
+    return access.get("host"), access.get("port", 22)
+
+def _route_failback_probes(rig):
+    """Re-probe down routes whose cooldown expired (TCP only, no SSH):
+    recovers the preferred LAN route without a full SSH attempt."""
+    rig_id = rig.get("id")
+    now = time.time()
+    for access in rig.get("accesses", []):
+        key = _route_health_key(rig_id, access)
+        h = _get_route_health(key)
+        if h.get("state") != "down" or now < float(h.get("probe_after") or 0):
+            continue
+        host, port = _route_probe_target(access)
+        if _probe_tcp(host, port, timeout=ROUTE_PROBE_TCP_TIMEOUT):
+            _update_route_health(key, state="up", fails=0, err="",
+                                 last_ok=int(now), probe="ok", probe_ms=0)
+        else:
+            fails = int(h.get("fails", 0)) + 1
+            _update_route_health(key, fails=fails, probe="fail",
+                                 probe_after=now + _route_cooldown(fails))
+
+def _ordered_rig_accesses(rig):
+    """Accesses sorted by route priority (lan -> netbird -> jump)."""
+    return sorted(rig.get("accesses", []), key=_access_route_class)
+
+def _route_background_prober():
+    """Periodically TCP-probe every remote rig route (cheap connect, pooled):
+    keeps the per-route dots on the Cluster tab truthful for standby routes
+    that the sync itself does not use right now."""
+    while True:
+        time.sleep(ROUTE_BACKGROUND_PROBE_EVERY)
+        try:
+            state = load_cluster_state()
+            targets = []
+            for rig in state.get("rigs", []):
+                if rig.get("id") == state.get("self_id"):
+                    continue
+                for access in rig.get("accesses", []):
+                    targets.append((_route_health_key(rig["id"], access), access))
+            if not targets:
+                continue
+            def _probe_one(item):
+                key, access = item
+                host, port = _route_probe_target(access)
+                t0 = time.monotonic()
+                ok = _probe_tcp(host, port, timeout=ROUTE_PROBE_TCP_TIMEOUT)
+                ms = int((time.monotonic() - t0) * 1000)
+                _update_route_health(key, probe="ok" if ok else "fail",
+                                     probe_at=int(time.time()), probe_ms=ms)
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(_probe_one, targets))
+        except Exception as e:
+            logging.error(f"Route background prober failed: {e}")
+
+def start_route_prober():
+    t = threading.Thread(target=_route_background_prober, name="route-prober", daemon=True)
+    t.start()
+    return t
 
 # ---------------- CSV cluster import: parse & validate ----------------
 
@@ -1617,12 +1776,26 @@ def _cluster_import_worker(job, parsed):
 
 # ---------------- Cluster stats cache ----------------
 
+def _seed_route_health(cache):
+    """Restore route health from the persisted cluster cache (once per boot)."""
+    stored = cache.get("access_health")
+    if not isinstance(stored, dict) or not stored:
+        return
+    with _access_health_lock:
+        if _ACCESS_HEALTH:
+            return
+        for k, v in stored.items():
+            if isinstance(v, dict):
+                _ACCESS_HEALTH[str(k)] = dict(v)
+
 def load_cluster_cache():
     try:
         if os.path.exists(CLUSTER_CACHE):
             with open(CLUSTER_CACHE, 'r') as f:
                 data = json.load(f)
             if isinstance(data, dict):
+                data.setdefault("rigs", {})
+                _seed_route_health(data)
                 return data
     except Exception as e:
         logging.error(f"Failed to read cluster cache: {e}")
@@ -1846,6 +2019,8 @@ def run_sync_cycle(triggered_by="auto"):
             cache["rigs"][rig_id] = entry
 
         save_cluster_state(state)
+        with _access_health_lock:
+            cache["access_health"] = {k: dict(v) for k, v in _ACCESS_HEALTH.items()}
         write_cluster_cache(cache)
 
         _cluster_last_sync["ts"] = int(time.time())
@@ -3854,8 +4029,11 @@ def _auto_switch_oc_for_algo(algo):
     preset = None
     reason = ""
     if algo:
-        preset = next((p for p in presets
-                       if str(p.get("algo", "")).strip().lower() == algo), None)
+        # Several presets may share an algo — the default-flagged one wins
+        matching = [p for p in presets
+                    if str(p.get("algo", "")).strip().lower() == algo]
+        preset = next((p for p in matching if p.get("is_default")), None) or \
+            (matching[0] if matching else None)
         reason = f"algo {algo}"
     if preset is None:
         preset = next((p for p in presets if p.get("is_default")), None)
@@ -4004,7 +4182,8 @@ def save_oc_preset():
 @app.route('/api/oc-presets/bind', methods=['POST'])
 def bind_oc_preset():
     """Inline algorithm binding from the presets list dropdown ('' = unbound).
-    An algo can be bound to a single preset — rebinding steals it from others."""
+    Several presets may share an algorithm; the default-flagged one is the
+    preset that actually auto-applies for miners on that algorithm."""
     data = request.get_json() or {}
     pid = str(data.get("id", "")).strip()
     algo = str(data.get("algo", "")).strip().lower()
@@ -4015,10 +4194,6 @@ def bind_oc_preset():
         preset = next((p for p in presets if p.get("id") == pid), None)
         if preset is None:
             return jsonify({"success": False, "message": "OC preset not found."}), 404
-        if algo:
-            for other in presets:
-                if other is not preset and str(other.get("algo", "")).lower() == algo:
-                    other["algo"] = ""
         preset["algo"] = algo
         preset["updated_at"] = int(time.time())
         if not _save_json_store(OC_PRESETS_PATH, presets):
@@ -5324,6 +5499,22 @@ def _rig_view(rig, state, cache):
             m["jump_password"] = "********" if m["jump_password"] else ""
         masked.append(m)
     view["accesses"] = masked
+    # Per-route connectivity summary for the Cluster tab dots (lan/netbird/jump)
+    routes = []
+    for a in _ordered_rig_accesses(rig):
+        prio, cls = _access_route_class(a)
+        h = _get_route_health(_route_health_key(rig.get("id"), a))
+        routes.append({
+            "cls": cls,
+            "name": a.get("name", ""),
+            "host": a.get("host", ""),
+            "state": h.get("state", "unknown"),
+            "probe": h.get("probe", "unknown"),
+            "latency_ms": h.get("latency_ms", 0),
+            "probe_ms": h.get("probe_ms", 0),
+            "err": h.get("err", "")
+        })
+    view["routes"] = routes
     return view
 
 @app.route('/api/cluster/rigs', methods=['GET'])
@@ -5843,11 +6034,13 @@ def api_cluster_rig_test():
         return jsonify({"success": False, "message": "Rig not found."}), 404
 
     results = []
-    for access in rig.get("accesses", []):
+    for access in _ordered_rig_accesses(rig):
+        key = _route_health_key(rig.get("id"), access)
         # jump routes: probe the jump first - unreachable means 'client-side route'
         if str(access.get("type", "direct")) == "jump":
             resolved = resolve_jump_host(dict(access))
             if not _probe_tcp(resolved.get("jump_host"), resolved.get("jump_port", 22)):
+                _mark_route_down(key, "jump host unreachable from this rig")
                 results.append({
                     "id": access.get("id"),
                     "name": access.get("name"),
@@ -5859,6 +6052,10 @@ def api_cluster_rig_test():
                 })
                 continue
         ok, out, ssh_err = run_ssh_command(access, "hostname && echo __OK__", timeout=30)
+        if ok and "__OK__" in out:
+            _mark_route_up(key)
+        else:
+            _mark_route_down(key, ssh_err or "SSH test failed")
         results.append({
             "id": access.get("id"),
             "name": access.get("name"),
@@ -6082,6 +6279,9 @@ if __name__ == '__main__':
 
     # Start the background cluster synchronization worker
     start_cluster_worker()
+
+    # Start the route health prober (Cluster tab per-route dots + failback data)
+    start_route_prober()
 
     # Start the metrics history sampler (worker Statistics tab)
     start_metrics_sampler()
