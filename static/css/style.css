@@ -1310,6 +1310,11 @@ hr {
 }
 .mk-chip.mk-off { opacity: 0.45; }
 
+/* Live per-GPU temp/fan chips on the Fans tab (same look as Extra Fans) */
+.af-live-col { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.af-live-col .mk-chip { flex: 0 0 auto; min-width: 78px; padding: 4px 8px; font-size: 0.92rem; }
+.af-live-col .af-live-gpu { font-size: 0.72rem; text-align: center; color: #6c757d; font-family: var(--bs-font-monospace); letter-spacing: 0.02em; }
+
 
 
 /* ---------------- Statistics tab (HiveOS worker Stats parity) ---------------- */

@@ -1296,6 +1296,7 @@ async function fetchStats() {
         renderIgpus(data.igpus || [], data.system);
         prefillAllOc();
         lastStatsData = data;
+        if (activeView === 'dashboard' && activeDashTab === 'fans') renderAfLiveChips();
 
     } catch (error) {
         console.error("Error fetching stats:", error);
@@ -4622,7 +4623,7 @@ function showDashTab(tab) {
     document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
-    if (tab === 'fans') { loadAutofan(); loadFans(); }
+    if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }
     if (tab === 'presets') loadOcPresetsList();
     if (tab === 'stats') loadMetricsTab();
 }
@@ -5381,6 +5382,35 @@ function bindAfAdvancedEvents() {
         el.addEventListener('keyup', h.keyup);
         el.addEventListener('blur', h.blur);
     });
+}
+
+// ---------------- Fans tab: live per-GPU temp + fan speed chips ----------------
+// Rendered from lastStatsData on every stats fetch while the Fans tab is active.
+// Styled like the Extra Fans status chips (mk-chip): temp on top, fan speed below.
+
+function renderAfLiveChips() {
+    const box = document.getElementById('afLiveChips');
+    if (!box) return;
+    const gpus = (lastStatsData && lastStatsData.gpus) || [];
+    if (!gpus.length) { box.innerHTML = ''; return; }
+    const speedColor = v => {
+        const h = Math.round(130 - v * 1.3);
+        return ' style="color:hsl(' + h + ',85%,70%);border-color:hsla(' + h + ',85%,60%,0.45);background:hsla(' + h + ',85%,60%,0.08);"';
+    };
+    box.innerHTML = gpus.map(g => {
+        const idx = (g.index !== undefined && g.index !== null) ? g.index : 0;
+        const info = afGpuInfo(idx);
+        const title = 'GPU' + idx + (info.model ? ' · ' + info.model : '');
+        const t = g.temp, f = g.fan;
+        const hasT = t !== null && t !== undefined && t !== '' && !isNaN(t);
+        const hasF = f !== null && f !== undefined && f !== '' && !isNaN(f);
+        const fanOn = hasF && Number(f) > 0;
+        return '<div class="af-live-col" title="' + afEsc(title) + '">' +
+            '<span class="af-live-gpu">GPU' + idx + '</span>' +
+            '<span class="mk-chip mk-temp"><i class="bi bi-thermometer-half"></i> ' + (hasT ? afEsc(t) + '&deg;C' : '&mdash;') + '</span>' +
+            '<span class="mk-chip' + (fanOn ? '' : ' mk-off') + '"' + (fanOn ? speedColor(Number(f)) : '') + '><i class="bi bi-fan"></i> ' + (hasF ? afEsc(f) + '%' : '&mdash;') + '</span>' +
+        '</div>';
+    }).join('');
 }
 
 // ---------------- Shared: load / reset / collect / save ----------------
