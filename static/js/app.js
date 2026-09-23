@@ -830,8 +830,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    document.getElementById('ocEditCancelBtn').addEventListener('click', () => setOcEditMode(null));
-
     // Share buttons (wallets / flight sheets / OC presets / overclock / fans)
     document.getElementById('walletShareBtn').addEventListener('click', () => openShareDialog('wallets'));
     document.getElementById('fsShareBtn').addEventListener('click', () => openShareDialog('fsheets'));
@@ -1974,18 +1972,11 @@ function fillOcPresetForm(v) {
     }
 }
 
-// Edit mode banner over the save form: shows which preset is being edited,
-// Cancel returns to "new preset" mode without touching the fields.
-// The dialog title follows the mode as well (New OC Preset / Edit OC Preset)
+// Edit mode: the dialog title follows the mode (New OC Preset / Edit OC
+// Preset); Save sends the preset id via window._ocEditingId.
 function setOcEditMode(p) {
     window._ocEditingId = p ? p.id : '';
     if (!p) window._ocEditingAlgo = '';
-    const banner = document.getElementById('ocEditBanner');
-    if (!banner) return;
-    document.getElementById('ocEditBannerText').innerHTML = p
-        ? 'Editing <span class="fw-semibold">' + escapeHtml(p.name) + '</span> — Save updates this preset'
-        : '';
-    banner.classList.toggle('d-none', !p);
     const title = document.getElementById('ocPresetModalTitle');
     if (title) {
         title.innerHTML = p
