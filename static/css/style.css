@@ -993,9 +993,9 @@ tr.af-sep td {
     border-top: none;
 }
 
-/* SSH accesses + cluster views: keep tables transparent (no solid dark fill) */
+/* SSH accesses + dashboard Updates tab: keep tables transparent (no solid dark fill) */
 #view-accesses .table,
-#view-cluster .table {
+#updatesTabContainer .table {
     --bs-table-bg: transparent;
     --bs-table-striped-bg: transparent;
     --bs-table-hover-bg: transparent;
@@ -1003,8 +1003,8 @@ tr.af-sep td {
 
 #view-accesses .table td,
 #view-accesses .table th,
-#view-cluster .table td,
-#view-cluster .table th {
+#updatesTabContainer .table td,
+#updatesTabContainer .table th {
     background-color: transparent;
 }
 

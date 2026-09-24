@@ -356,6 +356,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('dashTabPresetsBtn').addEventListener('click', () => showDashTab('presets'));
     document.getElementById('dashTabServicesBtn').addEventListener('click', () => showDashTab('services'));
     document.getElementById('dashTabStatsBtn').addEventListener('click', () => showDashTab('stats'));
+    document.getElementById('dashTabUpdatesBtn').addEventListener('click', () => showDashTab('updates'));
     document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
 
     // GPU Fans tab (1:1 copy of the HiveOS worker Autofan page)
@@ -981,7 +982,7 @@ const AUTO_REFRESH_LOADERS = {
     accesses: () => loadAccessList({routes: true}),
     jumps: () => loadAccessList({jumps: true}),
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
-    updates: () => { if (activeView === 'cluster') refreshClusterUpdate(); },
+    updates: () => { if (cuTabVisible()) refreshClusterUpdate(); },
     wallets: () => renderWallets(),
     fsheets: () => loadFsheets(),
     fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); },
@@ -2007,8 +2008,12 @@ async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
 }
 
 // Refresh the latest release + every rig's current version and repaint the table
+function cuTabVisible() {
+    return activeView === 'dashboard' && activeDashTab === 'updates';
+}
+
 async function refreshClusterUpdate() {
-    if (activeView !== 'cluster' || cuBusy) return;
+    if (!cuTabVisible() || cuBusy) return;
     const runId = ++cuRunId;
     const rigs = (clusterData && clusterData.rigs) || [];
     renderCuRows();
@@ -2762,8 +2767,9 @@ async function loadClusterData(silent = false) {
             // afterwards a cheap self-only refresh on every cluster poll
             loadGuardStates(guardStatesLoaded);
             // Cluster Update card: versions load lazily on the first authorized
-            // cluster load (the pre-login attempt stops on 401 and retries here)
-            if (activeView === 'cluster' && !cuLoadedOnce && !cuBusy) refreshClusterUpdate();
+            // cluster load while the Updates tab is open (the pre-login attempt
+            // stops on 401 and retries here)
+            if (cuTabVisible() && !cuLoadedOnce && !cuBusy) refreshClusterUpdate();
         }
     } catch (error) {
         if (!silent) {
@@ -5170,7 +5176,8 @@ function showDashTab(tab) {
     const isIgpu = isGpus && activeHardwareTab !== 'gpus';
     [['dashTabGpusBtn', isGpus], ['dashTabFansBtn', tab === 'fans'], ['dashTabWalletsBtn', tab === 'wallets'],
      ['dashTabFsheetsBtn', tab === 'fsheets'], ['dashTabPresetsBtn', tab === 'presets'],
-     ['dashTabServicesBtn', tab === 'services'], ['dashTabStatsBtn', tab === 'stats']].forEach(([id, on]) => {
+     ['dashTabServicesBtn', tab === 'services'], ['dashTabStatsBtn', tab === 'stats'],
+     ['dashTabUpdatesBtn', tab === 'updates']].forEach(([id, on]) => {
         const b = document.getElementById(id);
         b.classList.toggle('btn-primary', on);
         b.classList.toggle('btn-outline-primary', !on);
@@ -5188,6 +5195,7 @@ function showDashTab(tab) {
     document.getElementById('servicesTabContainer').classList.toggle('d-none', tab !== 'services');
     document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
     document.getElementById('statsTabContainer').classList.toggle('d-none', tab !== 'stats');
+    document.getElementById('updatesTabContainer').classList.toggle('d-none', tab !== 'updates');
     // Stats refresh + hardware sub-switch only make sense on the GPUs tab
     document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
     if (isWalletsTab(tab)) renderWallets();
@@ -5195,6 +5203,10 @@ function showDashTab(tab) {
     if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }
     if (tab === 'presets') loadOcPresetsList();
     if (tab === 'stats') loadMetricsTab();
+    if (tab === 'updates') {
+        // fresh rig list/online flags feed the version table
+        loadClusterData(true).then(() => refreshClusterUpdate());
+    }
 }
 
 function isWalletsTab(tab) { return tab === 'wallets'; }
