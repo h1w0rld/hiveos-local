@@ -1691,6 +1691,18 @@ hr {
     font-size: 1rem;
 }
 
+/* Header Mode button accent while the managed rig runs Local mode */
+.guard-btn-local {
+    border-color: rgba(16, 185, 129, 0.55) !important;
+    box-shadow: 0 0 10px -2px rgba(16, 185, 129, 0.35);
+}
+
+/* Config source icon on cluster rig cards */
+.rig-mode-icon {
+    font-size: 1rem;
+    flex: 0 0 auto;
+}
+
 .guard-rig-row .form-check-input {
     cursor: pointer;
     flex: 0 0 auto;

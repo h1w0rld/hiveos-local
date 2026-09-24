@@ -1084,6 +1084,9 @@ function switchRig(rigId) {
     loadFsheets();
     renderWallets();
     loadFans();
+    // Header Mode icon + dropdown states follow the newly managed rig
+    updateGuardButton();
+    loadGuardStates(false);
     showToast('Switched to ' + getRigName(rigId), true);
 }
 
@@ -1183,13 +1186,34 @@ function guardModePath(rigId) {
 function updateGuardButton() {
     const icon = document.getElementById('guardModeIcon');
     const label = document.getElementById('guardModeLabel');
-    if (!icon || !clusterData || !clusterData.rigs) return;
-    const selfRig = clusterData.rigs.find(r => r.is_self);
-    const selfSt = selfRig ? guardStates[selfRig.id] : null;
-    const anyLocal = clusterData.rigs.some(r => guardStates[r.id] && guardStates[r.id].enabled);
-    icon.classList.toggle('text-success', !!(selfSt && selfSt.enabled));
-    label.textContent = (selfSt && selfSt.enabled) ? 'Local' : 'Cloud';
-    label.classList.toggle('text-success', !!(selfSt && selfSt.enabled));
+    const btn = document.getElementById('guardModeBtn');
+    if (!icon || !btn) return;
+    if (label) label.textContent = 'Mode';
+    let rig = null;
+    if (clusterData && clusterData.rigs) {
+        const target = (!currentRigId || currentRigId === 'self') ? clusterData.self_id : currentRigId;
+        rig = clusterData.rigs.find(r => r.id === target) || null;
+    }
+    const st = rig ? guardStates[rig.id] : null;
+    const on = !!(st && st.enabled);
+    const name = rig ? (rig.name || rig.id) : 'rig';
+    // Same icon language as the dropdown: cloud = Cloud mode, shield = Local mode
+    icon.className = on ? 'bi bi-shield-lock text-success'
+                        : 'bi bi-cloud ' + (st ? 'text-info' : 'text-muted');
+    btn.classList.toggle('guard-btn-local', on);
+    btn.title = on
+        ? name + ': Local mode — settings enforced by this panel (re-applied at boot and every 10 min)'
+        : name + ': Cloud mode — default behavior, nothing enforced';
+}
+
+// Mode icon for a cluster rig card (cloud = Cloud mode, shield = Local mode)
+function guardModeIconHtml(rigId) {
+    const st = guardStates[rigId];
+    const on = !!(st && st.enabled);
+    const cls = on ? 'bi-shield-lock text-success' : 'bi-cloud ' + (st ? 'text-info' : 'text-muted');
+    const title = on ? 'Local mode — settings enforced (boot + every 10 min)'
+                     : 'Cloud mode — default, nothing enforced';
+    return '<i class="bi ' + cls + ' rig-mode-icon" title="' + title + '"></i>';
 }
 
 function renderGuardMenu() {
@@ -1206,19 +1230,20 @@ function renderGuardMenu() {
     }
     const rigs = clusterData.rigs.slice().sort(naturalRigCompare);
     list.innerHTML = rigs.map(r => {
-        const st = guardStates[r.id] || {};
-        const on = !!st.enabled;
+        const st = guardStates[r.id];
+        const on = !!(st && st.enabled);
         const online = r.is_self || !!r.online;
+        const cloudCls = on ? 'text-muted' : (st ? 'text-info' : 'text-muted');
         const badge = r.is_self
-            ? ' <span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>' +
-              (online ? '' : ' <span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>')
+            ? ' <span class="badge bg-success-glow border border-success text-success small ms-2">THIS RIG</span>' +
+              (online ? '' : ' <span class="badge bg-danger-glow border border-danger text-danger small ms-2">OFFLINE</span>')
             : (online
-                ? ' <span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
-                : ' <span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
+                ? ' <span class="badge bg-success-glow border border-success text-success small ms-2"><span class="pulse-indicator"></span>ONLINE</span>'
+                : ' <span class="badge bg-danger-glow border border-danger text-danger small ms-2">OFFLINE</span>');
         return '<div class="guard-rig-row" data-rig="' + escapeHtml(r.id) + '">' +
             '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + badge + '</div>' +
             '<div class="guard-switch-wrap">' +
-                '<i class="bi bi-cloud guard-side-icon' + (on ? ' text-muted' : ' text-info') + '" title="Cloud"></i>' +
+                '<i class="bi bi-cloud guard-side-icon ' + cloudCls + '" title="Cloud"></i>' +
                 '<div class="form-check form-switch mb-0">' +
                     '<input class="form-check-input" type="checkbox" role="switch" ' + (on ? 'checked' : '') + (online ? '' : ' disabled') +
                     ' title="' + (online ? 'Switch config source: Local (enforced) / Cloud (default)' : 'Rig is offline') + '"' +
@@ -2356,8 +2381,9 @@ async function loadClusterData(silent = false) {
             renderCluster();
             // Keep sshpass availability warning on the accesses page up to date
             document.getElementById('sshpassWarning').classList.toggle('d-none', !!data.sshpass_available);
-            // Cheap self-only guard status for the header Mode button (full list loads on dropdown open)
-            loadGuardStates(true);
+            // Guard states: full fetch once per page load (cluster card icons),
+            // afterwards a cheap self-only refresh on every cluster poll
+            loadGuardStates(guardStatesLoaded);
         }
     } catch (error) {
         if (!silent) {
@@ -2570,6 +2596,7 @@ function buildRigCard(rig) {
                 <div class="d-flex align-items-center gap-2 mb-2">
                     <h3 class="h6 fw-bold mb-0 text-truncate">${escapeHtml(rig.name || rig.id)}</h3>
                     ${statusBadge}
+                    ${guardModeIconHtml(rig.id)}
                     <div class="ms-auto d-flex gap-1 flex-shrink-0">
                         <button class="btn btn-xs btn-outline-secondary" title="Edit rig" onclick="event.stopPropagation(); openRigModal('${rig.id}')">
                             <i class="bi bi-pencil"></i>
