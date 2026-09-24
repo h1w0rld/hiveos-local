@@ -323,6 +323,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const guardDropdownEl = document.getElementById('guardModeDropdown');
     if (guardDropdownEl) {
         guardDropdownEl.addEventListener('show.bs.dropdown', () => loadGuardStates(false));
+        // Rows may have been rendered while the menu was hidden (initial
+        // cluster fetch) — align the columns in the same frame the menu
+        // appears, instead of waiting for the states refetch to re-render
+        guardDropdownEl.addEventListener('shown.bs.dropdown', alignGuardColumns);
     }
     const guardInfoIcon = document.getElementById('guardInfoIcon');
     if (guardInfoIcon && window.bootstrap) {
@@ -1270,19 +1274,33 @@ function renderGuardMenu() {
             '</div>' +
         '</div>';
     }).join('');
-    // Badge column hugs the names: fix every name cell to the widest name, so
-    // badges line up in one column; the badge column itself is sized to the
-    // widest badge (badges stay centered in it), keeping the visible
-    // name->badge gap at its minimum (half the badge->cloud gap)
+    alignGuardColumns();
+    updateGuardButton();
+}
+
+// Badge column hugs the names: fix every name cell to the widest name, so
+// badges line up in one column; the badge column itself is sized to the
+// widest badge (badges stay centered in it), keeping the visible
+// name->badge gap at its minimum (half the badge->cloud gap).
+// Needs real geometry: inside a display:none dropdown every offsetWidth is 0,
+// which would collapse the columns to zero width and stack the badges on the
+// switches (first-open glitch). Skip while hidden; shown.bs.dropdown runs
+// this the moment the menu becomes visible.
+function alignGuardColumns() {
+    const menu = document.getElementById('guardModeMenu');
+    if (menu && !menu.classList.contains('show')) return;
+    const list = document.getElementById('guardRigList');
+    if (!list) return;
     const names = list.querySelectorAll('.guard-rig-name');
+    if (!names.length) return;
     let maxNameW = 0;
     names.forEach(n => { maxNameW = Math.max(maxNameW, n.offsetWidth); });
+    if (!maxNameW) return; // still hidden or not laid out — nothing to align
     names.forEach(n => { n.style.minWidth = maxNameW + 'px'; });
     const badgeCols = list.querySelectorAll('.guard-rig-badges');
     let maxBadgeW = 0;
     badgeCols.forEach(b => { maxBadgeW = Math.max(maxBadgeW, b.scrollWidth); });
     badgeCols.forEach(b => { b.style.width = maxBadgeW + 'px'; });
-    updateGuardButton();
 }
 
 async function loadGuardStates(selfOnly = false) {
@@ -1497,7 +1515,7 @@ async function fetchStats() {
     }
 }
 
-// Render GPU layout dynamically (compact single-line list rows)
+// Render GPU layout dynamically (two-line stacked rows: identity grows, metrics pair up vertically)
 function renderGpus(gpus) {
     const container = document.getElementById('gpuContainer');
     container.innerHTML = '';
@@ -1517,12 +1535,26 @@ function renderGpus(gpus) {
     const at = (arr, i) => (arr || [])[i];
     const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '' && v !== '0') || '';
     const ico = n => `<i class="bi ${n}"></i>`;
-    const mini = (label, valHtml, valCls) => `
-        <div class="gpu-mini-cell">
-            <span class="gpu-mini-label">${label}</span>
-            <span class="gpu-mini-val ${valCls}">${valHtml}</span>
-        </div>`;
     const dash = '<span class="gpu-mini-empty">–</span>';
+    const sep = '<span class="gpu-mini-sub"> · </span>';
+    
+    // One bar line (Temp / Fan) inside the stacked bar column
+    const tfLine = (iconName, label, pct, barGlow, valHtml, valCls) => `
+        <div class="gpu-tf-line">
+            <span class="gpu-metric-name">${ico(iconName)}${label}</span>
+            <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
+                <div class="progress-bar progress-bar-glow-${barGlow}" role="progressbar"
+                     style="width: ${pct}%" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+            <span class="gpu-metric-val ${valCls}">${valHtml}</span>
+        </div>`;
+    
+    // One label + right-aligned value line of a stacked column
+    const stackLine = (labelHtml, valHtml, valCls) => `
+        <div class="gpu-stack-line">
+            <span class="gpu-mini-label">${labelHtml}</span>
+            <span class="gpu-stack-val ${valCls}">${valHtml}</span>
+        </div>`;
     
     const rows = gpus.map(gpu => {
         const tempGlow = gpu.temp > 75 ? 'red' : (gpu.temp > 65 ? 'primary' : 'green');
@@ -1534,7 +1566,8 @@ function renderGpus(gpus) {
         const src = isNv ? nvOc : amdOc;
         const offV = pick(at(src.core, i));
         const lockV = isNv ? pick(at(nvOc.lcore, i)) : '';
-        const memV = pick(at(src.mem, i), isNv ? at(nvOc.lmem, i) : '');
+        const memOffV = pick(at(src.mem, i));
+        const memLockV = isNv && !memOffV ? pick(at(nvOc.lmem, i)) : '';
         const plV = pick(at(src.pl, i));
         const ocVal = (v, plus) => {
             if (!v) return dash;
@@ -1553,11 +1586,22 @@ function renderGpus(gpus) {
         const pwrDraw = Math.round(gpu.power);
         const pwrLimit = gpu.power_limit > 0 ? '/' + Math.round(gpu.power_limit) + 'W' : 'W';
         const pwrRange = (gpu.power_min > 0 && gpu.power_max > 0)
-            ? ` <span class="gpu-mini-sub">· ${Math.round(gpu.power_min)}–${Math.round(gpu.power_max)}</span>` : '';
+            ? `<span class="gpu-mini-sub"> · ${Math.round(gpu.power_min)}–${Math.round(gpu.power_max)}</span>` : '';
+        
+        // Core bottom line: offset + locked core side by side
+        const coreBot = [
+            offV ? `<span class="gv-off">${ocVal(offV, true)}</span>` : '',
+            lockV ? `<span class="gv-lock">${ico('bi-lock-fill')}${ocVal(lockV)}</span>` : ''
+        ].filter(Boolean).join(sep) || dash;
+        // Mem bottom line: offset, or locked mem when MEM lives in LMEM
+        const memBot = memOffV ? `<span class="gv-mem">${ocVal(memOffV, true)}</span>`
+            : (memLockV ? `<span class="gv-lock">${ico('bi-lock-fill')}${ocVal(memLockV)}</span>` : dash);
+        // PL bottom line: enforced limit + min–max range
+        const plBot = `${plV ? `<span class="gv-pl">${plV}</span>` : dash}${plV ? pwrRange : ''}`;
         
         return `
-            <div class="gpu-list-row d-flex flex-wrap align-items-center gap-2">
-                <!-- GPU identity -->
+            <div class="gpu-list-row">
+                <!-- GPU identity (grows: full model name + vendor/bus/VRAM/VBIOS) -->
                 <div class="gpu-list-id">
                     <span class="badge bg-primary bg-opacity-25 text-primary fw-bold font-monospace">GPU ${i}</span>
                     <div class="gpu-list-name">
@@ -1569,31 +1613,27 @@ function renderGpus(gpus) {
                 <!-- Hashrate -->
                 <span class="badge bg-accent-glow text-primary fw-bold font-monospace gpu-list-hash">${fmtSpeed(gpu.hashrate)}</span>
 
-                <!-- Temperature / Fan progress bars (bars flex within fixed columns) -->
-                <div class="gpu-inline-metric">
-                    <span class="gpu-metric-name">${ico('bi-thermometer-half')}Temp</span>
-                    <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
-                        <div class="progress-bar progress-bar-glow-${tempGlow}" 
-                             role="progressbar" style="width: ${gpu.temp}%" aria-valuenow="${gpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
-                    </div>
-                    <span class="gpu-metric-val gv-${tempGlow === 'red' ? 'red' : (tempGlow === 'primary' ? 'amber' : 'green')}">${gpu.temp}°C</span>
-                </div>
-                <div class="gpu-inline-metric">
-                    <span class="gpu-metric-name">${ico('bi-fan')}Fan</span>
-                    <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
-                        <div class="progress-bar progress-bar-glow-${fanGlow}" 
-                             role="progressbar" style="width: ${gpu.fan}%" aria-valuenow="${gpu.fan}" aria-valuemin="0" aria-valuemax="100"></div>
-                    </div>
-                    <span class="gpu-metric-val gv-${fanGlow === 'red' ? 'red' : 'cyan'}">${gpu.fan}%</span>
+                <!-- Temp / Fan stacked bars (each bar gets the full column width) -->
+                <div class="gpu-tf-col">
+                    ${tfLine('bi-thermometer-half', 'Temp', gpu.temp, tempGlow, gpu.temp + '°C',
+                             'gv-' + (tempGlow === 'red' ? 'red' : (tempGlow === 'primary' ? 'amber' : 'green')))}
+                    ${tfLine('bi-fan', 'Fan', gpu.fan, fanGlow, gpu.fan + '%',
+                             'gv-' + (fanGlow === 'red' ? 'red' : 'cyan'))}
                 </div>
 
-                <!-- Applied OC + clocks + power (fixed-width columns) -->
-                ${mini(`${ico('bi-arrow-up-circle')}Off`, ocVal(offV, true), 'gv-off')}
-                ${mini(`${ico('bi-lock-fill')}Lock`, lockV ? ocVal(lockV) : dash, 'gv-lock')}
-                ${mini(`${ico('bi-memory')}Mem`, memV ? ocVal(memV) : dash, 'gv-mem')}
-                ${mini(`${ico('bi-plug-fill')}PL`, plV ? plV : dash, 'gv-pl')}
-                ${mini(`${ico('bi-speedometer2')}Clk`, `${gpu.core_clock}/${gpu.mem_clock}`, 'gv-clk')}
-                ${mini(`${ico('bi-lightning-charge-fill')}Pwr`, `<span class="gv-pwr-draw">${pwrDraw}</span>${pwrLimit}${pwrRange}`, 'gv-pwr')}
+                <!-- Current clocks stacked over applied OC (fixed-width columns, values right-aligned) -->
+                <div class="gpu-stack-col gpu-col-core">
+                    ${stackLine(`${ico('bi-speedometer2')}Core`, `${gpu.core_clock}<span class="gpu-mini-sub"> MHz</span>`, 'gv-clk')}
+                    ${stackLine(`${ico('bi-arrow-up-circle')}Off`, coreBot, '')}
+                </div>
+                <div class="gpu-stack-col gpu-col-mem">
+                    ${stackLine(`${ico('bi-memory')}Mem`, `${gpu.mem_clock}<span class="gpu-mini-sub"> MHz</span>`, 'gv-clk')}
+                    ${stackLine(`${ico('bi-arrow-up-circle')}Off`, memBot, '')}
+                </div>
+                <div class="gpu-stack-col gpu-col-pwr">
+                    ${stackLine(`${ico('bi-lightning-charge-fill')}Pwr`, `<span class="gv-red">${pwrDraw}</span><span class="gpu-mini-sub">${pwrLimit}</span>`, '')}
+                    ${stackLine(`${ico('bi-plug-fill')}PL`, plBot, '')}
+                </div>
 
                 <!-- Action -->
                 <button class="btn btn-sm btn-outline-primary gpu-list-actions" 

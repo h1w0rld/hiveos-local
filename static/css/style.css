@@ -780,13 +780,19 @@ tr.af-sep td {
     box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
-/* GPU list rows (GPUs tab): single card, one dense line per GPU */
+/* GPU list rows (GPUs tab): single card, two-line rows — Temp/Fan bars stacked,
+   clocks/OC/power paired vertically so each value gets room and the identity
+   block takes all the remaining width */
 .gpu-list-card {
     overflow: hidden;
 }
 
 .gpu-list-row {
-    padding: 7px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 18px;
+    padding: 5px 16px;
     border-bottom: 1px solid var(--border-color);
     min-width: 0;
 }
@@ -796,7 +802,7 @@ tr.af-sep td {
 }
 
 .gpu-list-id {
-    flex: 1 1 200px;
+    flex: 1 1 220px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -809,8 +815,8 @@ tr.af-sep td {
 
 .gpu-list-model {
     font-weight: 600;
-    font-size: 0.88rem;
-    line-height: 1.2;
+    font-size: 0.9rem;
+    line-height: 1.25;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
@@ -831,12 +837,21 @@ tr.af-sep td {
     text-align: center;
 }
 
-.gpu-inline-metric {
-    flex: 1 1 150px;
-    min-width: 120px;
+/* Temp + Fan stacked: two bar lines, each bar stretches the full column width */
+.gpu-tf-col {
+    flex: 1 1 190px;
+    min-width: 170px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.gpu-tf-line {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    line-height: 1.25;
 }
 
 .gpu-metric-name {
@@ -844,7 +859,7 @@ tr.af-sep td {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -856,9 +871,9 @@ tr.af-sep td {
 }
 
 .gpu-metric-val {
-    flex: 0 0 46px;
+    flex: 0 0 48px;
     text-align: right;
-    font-size: 0.8rem;
+    font-size: 0.82rem;
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
@@ -871,66 +886,58 @@ tr.af-sep td {
 .gv-cyan   { color: #22d3ee; }
 .gv-indigo { color: #a5b4fc; }
 
-/* Applied OC / clocks / power mini-columns: fixed label + fixed value widths
-   keep every cell aligned across rows regardless of bar or value changes */
-.gpu-mini-cell {
+/* Stacked label+value columns (Core/Mem/Pwr): fixed column widths keep every
+   cell aligned across rows; values right-align at the column edge, so changing
+   bar lengths or value widths never shifts neighbors */
+.gpu-stack-col {
     flex: 0 0 auto;
     display: flex;
-    align-items: baseline;
-    gap: 5px;
-    white-space: nowrap;
+    flex-direction: column;
+    gap: 2px;
 }
+
+.gpu-stack-line {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    white-space: nowrap;
+    line-height: 1.25;
+}
+
+.gpu-stack-val {
+    margin-left: auto;
+    text-align: right;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.gpu-col-core { width: 142px; }
+.gpu-col-mem  { width: 104px; }
+.gpu-col-pwr  { width: 150px; }
 
 .gpu-mini-label {
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 0.6rem;
+    font-size: 0.66rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
 }
 
 .gpu-mini-label i {
-    font-size: 0.62rem;
+    font-size: 0.66rem;
     opacity: 0.85;
 }
 
-.gpu-mini-val {
-    display: inline-block;
-    text-align: right;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
-}
-
-.gpu-mini-val.gv-off { color: #fbbf24; }
-.gpu-mini-val.gv-lock,
-.gpu-mini-val.gv-mem { color: #22d3ee; }
-.gpu-mini-val.gv-pl { color: #f87171; }
-.gpu-mini-val.gv-clk { color: #a5b4fc; }
-
-.gv-pwr-draw { color: #f87171; }
-
-.gpu-mini-val.gv-off,
-.gpu-mini-val.gv-lock,
-.gpu-mini-val.gv-mem {
-    width: 34px;
-}
-
-.gpu-mini-val.gv-pl {
-    width: 34px;
-}
-
-.gpu-mini-val.gv-clk {
-    width: 64px;
-}
-
-.gpu-mini-val.gv-pwr {
-    width: 106px;
-}
+.gv-off  { color: #fbbf24; }
+.gv-lock { color: #22d3ee; }
+.gv-mem  { color: #22d3ee; }
+.gv-pl   { color: #f87171; }
+.gv-clk  { color: #a5b4fc; }
 
 .gpu-mini-sub {
     font-weight: 400;
@@ -946,6 +953,7 @@ tr.af-sep td {
 
 .gpu-list-actions {
     flex: 0 0 auto;
+    margin-left: auto;
     padding: 2px 8px;
 }
 
