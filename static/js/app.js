@@ -1526,25 +1526,61 @@ function renderGpus(gpus) {
         return;
     }
     
+    const oc = activeOverclocks || {};
+    const nvOc = oc.nvidia || {};
+    const amdOc = oc.amd || {};
+    const at = (arr, i) => (arr || [])[i];
+    const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '' && v !== '0') || '';
+    const mini = (label, valHtml, valCls) => `
+        <div class="gpu-mini-cell">
+            <span class="gpu-mini-label">${label}</span>
+            <span class="gpu-mini-val ${valCls}">${valHtml}</span>
+        </div>`;
+    const dash = '<span class="gpu-mini-empty">–</span>';
+    
     const rows = gpus.map(gpu => {
         const tempGlow = gpu.temp > 75 ? 'red' : (gpu.temp > 65 ? 'primary' : 'green');
         const fanGlow = gpu.fan > 80 ? 'red' : 'primary';
+        const i = gpu.index;
+        const isNv = (gpu.brand || '').toLowerCase() === 'nvidia';
+        
+        // Applied OC per GPU (nvidia: CLOCK/LCLOCK/MEM+LMEM/PLIMIT; amd: CORE/MEM/PL)
+        const src = isNv ? nvOc : amdOc;
+        const offV = pick(at(src.core, i));
+        const lockV = isNv ? pick(at(nvOc.lcore, i)) : '';
+        const memV = pick(at(src.mem, i), isNv ? at(nvOc.lmem, i) : '');
+        const plV = pick(at(src.pl, i));
+        const ocVal = (v, plus) => {
+            if (!v) return dash;
+            const n = parseInt(v, 10);
+            return (plus && n > 0 ? '+' + n : v);
+        };
+        
+        // Identity meta: real vendor, bus, VRAM, VBIOS
+        const meta = [gpu.subvendor || gpu.brand, gpu.bus_id,
+                      gpu.vram_mb ? gpu.vram_mb + ' MB' : '', gpu.vbios].filter(Boolean).join(' • ');
+        
+        // Power: draw / enforced limit / (min–max range)
+        const pwrDraw = Math.round(gpu.power);
+        const pwrLimit = gpu.power_limit > 0 ? '/' + Math.round(gpu.power_limit) + 'W' : 'W';
+        const pwrRange = (gpu.power_min > 0 && gpu.power_max > 0)
+            ? ` <span class="gpu-mini-sub">· ${Math.round(gpu.power_min)}–${Math.round(gpu.power_max)}</span>` : '';
         
         return `
             <div class="gpu-list-row d-flex flex-wrap align-items-center gap-2">
                 <!-- GPU identity -->
                 <div class="gpu-list-id">
-                    <span class="badge bg-secondary bg-opacity-25 text-muted fw-bold font-monospace">GPU ${gpu.index}</span>
+                    <span class="badge bg-secondary bg-opacity-25 text-muted fw-bold font-monospace">GPU ${i}</span>
                     <div class="gpu-list-name">
                         <div class="gpu-list-model" title="${gpu.model}">${gpu.model}</div>
-                        <div class="gpu-list-sub"><span class="brand-${gpu.brand.toLowerCase()}">${gpu.brand}</span> • PCI ${gpu.id}</div>
+                        <div class="gpu-list-sub" title="${meta}">${meta}</div>
                     </div>
                 </div>
 
                 <!-- Hashrate -->
                 <span class="badge bg-accent-glow text-primary fw-bold font-monospace gpu-list-hash">${fmtSpeed(gpu.hashrate)}</span>
 
-                <!-- Temperature / Fan progress bars -->
+                <!-- Temperature / Fan progress bars (bars flex within fixed columns) -->
                 <div class="gpu-inline-metric">
                     <span class="gpu-metric-name">Temp</span>
                     <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
@@ -1562,16 +1598,17 @@ function renderGpus(gpus) {
                     <span class="gpu-metric-val">${gpu.fan}%</span>
                 </div>
 
-                <!-- Clocks and Power -->
-                <div class="gpu-list-stats">
-                    <span class="text-muted">Core <span class="fw-semibold text-body">${gpu.core_clock}</span></span>
-                    <span class="text-muted">Mem <span class="fw-semibold text-body">${gpu.mem_clock}</span></span>
-                    <span class="text-muted"><span class="fw-semibold text-danger-emphasis">${gpu.power}W</span>/${gpu.power_limit}W</span>
-                </div>
+                <!-- Applied OC + clocks + power (fixed-width columns) -->
+                ${mini('Off', ocVal(offV, true), 'gv-off')}
+                ${mini('Lock', lockV ? ocVal(lockV) : dash, 'gv-lock')}
+                ${mini('Mem', memV ? ocVal(memV) : dash, 'gv-mem')}
+                ${mini('PL', plV ? plV : dash, 'gv-pl')}
+                ${mini('Clk', `${gpu.core_clock}/${gpu.mem_clock}`, 'gv-clk')}
+                ${mini('Pwr', `${pwrDraw}${pwrLimit}${pwrRange}`, 'gv-pwr')}
 
                 <!-- Action -->
                 <button class="btn btn-sm btn-outline-primary gpu-list-actions" 
-                        title="Edit overclocks for GPU ${gpu.index}" onclick="openOcModal('${gpu.brand}', ${gpu.index})">
+                        title="Edit overclocks for GPU ${i}" onclick="openOcModal('${gpu.brand}', ${i})">
                     <i class="bi bi-sliders"></i>
                 </button>
             </div>

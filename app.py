@@ -2874,7 +2874,7 @@ def get_gpu_stats():
     igpus = []  # Integrated graphics (CPU iGPU), shown in separate tab
     
     if HAS_HIVEOS or IS_LINUX:
-        stdout, stderr, code = run_command("nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,power.draw,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.limit,pci.bus_id,memory.total --format=csv,noheader,nounits")
+        stdout, stderr, code = run_command("nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,power.draw,utilization.gpu,clocks.current.graphics,clocks.current.memory,power.limit,pci.bus_id,memory.total,vbios_version,power.min_limit,power.max_limit --format=csv,noheader,nounits")
         if code == 0 and stdout:
             lines = stdout.strip().split('\n')
             for line in lines:
@@ -2883,6 +2883,8 @@ def get_gpu_stats():
                     idx = safe_int(parts[0], 0)
                     bus_id = parts[9] if len(parts) > 9 else ""
                     vram_mb = safe_int(parts[10]) if len(parts) > 10 else 0
+                    vbios_raw = parts[11] if len(parts) > 11 else ""
+                    vbios = "" if (not vbios_raw or vbios_raw.upper().startswith("N/A") or vbios_raw.upper().startswith("[N/A")) else vbios_raw
                     gpus.append({
                         "id": f"NV_{idx}",
                         "index": idx,
@@ -2898,7 +2900,10 @@ def get_gpu_stats():
                         "hashrate": 0.0,
                         "bus_id": _short_pci_bus(bus_id),
                         "vram_mb": vram_mb,
-                        "subvendor": _pci_subvendor(bus_id)
+                        "subvendor": _pci_subvendor(bus_id),
+                        "vbios": vbios,
+                        "power_min": safe_float(parts[12]) if len(parts) > 12 else 0.0,
+                        "power_max": safe_float(parts[13]) if len(parts) > 13 else 0.0
                     })
 
     if HAS_HIVEOS or IS_LINUX:

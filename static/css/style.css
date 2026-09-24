@@ -736,7 +736,7 @@ tr.af-sep td {
 }
 
 .gpu-list-id {
-    flex: 1 1 230px;
+    flex: 1 1 200px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -767,19 +767,20 @@ tr.af-sep td {
 }
 
 .gpu-list-hash {
-    flex: 0 0 auto;
+    flex: 0 0 88px;
+    text-align: center;
 }
 
 .gpu-inline-metric {
     flex: 1 1 150px;
-    min-width: 145px;
+    min-width: 120px;
     display: flex;
     align-items: center;
     gap: 8px;
 }
 
 .gpu-metric-name {
-    flex: 0 0 auto;
+    flex: 0 0 34px;
     font-size: 0.72rem;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -795,12 +796,61 @@ tr.af-sep td {
     font-variant-numeric: tabular-nums;
 }
 
-.gpu-list-stats {
+/* Applied OC / clocks / power mini-columns: fixed label + fixed value widths
+   keep every cell aligned across rows regardless of bar or value changes */
+.gpu-mini-cell {
     flex: 0 0 auto;
     display: flex;
-    gap: 12px;
-    font-size: 0.78rem;
+    align-items: baseline;
+    gap: 5px;
     white-space: nowrap;
+}
+
+.gpu-mini-label {
+    flex: 0 0 30px;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.gpu-mini-val {
+    display: inline-block;
+    text-align: right;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.gpu-mini-val.gv-off,
+.gpu-mini-val.gv-lock,
+.gpu-mini-val.gv-mem {
+    width: 34px;
+}
+
+.gpu-mini-val.gv-pl {
+    width: 34px;
+}
+
+.gpu-mini-val.gv-clk {
+    width: 64px;
+}
+
+.gpu-mini-val.gv-pwr {
+    width: 106px;
+}
+
+.gpu-mini-sub {
+    font-weight: 400;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+}
+
+.gpu-mini-empty {
+    color: var(--text-muted);
+    opacity: 0.55;
+    font-weight: 400;
 }
 
 .gpu-list-actions {
