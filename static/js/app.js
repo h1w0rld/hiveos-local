@@ -1255,6 +1255,13 @@ function renderGuardMenu() {
             '</div>' +
         '</div>';
     }).join('');
+    // Badge column hugs the names: fix every name cell to the widest name plus
+    // a small minimum gap, so badges line up in one column and the dropdown
+    // width follows the rig names (long names truncate, never shrink below it)
+    const names = list.querySelectorAll('.guard-rig-name');
+    let maxNameW = 0;
+    names.forEach(n => { maxNameW = Math.max(maxNameW, n.offsetWidth); });
+    names.forEach(n => { n.style.minWidth = (maxNameW + 14) + 'px'; });
     updateGuardButton();
 }
 

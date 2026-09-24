@@ -1611,6 +1611,7 @@ hr {
 .guard-dropdown {
     min-width: 360px;
     max-width: 92vw;
+    width: fit-content;
     padding: 0;
     background: var(--bg-card);
     backdrop-filter: blur(12px) saturate(180%);
@@ -1679,11 +1680,12 @@ hr {
     font-weight: 600;
     font-size: 0.9rem;
     line-height: 1.25;
-    flex: 1 1 auto;
+    flex: 0 0 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* min-width is set from JS: widest name + the minimum name-to-badge gap */
 }
 
 /* Status badges live in their own fixed-width column, right-aligned so they
