@@ -523,13 +523,43 @@ document.addEventListener('DOMContentLoaded', function() {
         manualCheckBtn.disabled = true;
         const icon = manualCheckBtn.querySelector('i');
         icon.className = 'bi bi-arrow-repeat spin-animation';
-        
+
         await checkUpdate(true);
-        
+
         setTimeout(() => {
             manualCheckBtn.disabled = false;
             icon.className = 'bi bi-arrow-repeat';
         }, 1000);
+    });
+
+    // Cluster Update card
+    const cuRefreshBtn = document.getElementById('cuRefreshBtn');
+    cuRefreshBtn.addEventListener('click', async () => {
+        cuRefreshBtn.disabled = true;
+        const icon = cuRefreshBtn.querySelector('i');
+        icon.className = 'bi bi-arrow-clockwise spin-animation';
+        await refreshClusterUpdate();
+        setTimeout(() => {
+            cuRefreshBtn.disabled = false;
+            icon.className = 'bi bi-arrow-clockwise';
+        }, 600);
+    });
+    document.getElementById('cuSelectAll').addEventListener('change', function() {
+        const rigs = (clusterData && clusterData.rigs) || [];
+        rigs.forEach(r => {
+            const selectable = r.is_self || r.online;
+            if (selectable) {
+                if (this.checked) cuChecked.add(r.id); else cuChecked.delete(r.id);
+            }
+        });
+        renderCuRows();
+    });
+    document.getElementById('cuUpdateBtn').addEventListener('click', runClusterUpdate);
+    document.getElementById('cuTbody').addEventListener('change', (e) => {
+        const box = e.target.closest('.cu-rig-check');
+        if (!box) return;
+        if (box.checked) cuChecked.add(box.dataset.rig); else cuChecked.delete(box.dataset.rig);
+        syncCuSelectAllBox();
     });
 
     // Reboot / Shutdown bindings (act on the rig selected in the header dropdown)
@@ -951,6 +981,7 @@ const AUTO_REFRESH_LOADERS = {
     accesses: () => loadAccessList({routes: true}),
     jumps: () => loadAccessList({jumps: true}),
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
+    updates: () => { if (activeView === 'cluster') refreshClusterUpdate(); },
     wallets: () => renderWallets(),
     fsheets: () => loadFsheets(),
     fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); },
@@ -1057,7 +1088,7 @@ function showView(view) {
     location.hash = view;
 
     if (view === 'cluster') {
-        loadClusterData();
+        loadClusterData().then(() => { if (activeView === 'cluster') refreshClusterUpdate(); });
     } else if (view === 'accesses') {
         loadAccessList();
     } else if (view === 'dashboard') {
@@ -1874,6 +1905,324 @@ async function checkUpdate(isManual = false) {
     }
 }
 
+// ---------------- Cluster Update ----------------
+// Version reporting for every rig in the cluster (self direct, peers via the
+// /api/remote/<id> SSH proxy) plus a one-click update flow: the selected
+// panels pull the latest code from GitHub and restart themselves (miners are
+// untouched — they live in their own systemd scope since v1.10.34). The self
+// rig always updates LAST because its restart kills this very page.
+
+let cuLatest = null;        // version published on GitHub (null = unknown)
+let cuRigInfo = {};         // rigId -> {version, err, phase, message}
+let cuChecked = new Set();  // rig ids ticked for update
+let cuBusy = false;         // an update run is in progress
+let cuRunId = 0;            // guards against stale async refreshes
+let cuLoadedOnce = false;   // a refresh landed with a live session
+
+const cuSleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function verTuple(v) {
+    const parts = String(v || '').match(/\d+/g);
+    return parts ? parts.slice(0, 4).map(Number) : null;
+}
+
+// -1 / 0 / 1 — semver-ish compare of dotted numeric versions
+function verCompare(a, b) {
+    const ta = verTuple(a), tb = verTuple(b);
+    if (!ta || !tb) return 0;
+    for (let i = 0; i < Math.max(ta.length, tb.length); i++) {
+        const x = ta[i] || 0, y = tb[i] || 0;
+        if (x !== y) return x < y ? -1 : 1;
+    }
+    return 0;
+}
+
+async function cuFetchLatest() {
+    try {
+        const res = await fetch('/api/update/check');
+        if (res.status === 401) return { err: 'HTTP 401' };
+        if (res.ok) {
+            const data = await res.json();
+            if (data.success) return data.remote_version;
+        }
+    } catch (e) { /* GitHub unreachable */ }
+    return null;
+}
+
+async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const url = isSelf ? '/api/version'
+            : '/api/remote/' + encodeURIComponent(rigId) + '/api/version';
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (res.status === 401) return { err: 'HTTP 401' };
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data.success || !data.version) throw new Error('Invalid payload');
+        return data.version;
+    } catch (e) {
+        if (e && e.name === 'AbortError') return { err: 'Timed out' };
+        return { err: String(e.message || e) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Refresh the latest release + every rig's current version and repaint the table
+async function refreshClusterUpdate() {
+    if (activeView !== 'cluster' || cuBusy) return;
+    const runId = ++cuRunId;
+    const rigs = (clusterData && clusterData.rigs) || [];
+    renderCuRows();
+    const jobs = [cuFetchLatest()].concat(rigs.map(r => cuFetchVersion(r.id, r.is_self)));
+    const results = await Promise.all(jobs);
+    if (runId !== cuRunId) return; // a newer refresh/update superseded us
+    // A 401 anywhere means the session is gone — stop without caching garbage,
+    // so the post-login retry (from loadClusterData) can run again
+    if (results.some(r => r && r.err === 'HTTP 401')) {
+        showLoginOverlay();
+        return;
+    }
+    cuLatest = (typeof results[0] === 'string') ? results[0] : null;
+    rigs.forEach((r, i) => {
+        const res = results[i + 1];
+        const prev = cuRigInfo[r.id] || {};
+        if (typeof res === 'string') {
+            cuRigInfo[r.id] = { version: res, err: '', phase: prev.phase, message: prev.message };
+        } else {
+            // keep versions captured during an update run (panel restarts fail loudly)
+            cuRigInfo[r.id] = {
+                version: prev.version || null,
+                err: (res && res.err) || 'Unreachable',
+                phase: prev.phase, message: prev.message
+            };
+        }
+    });
+    cuLoadedOnce = true;
+    renderCuRows();
+}
+
+function cuVersionBadgeHtml(rig) {
+    const info = cuRigInfo[rig.id] || {};
+    const v = info.version;
+    if (!v) {
+        return '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
+            escapeHtml(info.err || 'Version unknown') + '">—</span>';
+    }
+    const outdated = cuLatest && verCompare(v, cuLatest) < 0;
+    const cls = outdated
+        ? 'bg-warning-glow border border-warning text-warning'
+        : 'bg-success-glow border border-success text-success';
+    return '<span class="badge ' + cls + ' cu-version-badge" title="Dashboard version on this rig">v' +
+        escapeHtml(v) + '</span>';
+}
+
+function cuStatusHtml(rig) {
+    const info = cuRigInfo[rig.id] || {};
+    if (info.phase === 'updating') {
+        return '<span class="text-warning"><i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Updating...</span>';
+    }
+    if (info.phase === 'updated') {
+        return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Updated to v' +
+            escapeHtml(info.version || '') + '</span>';
+    }
+    if (info.phase === 'error') {
+        return '<span class="text-danger" title="' + escapeHtml(info.message || '') + '"><i class="bi bi-x-circle-fill me-1"></i>' +
+            escapeHtml(info.message || 'Failed') + '</span>';
+    }
+    if (info.phase === 'skipped') {
+        return '<span class="text-muted"><i class="bi bi-dash-circle me-1"></i>Already up to date</span>';
+    }
+    if (!rig.is_self && !rig.online) {
+        return '<span class="text-danger" title="' + escapeHtml(rig.last_error || '') + '"><i class="bi bi-plug me-1"></i>Offline</span>';
+    }
+    const v = info.version;
+    if (!v) return '<span class="text-muted" title="' + escapeHtml(info.err || '') + '">Unknown</span>';
+    if (!cuLatest) return '<span class="text-muted" title="GitHub unreachable">Latest unknown</span>';
+    if (verCompare(v, cuLatest) < 0) {
+        return '<span class="text-warning"><i class="bi bi-arrow-down-circle-fill me-1"></i>Update available</span>';
+    }
+    return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Up to date</span>';
+}
+
+function renderCuRows() {
+    const tbody = document.getElementById('cuTbody');
+    if (!tbody) return;
+    // Latest-release badge (green when GitHub answered, amber when not)
+    const badge = document.getElementById('cuLatestBadge');
+    if (badge) {
+        if (cuLatest) {
+            badge.textContent = 'latest v' + cuLatest;
+            badge.className = 'badge bg-success-glow border border-success text-success small';
+            badge.title = 'Latest release published on GitHub';
+        } else {
+            badge.textContent = 'latest: unknown';
+            badge.className = 'badge bg-warning-glow border border-warning text-warning small';
+            badge.title = 'GitHub unreachable — cannot determine the latest release';
+        }
+    }
+    const rigs = ((clusterData && clusterData.rigs) || []).slice().sort(naturalRigCompare);
+    if (!rigs.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading versions...</td></tr>';
+        syncCuSelectAllBox();
+        return;
+    }
+    tbody.innerHTML = rigs.map(rig => {
+        const selectable = rig.is_self || rig.online;
+        const checked = cuChecked.has(rig.id);
+        const selfMark = rig.is_self
+            ? ' <span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>' : '';
+        return '<tr' + (selectable ? '' : ' class="opacity-50"') + '>' +
+            '<td class="text-center"><input type="checkbox" class="form-check-input m-0 cu-rig-check" data-rig="' +
+            escapeHtml(rig.id) + '"' + (checked ? ' checked' : '') + ((selectable && !cuBusy) ? '' : ' disabled') + '></td>' +
+            '<td class="text-truncate" style="max-width:220px" title="' + escapeHtml(rig.host_label || '') + '">' +
+            '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span>' + selfMark + '</td>' +
+            '<td>' + cuVersionBadgeHtml(rig) + '</td>' +
+            '<td>' + cuStatusHtml(rig) + '</td>' +
+            '</tr>';
+    }).join('');
+    syncCuSelectAllBox();
+    cuPaintUpdateButton();
+}
+
+function syncCuSelectAllBox() {
+    const box = document.getElementById('cuSelectAll');
+    if (!box) return;
+    const selectable = ((clusterData && clusterData.rigs) || []).filter(r => r.is_self || r.online);
+    const checkedCount = selectable.filter(r => cuChecked.has(r.id)).length;
+    box.checked = selectable.length > 0 && checkedCount === selectable.length;
+    box.indeterminate = checkedCount > 0 && checkedCount < selectable.length;
+    box.disabled = cuBusy;
+}
+
+function cuPaintUpdateButton() {
+    const btn = document.getElementById('cuUpdateBtn');
+    if (!btn) return;
+    if (cuBusy) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bi bi-arrow-repeat spin-animation"></i> Updating...';
+    } else {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-arrow-down-circle-fill"></i> Update';
+    }
+}
+
+// One rig: POST update/pull (self directly, peers through the SSH proxy),
+// then poll its /api/version until it reports the target release — the panel
+// restarts in between, so failed polls are expected and tolerated.
+async function cuUpdateOneRig(rig, password) {
+    const paint = (phase, message, version) => {
+        const prev = cuRigInfo[rig.id] || {};
+        cuRigInfo[rig.id] = {
+            version: version || prev.version || null,
+            err: '', phase, message: message || ''
+        };
+        renderCuRows();
+    };
+    paint('updating');
+    const url = rig.is_self ? '/api/update/pull'
+        : '/api/remote/' + encodeURIComponent(rig.id) + '/api/update/pull';
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ password: password })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+            paint('error', data.message || ('HTTP ' + res.status));
+            return false;
+        }
+    } catch (e) {
+        paint('error', 'Network error');
+        return false;
+    }
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+        await cuSleep(3000);
+        const v = await cuFetchVersion(rig.id, rig.is_self, 8000);
+        if (typeof v === 'string') {
+            if (cuLatest && verCompare(v, cuLatest) >= 0) {
+                paint('updated', '', v);
+                return true;
+            }
+            paint('updating', '', v); // old build still answering — restart pending
+        }
+        // else: panel restarting / unreachable — keep polling
+    }
+    paint('error', 'Timed out waiting for restart');
+    return false;
+}
+
+async function runClusterUpdate() {
+    if (cuBusy) return;
+    const password = document.getElementById('cuPassword').value.trim();
+    const all = (clusterData && clusterData.rigs) || [];
+    const selected = all.filter(r => cuChecked.has(r.id));
+    if (!selected.length) {
+        showToast('Select at least one rig to update.', false);
+        return;
+    }
+    if (!password) {
+        showToast('Please enter your access password to confirm the update.', false);
+        return;
+    }
+    if (!cuLatest) {
+        showToast('Latest version unknown — click Refresh first (is GitHub reachable?).', false);
+        return;
+    }
+    // Rigs already on the target release are skipped — no pointless restarts
+    const targets = selected.filter(r => {
+        const info = cuRigInfo[r.id] || {};
+        return !(info.version && verCompare(info.version, cuLatest) >= 0);
+    });
+    const skipped = selected.length - targets.length;
+    if (!targets.length) {
+        showToast('All selected rigs are already on v' + cuLatest + '.', true);
+        return;
+    }
+    const names = targets.map(r => r.name || r.id).join(', ');
+    const selfIncluded = targets.some(r => r.is_self);
+    if (!confirm('Update ' + targets.length + ' rig(s): ' + names +
+        (skipped ? ' (' + skipped + ' already up to date will be skipped)' : '') +
+        '? Each dashboard pulls the latest code from GitHub and restarts' +
+        (selfIncluded ? ' — this rig restarts last and the page will reload.' : '.') +
+        ' Miners are not affected.')) {
+        return;
+    }
+
+    cuBusy = true;
+    cuRunId++; // invalidate any in-flight version refresh
+    targets.forEach(r => {
+        const prev = cuRigInfo[r.id] || {};
+        cuRigInfo[r.id] = { version: prev.version || null, err: '', phase: 'updating', message: '' };
+    });
+    renderCuRows();
+
+    const peers = targets.filter(r => !r.is_self);
+    const selfRig = targets.find(r => r.is_self);
+    const results = await Promise.all(peers.map(r => cuUpdateOneRig(r, password)));
+    if (selfRig) results.push(await cuUpdateOneRig(selfRig, password));
+
+    const okCount = results.filter(Boolean).length;
+    const failCount = results.length - okCount;
+    if (selfRig) {
+        // This panel is coming back up — reload for a fresh session/CSRF token
+        showToast('Cluster update finished: ' + okCount + ' updated' +
+            (failCount ? ', ' + failCount + ' failed' : '') + ' — reloading dashboard...', failCount === 0);
+        setTimeout(() => window.location.reload(), 3000);
+        return;
+    }
+    cuBusy = false;
+    document.getElementById('cuPassword').value = '';
+    cuChecked.clear();
+    renderCuRows();
+    showToast('Cluster update finished: ' + okCount + ' updated' +
+        (failCount ? ', ' + failCount + ' failed' : '') + '.', failCount === 0);
+    if (okCount) loadClusterData(true);
+}
+
 // Load tuning settings on authorization
 async function loadTuningSettings() {
     try {
@@ -2375,6 +2724,9 @@ async function loadClusterData(silent = false) {
             // Guard states: full fetch once per page load (cluster card icons),
             // afterwards a cheap self-only refresh on every cluster poll
             loadGuardStates(guardStatesLoaded);
+            // Cluster Update card: versions load lazily on the first authorized
+            // cluster load (the pre-login attempt stops on 401 and retries here)
+            if (activeView === 'cluster' && !cuLoadedOnce && !cuBusy) refreshClusterUpdate();
         }
     } catch (error) {
         if (!silent) {

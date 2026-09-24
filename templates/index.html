@@ -215,6 +215,56 @@
                 </div>
             </section>
 
+            <!-- Cluster Update -->
+            <section class="mb-4">
+                <div class="card glass-card">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-cloud-arrow-down-fill text-warning"></i> Cluster Update
+                                <span id="cuLatestBadge" class="badge bg-secondary-subtle text-secondary-emphasis small d-none" title="Latest release published on GitHub"></span>
+                            </h2>
+                            <div class="d-flex gap-2 align-items-center">
+                                <div class="btn-group" role="group">
+                                    <button id="cuRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Re-check dashboard versions on all rigs">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                        <span class="visually-hidden">Auto-refresh interval</span>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="updates"></ul>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
+                                <colgroup>
+                                    <col style="width: 36px"><col style="width: 26%"><col style="width: 18%"><col>
+                                </colgroup>
+                                <thead>
+                                    <tr class="text-muted border-bottom border-secondary-subtle">
+                                        <th class="text-center"><input type="checkbox" class="form-check-input m-0" id="cuSelectAll" title="Select all rigs for update"></th>
+                                        <th>Rig</th>
+                                        <th>Version</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cuTbody">
+                                    <tr><td colspan="4" class="text-center text-muted py-3">Loading versions...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <input type="password" id="cuPassword" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" placeholder="Password" style="width: 150px;" autocomplete="off">
+                            <button id="cuUpdateBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Pull the latest update from GitHub and restart the dashboards of the selected rigs (miners are not affected)">
+                                <i class="bi bi-arrow-down-circle-fill"></i> Update
+                            </button>
+                            <span class="small text-muted" id="cuHint">Tick rigs to update — the whole cluster or a selection; this rig restarts last.</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Clusters -->
             <section class="mb-4">
                 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">

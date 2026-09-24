@@ -5645,16 +5645,36 @@ def set_fan():
         logging.error(f"Fan control failed on {hwmon}/pwm{idx}: {e}")
         return jsonify({"success": False, "message": "Failed to write fan control (root perms required)."}), 500
 
+def _version_tuple(v):
+    """(1, 12, 6) for 'v1.12.6' / '1.12.6-dev' — numeric prefix compare."""
+    parts = re.findall(r'\d+', str(v or ""))
+    return tuple(int(x) for x in parts[:4]) if parts else None
+
 @app.route('/api/update/check', methods=['GET'])
 def check_update():
     try:
-        url = "https://raw.githubusercontent.com/h1w0rld/hiveos-local/main/version.txt"
+        # Cache-bust the raw URL: GitHub's CDN serves version.txt with a
+        # max-age window, and a rig updated right after a push used to be
+        # told about the previous release (stale 1.12.5 vs local 1.12.6).
+        url = ("https://raw.githubusercontent.com/h1w0rld/hiveos-local/main/version.txt"
+               "?t=" + str(int(time.time())))
         req = urllib.request.Request(url, headers={'User-Agent': 'HiveOS-Local-Dashboard'})
         with urllib.request.urlopen(req, timeout=5) as response:
             remote_ver = response.read().decode('utf-8').strip()
-        
-        update_available = remote_ver != VERSION
-        
+
+        local_t, remote_t = _version_tuple(VERSION), _version_tuple(remote_ver)
+        if local_t is None or remote_t is None:
+            return jsonify({
+                "success": False,
+                "local_version": VERSION,
+                "remote_version": remote_ver or "Unknown",
+                "update_available": False,
+                "error": "Invalid version payload."
+            })
+        # An update exists only when the published release is NEWER than the
+        # local one — a stale/fetched-older remote must not flag the banner.
+        update_available = remote_t > local_t
+
         return jsonify({
             "success": True,
             "local_version": VERSION,
@@ -5670,6 +5690,15 @@ def check_update():
             "update_available": False,
             "error": "Failed to verify version against GitHub."
         })
+
+@app.route('/api/version', methods=['GET'])
+def api_version():
+    """Lightweight per-rig version report (no GitHub round-trip).
+
+    Used by the Cluster Update card: self calls it directly, peers through
+    the /api/remote/<id> SSH proxy.
+    """
+    return jsonify({"success": True, "version": VERSION})
 
 @app.route('/api/update/pull', methods=['POST'])
 def pull_update():

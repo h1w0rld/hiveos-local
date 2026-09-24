@@ -943,16 +943,34 @@ tr.af-sep td {
     border-top: none;
 }
 
-/* SSH accesses view: keep tables transparent (no solid dark fill) */
-#view-accesses .table {
+/* SSH accesses + cluster views: keep tables transparent (no solid dark fill) */
+#view-accesses .table,
+#view-cluster .table {
     --bs-table-bg: transparent;
     --bs-table-striped-bg: transparent;
     --bs-table-hover-bg: transparent;
 }
 
 #view-accesses .table td,
-#view-accesses .table th {
+#view-accesses .table th,
+#view-cluster .table td,
+#view-cluster .table th {
     background-color: transparent;
+}
+
+.cu-version-badge {
+    font-size: 0.78rem;
+    min-width: 74px;
+    text-align: center;
+}
+
+.cu-status-spin {
+    animation: cuSpin 0.9s linear infinite;
+    display: inline-block;
+}
+
+@keyframes cuSpin {
+    to { transform: rotate(360deg); }
 }
 
 .min-w-0 {
