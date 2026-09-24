@@ -518,21 +518,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // Manual check for updates trigger
-    const manualCheckBtn = document.getElementById('manualCheckUpdateBtn');
-    manualCheckBtn.addEventListener('click', async () => {
-        manualCheckBtn.disabled = true;
-        const icon = manualCheckBtn.querySelector('i');
-        icon.className = 'bi bi-arrow-repeat spin-animation';
-
-        await checkUpdate(true);
-
-        setTimeout(() => {
-            manualCheckBtn.disabled = false;
-            icon.className = 'bi bi-arrow-repeat';
-        }, 1000);
-    });
-
     // Cluster Update card
     const cuRefreshBtn = document.getElementById('cuRefreshBtn');
     cuRefreshBtn.addEventListener('click', async () => {
@@ -1432,7 +1417,6 @@ async function fetchStats() {
         document.getElementById('rigScopeName').textContent = getRigName(currentRigId);
         document.getElementById('dashboardRigNameText').textContent = getRigName(currentRigId);
         document.getElementById('dashboardVersion').textContent = data.system.dashboard_version;
-        document.getElementById('currentVerText').textContent = data.system.dashboard_version;
         
         // Update System Diagnostics Panel
         document.getElementById('statRigId').textContent = data.system.rig_id;
