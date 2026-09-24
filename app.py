@@ -5705,12 +5705,48 @@ def api_version():
     """
     return jsonify({"success": True, "version": VERSION})
 
+GITHUB_TARBALL_URL = "https://codeload.github.com/h1w0rld/hiveos-local/tar.gz/refs/heads/main"
+
+def _download_update_tarball(dest_path, timeout=90):
+    """Fetch the current main-branch tarball from GitHub (public repo, no auth)."""
+    req = urllib.request.Request(GITHUB_TARBALL_URL, headers={'User-Agent': 'HiveOS-Local-Dashboard'})
+    with urllib.request.urlopen(req, timeout=timeout) as response, open(dest_path, 'wb') as fh:
+        shutil.copyfileobj(response, fh)
+
+def _update_from_tarball(cwd):
+    """Fallback update path for tar-copy installs without a .git directory
+    (and for rigs whose git flow failed): overlay the GitHub release tarball
+    over the install directory. Semantics mirror `git reset --hard origin/main`
+    for tracked files — existing files are overwritten, untracked local files
+    are left alone."""
+    tmp = os.path.join(tempfile.gettempdir(), f"hiveos-local-update-{int(time.time())}.tar.gz")
+    try:
+        try:
+            _download_update_tarball(tmp)
+        except Exception as e:
+            return False, f"tarball download failed: {e}"
+        try:
+            with open(tmp, 'rb') as fh:
+                if fh.read(2) != b'\x1f\x8b':
+                    return False, "downloaded update is not a gzip archive"
+        except OSError as e:
+            return False, f"tarball read failed: {e}"
+        _, err, code = run_command(f"tar -xzf {tmp} -C {cwd} --strip-components=1")
+        if code != 0:
+            return False, f"tar extract failed: {err or 'exit code ' + str(code)}"
+        return True, ""
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
 @app.route('/api/update/pull', methods=['POST'])
 def pull_update():
     data = request.get_json()
     if not data or ('password' not in data and 'pin' not in data):
         return jsonify({"success": False, "message": "Missing password verification parameter"}), 400
-        
+
     user_key = str(data.get('password', data.get('pin', ''))).strip()
     if not user_key or not hmac.compare_digest(user_key, str(app.config['ACCESS_PASSWORD'])):
         logging.warning(f"Failed update password verification attempt from IP: {request.remote_addr}")
@@ -5718,23 +5754,43 @@ def pull_update():
 
     logging.info(f"Dashboard update authorized with password by IP: {request.remote_addr}")
     cwd = os.getcwd()
-    
-    # Add safe directory flag
-    run_command(f"git config --global --add safe.directory {cwd}")
-    
-    stdout_f, stderr_f, code_f = run_command("git fetch --all")
-    stdout_r, stderr_r, code_r = run_command("git reset --hard origin/main")
-    
-    if code_r == 0:
-        msg = "Update successfully pulled from GitHub! Restarting dashboard service..."
+
+    updated = False
+    msg = ""
+    detail = ""
+
+    if os.path.isdir(os.path.join(cwd, ".git")):
+        # Add safe directory flag
+        run_command(f"git config --global --add safe.directory {cwd}")
+
+        stdout_f, stderr_f, code_f = run_command("git fetch --all")
+        stdout_r, stderr_r, code_r = run_command("git reset --hard origin/main")
+
+        if code_r == 0:
+            updated = True
+            msg = "Update successfully pulled from GitHub! Restarting dashboard service..."
+        else:
+            detail = f"git: {stderr_r or stderr_f}"
+
+    if not updated:
+        # Tar-copy installs (no .git) and rigs whose git flow failed update
+        # by overlaying the GitHub tarball directly.
+        ok, err = _update_from_tarball(cwd)
+        if ok:
+            updated = True
+            msg = "Update installed from GitHub release archive! Restarting dashboard service..."
+        else:
+            detail = (detail + " | " if detail else "") + err
+
+    if updated:
         logging.info(msg)
         cmd = 'nohup bash -c "sleep 1.5 && sudo systemctl restart hiveos-local.service" > /dev/null 2>&1 &'
         subprocess.Popen(cmd, shell=True)
         return jsonify({"success": True, "message": msg})
-    else:
-        err_msg = f"Failed to pull git update: {stderr_r or stderr_f}"
-        logging.error(err_msg)
-        return jsonify({"success": False, "message": "Failed to pull dashboard update from GitHub repository."}), 500
+
+    err_msg = f"Failed to pull dashboard update: {detail}"
+    logging.error(err_msg)
+    return jsonify({"success": False, "message": "Failed to pull dashboard update from GitHub repository."}), 500
 
 @app.route('/api/stats')
 def api_stats():
