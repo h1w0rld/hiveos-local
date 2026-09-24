@@ -1606,16 +1606,55 @@ hr {
 #ocGpuStrip .btn-xs { display: inline-flex; align-items: center; justify-content: center; }
 
 /* Config source mode dropdown (header shield button): per-rig Local/Cloud
-   switches with the enforcement hint under each rig name */
+   switches with cloud/local icons around each toggle; glass background to
+   match the app cards instead of the stock dark dropdown fill */
 .guard-dropdown {
     min-width: 360px;
     max-width: 92vw;
     padding: 0;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px) saturate(180%);
+    -webkit-backdrop-filter: blur(12px) saturate(180%);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
 }
 
 .guard-dropdown-head {
     padding: 0.75rem 1rem 0.6rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.guard-info-icon {
+    cursor: help;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+/* Info tooltip of the Config Source menu: app-styled glass card, wide and
+   left-aligned instead of the stock narrow white tooltip */
+.tooltip.guard-tip {
+    --bs-tooltip-maxwidth: 380px;
+    --bs-tooltip-opacity: 1;
+    --bs-tooltip-bg: #151b2b;
+    --bs-tooltip-color: var(--text-primary);
+    --bs-tooltip-padding-x: 0;
+    --bs-tooltip-padding-y: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(12px) saturate(180%);
+    -webkit-backdrop-filter: blur(12px) saturate(180%);
+}
+
+.tooltip.guard-tip .tooltip-inner {
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    max-width: 380px;
+    padding: 0.6rem 0.8rem;
+    border-radius: 12px;
 }
 
 .guard-rig-list {
@@ -1642,9 +1681,14 @@ hr {
     line-height: 1.25;
 }
 
-.guard-rig-mode {
-    margin-top: 0.1rem;
-    line-height: 1.25;
+.guard-switch-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.guard-side-icon {
+    font-size: 1rem;
 }
 
 .guard-rig-row .form-check-input {

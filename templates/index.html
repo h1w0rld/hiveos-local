@@ -70,8 +70,12 @@
                     </button>
                     <div class="dropdown-menu guard-dropdown shadow" id="guardModeMenu">
                         <div class="guard-dropdown-head">
-                            <h6 class="mb-1 fw-bold"><i class="bi bi-shield-lock me-1 text-primary"></i>Config Source</h6>
-                            <p class="text-muted small mb-0">Local: settings from this panel are enforced - flight sheet, fans, presets, overclock are re-applied at boot and every 10 min if overwritten (e.g. by cloud configs). Cloud: default behavior, nothing is applied automatically.</p>
+                            <h6 class="mb-0 fw-bold d-flex align-items-center gap-1">
+                                <i class="bi bi-shield-lock me-1 text-primary"></i>Config Source
+                                <i class="bi bi-question-circle guard-info-icon" id="guardInfoIcon" tabindex="0"
+                                   data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true"
+                                   title="Local: settings from this panel are enforced &mdash; flight sheet, fans, presets, overclock are re-applied at boot and every 10 min if overwritten (e.g. by cloud configs).&lt;br&gt;Cloud: default behavior, nothing is applied automatically."></i>
+                            </h6>
                         </div>
                         <div id="guardRigList" class="guard-rig-list">
                             <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>

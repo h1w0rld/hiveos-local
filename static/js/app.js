@@ -326,6 +326,10 @@ document.addEventListener('DOMContentLoaded', function() {
     if (guardDropdownEl) {
         guardDropdownEl.addEventListener('show.bs.dropdown', () => loadGuardStates(false));
     }
+    const guardInfoIcon = document.getElementById('guardInfoIcon');
+    if (guardInfoIcon && window.bootstrap) {
+        new bootstrap.Tooltip(guardInfoIcon, { customClass: 'guard-tip', html: true });
+    }
 
     // Manual Refresh button
     const refreshBtn = document.getElementById('refreshStatsBtn');
@@ -1205,20 +1209,22 @@ function renderGuardMenu() {
         const st = guardStates[r.id] || {};
         const on = !!st.enabled;
         const online = r.is_self || !!r.online;
-        const modeText = on
-            ? '<span class="text-success">Local</span> - enforced (boot + every 10 min)'
-            : '<span class="text-muted">Cloud</span> - default, nothing enforced';
-        const badge = r.is_self ? ' <span class="badge bg-dark-card border border-secondary-subtle text-secondary-emphasis small">THIS RIG</span>'
-                                : (online ? '' : ' <span class="badge bg-danger-glow text-danger small">OFFLINE</span>');
+        const badge = r.is_self
+            ? ' <span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>' +
+              (online ? '' : ' <span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>')
+            : (online
+                ? ' <span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
+                : ' <span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
         return '<div class="guard-rig-row" data-rig="' + escapeHtml(r.id) + '">' +
-            '<div class="guard-rig-info">' +
-                '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + badge + '</div>' +
-                '<div class="guard-rig-mode small">' + modeText + '</div>' +
-            '</div>' +
-            '<div class="form-check form-switch mb-0">' +
-                '<input class="form-check-input" type="checkbox" role="switch" ' + (on ? 'checked' : '') + (online ? '' : ' disabled') +
-                ' title="' + (online ? 'Switch config source: Local (enforced) / Cloud (default)' : 'Rig is offline') + '"' +
-                ' onchange="toggleGuardMode(\'' + r.id + '\', this)">' +
+            '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + badge + '</div>' +
+            '<div class="guard-switch-wrap">' +
+                '<i class="bi bi-cloud guard-side-icon' + (on ? ' text-muted' : ' text-info') + '" title="Cloud"></i>' +
+                '<div class="form-check form-switch mb-0">' +
+                    '<input class="form-check-input" type="checkbox" role="switch" ' + (on ? 'checked' : '') + (online ? '' : ' disabled') +
+                    ' title="' + (online ? 'Switch config source: Local (enforced) / Cloud (default)' : 'Rig is offline') + '"' +
+                    ' onchange="toggleGuardMode(\'' + r.id + '\', this)">' +
+                '</div>' +
+                '<i class="bi bi-shield-lock guard-side-icon' + (on ? ' text-success' : ' text-muted') + '" title="Local"></i>' +
             '</div>' +
         '</div>';
     }).join('');
