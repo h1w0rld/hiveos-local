@@ -1679,6 +1679,21 @@ hr {
     font-weight: 600;
     font-size: 0.9rem;
     line-height: 1.25;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Status badges live in their own fixed-width column, right-aligned so they
+   line up in one row and hug the switches regardless of the rig name width */
+.guard-rig-badges {
+    flex: 0 0 96px;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    white-space: nowrap;
 }
 
 .guard-switch-wrap {

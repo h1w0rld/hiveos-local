@@ -1236,13 +1236,14 @@ function renderGuardMenu() {
         const online = r.is_self || !!r.online;
         const cloudCls = on ? 'text-muted' : (st ? 'text-info' : 'text-muted');
         const badge = r.is_self
-            ? ' <span class="badge bg-success-glow border border-success text-success small ms-2">THIS RIG</span>' +
-              (online ? '' : ' <span class="badge bg-danger-glow border border-danger text-danger small ms-2">OFFLINE</span>')
+            ? '<span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>' +
+              (online ? '' : ' <span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>')
             : (online
-                ? ' <span class="badge bg-success-glow border border-success text-success small ms-2"><span class="pulse-indicator"></span>ONLINE</span>'
-                : ' <span class="badge bg-danger-glow border border-danger text-danger small ms-2">OFFLINE</span>');
+                ? '<span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
+                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
         return '<div class="guard-rig-row" data-rig="' + escapeHtml(r.id) + '">' +
-            '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + badge + '</div>' +
+            '<div class="guard-rig-name">' + escapeHtml(r.name || r.id) + '</div>' +
+            '<div class="guard-rig-badges">' + badge + '</div>' +
             '<div class="guard-switch-wrap">' +
                 '<i class="bi bi-cloud guard-side-icon ' + cloudCls + '" title="Cloud"></i>' +
                 '<div class="form-check form-switch mb-0">' +
