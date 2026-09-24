@@ -720,26 +720,92 @@ tr.af-sep td {
     box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
-/* GPU list rows (GPUs tab) */
-.gpu-list-item .card-body {
+/* GPU list rows (GPUs tab): single card, one dense line per GPU */
+.gpu-list-card {
+    overflow: hidden;
+}
+
+.gpu-list-row {
+    padding: 7px 16px;
+    border-bottom: 1px solid var(--border-color);
     min-width: 0;
+}
+
+.gpu-list-row:last-child {
+    border-bottom: none;
 }
 
 .gpu-list-id {
-    flex: 0 0 260px;
+    flex: 1 1 230px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     min-width: 0;
 }
 
-.gpu-list-id h3 {
-    color: var(--text-primary);
+.gpu-list-name {
+    min-width: 0;
 }
 
-.gpu-list-metrics {
-    min-width: 280px;
+.gpu-list-model {
+    font-weight: 600;
+    font-size: 0.88rem;
+    line-height: 1.2;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.gpu-list-sub {
+    font-size: 0.72rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.gpu-list-hash {
+    flex: 0 0 auto;
+}
+
+.gpu-inline-metric {
+    flex: 1 1 150px;
+    min-width: 145px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.gpu-metric-name {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.gpu-metric-val {
+    flex: 0 0 46px;
+    text-align: right;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.gpu-list-stats {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 12px;
+    font-size: 0.78rem;
+    white-space: nowrap;
 }
 
 .gpu-list-actions {
-    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 2px 8px;
 }
 
 /* Theme Toggle Button styling */
