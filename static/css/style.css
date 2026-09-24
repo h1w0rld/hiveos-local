@@ -1084,8 +1084,9 @@ tr.af-sep td {
     border-top: none;
 }
 
-/* SSH accesses + dashboard Updates tab: keep tables transparent (no solid dark fill) */
+/* SSH accesses + dashboard Updates/Services tabs: keep tables transparent (no solid dark fill) */
 #view-accesses .table,
+#servicesTabContainer .table,
 #updatesTabContainer .table {
     --bs-table-bg: transparent;
     --bs-table-striped-bg: transparent;
@@ -1094,6 +1095,8 @@ tr.af-sep td {
 
 #view-accesses .table td,
 #view-accesses .table th,
+#servicesTabContainer .table td,
+#servicesTabContainer .table th,
 #updatesTabContainer .table td,
 #updatesTabContainer .table th {
     background-color: transparent;
