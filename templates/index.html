@@ -661,41 +661,6 @@
                 </div>
             </div>
 
-            <!-- Overclocking Quick Guide: shown in the GPU Cards sub-view -->
-            <div id="ocGuideContainer" class="d-none mt-1">
-                <div class="card glass-card">
-                    <div class="card-body">
-                        <h3 class="h5 fw-bold mb-3 d-flex align-items-center gap-2">
-                            <i class="bi bi-book text-success"></i> Novice's Guide to Basic GPU Overclocking
-                        </h3>
-                        <div class="row g-4">
-                            <div class="col-md-6">
-                                <div class="guide-box">
-                                    <h4 class="h6 fw-bold text-primary"><i class="bi bi-cpu"></i> NVIDIA Overclocking Rules</h4>
-                                    <ul>
-                                        <li><strong>Core Clock Offset (MHz):</strong> Enter values like <code>-200</code> or <code>+150</code> to offset the graphics clock.</li>
-                                        <li><strong>Absolute Core Clock (MHz):</strong> Enter a value <strong>above 500</strong> (e.g. <code>1450</code>) to lock the core clock to that exact frequency. This reduces heat and power consumption. (Recommended for RTX cards).</li>
-                                        <li><strong>Memory Clock Offset (MHz):</strong> In HiveOS (Linux), memory clocks are <strong>doubled</strong> compared to Windows. E.g., if you set <code>+1000</code> in Windows, enter <code>2000</code> in HiveOS.</li>
-                                        <li><strong>Power Limit (Watts):</strong> Limit the maximum power. Setting it to <code>0</code> or leaving it blank disables limits (allowing maximum base spec).</li>
-                                    </ul>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="guide-box">
-                                    <h4 class="h6 fw-bold text-success"><i class="bi bi-cpu-fill"></i> AMD Overclocking Rules</h4>
-                                    <ul>
-                                        <li><strong>Core Clock (MHz) & Voltage (mV):</strong> Set the exact core frequency and target core voltage (e.g., <code>1150</code> MHz at <code>800</code> mV).</li>
-                                        <li><strong>Memory Clock (MHz):</strong> Set the memory speed directly (e.g. <code>2000</code>).</li>
-                                        <li><strong>MVDD & VDDCI:</strong> Core memory and controller voltages (set to <code>0</code> to use defaults if you are unsure).</li>
-                                        <li><strong>DPM (State):</strong> Power states 1-7. (Set to <code>4</code> or <code>5</code> for stable power control on Polaris/Vega cards).</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <!-- Wallets tab content -->
             <div id="walletsTabContainer" class="d-none">
                 <div class="card glass-card">

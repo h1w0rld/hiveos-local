@@ -720,28 +720,26 @@ tr.af-sep td {
     box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
-/* Guide box for novice help */
-.guide-box {
-    background: rgba(0, 0, 0, 0.1);
-    border-left: 3px solid #6366f1;
-    padding: 16px;
-    border-radius: 0 10px 10px 0;
-    height: 100%;
+/* GPU list rows (GPUs tab) */
+.gpu-list-item .card-body {
+    min-width: 0;
 }
 
-.guide-box ul {
-    padding-left: 20px;
-    margin-bottom: 0;
-    font-size: 0.9rem;
-    color: var(--text-muted);
+.gpu-list-id {
+    flex: 0 0 260px;
+    min-width: 0;
 }
 
-.guide-box ul li {
-    margin-bottom: 8px;
+.gpu-list-id h3 {
+    color: var(--text-primary);
 }
 
-.guide-box ul li:last-child {
-    margin-bottom: 0;
+.gpu-list-metrics {
+    min-width: 280px;
+}
+
+.gpu-list-actions {
+    margin-left: auto;
 }
 
 /* Theme Toggle Button styling */
@@ -1609,7 +1607,7 @@ hr {
    switches with cloud/local icons around each toggle; glass background to
    match the app cards instead of the stock dark dropdown fill */
 .guard-dropdown {
-    min-width: 360px;
+    min-width: 0;
     max-width: 92vw;
     width: fit-content;
     padding: 0;
@@ -1697,14 +1695,14 @@ hr {
     justify-content: center;
     align-items: center;
     white-space: nowrap;
-    margin-left: 8px; /* min name->badge gap: exactly half the badge->cloud one */
+    margin-left: 16px; /* min name->badge gap: exactly half the badge->cloud one */
 }
 
 .guard-switch-wrap {
     display: flex;
     align-items: center;
     gap: 0.45rem;
-    margin-left: 16px; /* badge column -> cloud icon */
+    margin-left: 32px; /* badge column -> cloud icon: 2x the name->badge gap */
 }
 
 .guard-side-icon {

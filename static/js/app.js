@@ -65,11 +65,9 @@ function switchHardwareTab(showGpus) {
     
     gpuContainer.classList.toggle('d-none', !showGpus);
     igpuContainer.classList.toggle('d-none', showGpus);
-    // CPU Mining card belongs to the iGPU sub-view, OC guide to the GPU Cards sub-view
+    // CPU Mining card belongs to the iGPU sub-view
     const cpuCard = document.getElementById('cpuCardContainer');
-    const ocGuide = document.getElementById('ocGuideContainer');
     if (cpuCard) cpuCard.classList.toggle('d-none', !(!showGpus && activeDashTab === 'gpus'));
-    if (ocGuide) ocGuide.classList.toggle('d-none', !(showGpus && activeDashTab === 'gpus'));
     
     gpusBtn.classList.toggle('btn-primary', showGpus);
     gpusBtn.classList.toggle('btn-outline-primary', !showGpus);
@@ -1483,7 +1481,7 @@ async function fetchStats() {
     }
 }
 
-// Render GPU layout dynamically
+// Render GPU layout dynamically (compact list rows)
 function renderGpus(gpus) {
     const container = document.getElementById('gpuContainer');
     container.innerHTML = '';
@@ -1498,74 +1496,69 @@ function renderGpus(gpus) {
     }
     
     gpus.forEach(gpu => {
-        const tempClass = gpu.temp > 75 ? 'danger' : (gpu.temp > 65 ? 'warning' : 'success');
-        const fanClass = gpu.fan > 80 ? 'danger' : 'primary';
+        const tempGlow = gpu.temp > 75 ? 'red' : (gpu.temp > 65 ? 'primary' : 'green');
+        const fanGlow = gpu.fan > 80 ? 'red' : 'primary';
         
         const cardCol = document.createElement('div');
-        cardCol.className = 'col-md-6 col-lg-4';
+        cardCol.className = 'col-12';
         
         cardCol.innerHTML = `
-            <div class="card glass-card h-100">
-                <div class="card-body d-flex flex-column justify-content-between">
-                    <div>
-                        <!-- Card Header -->
-                        <div class="gpu-header d-flex justify-content-between align-items-center mb-3">
-                            <span class="small fw-semibold text-muted">GPU ${gpu.index}</span>
+            <div class="card glass-card gpu-list-item h-100">
+                <div class="card-body d-flex flex-wrap align-items-center gap-3 py-3">
+                    <!-- GPU identity -->
+                    <div class="gpu-list-id">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-secondary bg-opacity-25 text-muted fw-bold font-monospace">GPU ${gpu.index}</span>
                             <span class="badge bg-accent-glow text-primary fw-bold font-monospace">${fmtSpeed(gpu.hashrate)}</span>
                         </div>
-                        
-                        <!-- GPU Specs -->
-                        <h3 class="h5 fw-bold mb-1">${gpu.model}</h3>
-                        <p class="small text-muted mb-3">
+                        <h3 class="h6 fw-bold mb-0 mt-1 text-truncate" title="${gpu.model}">${gpu.model}</h3>
+                        <p class="small text-muted mb-0">
                             <span class="brand-${gpu.brand.toLowerCase()}">${gpu.brand}</span> • PCI Bus ${gpu.id}
                         </p>
-                        
-                        <!-- Temperature Progress Bar -->
-                        <div class="metric-row">
-                            <div class="metric-label">
-                                <span>Temperature</span>
-                                <span class="metric-value">${gpu.temp}°C</span>
+                    </div>
+
+                    <!-- Temperature / Fan progress bars -->
+                    <div class="gpu-list-metrics flex-grow-1">
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <div class="metric-row mb-0">
+                                    <div class="metric-label">
+                                        <span><i class="bi bi-thermometer-half me-1"></i>Temp</span>
+                                        <span class="metric-value">${gpu.temp}°C</span>
+                                    </div>
+                                    <div class="progress bg-black bg-opacity-20" style="height: 8px;">
+                                        <div class="progress-bar progress-bar-glow-${tempGlow}" 
+                                             role="progressbar" style="width: ${gpu.temp}%" aria-valuenow="${gpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="progress bg-black bg-opacity-20" style="height: 8px;">
-                                <div class="progress-bar progress-bar-glow-${tempClass === 'danger' ? 'red' : (tempClass === 'success' ? 'green' : 'primary')}" 
-                                     role="progressbar" style="width: ${gpu.temp}%" aria-valuenow="${gpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
+                            <div class="col-md-6">
+                                <div class="metric-row mb-0">
+                                    <div class="metric-label">
+                                        <span><i class="bi bi-fan me-1"></i>Fan</span>
+                                        <span class="metric-value">${gpu.fan}%</span>
+                                    </div>
+                                    <div class="progress bg-black bg-opacity-20" style="height: 8px;">
+                                        <div class="progress-bar progress-bar-glow-${fanGlow}" 
+                                             role="progressbar" style="width: ${gpu.fan}%" aria-valuenow="${gpu.fan}" aria-valuemin="0" aria-valuemax="100"></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Fan Speed Progress Bar -->
-                        <div class="metric-row">
-                            <div class="metric-label">
-                                <span>Fan Speed</span>
-                                <span class="metric-value">${gpu.fan}%</span>
-                            </div>
-                            <div class="progress bg-black bg-opacity-20" style="height: 8px;">
-                                <div class="progress-bar progress-bar-glow-${fanClass === 'danger' ? 'red' : 'primary'}" 
-                                     role="progressbar" style="width: ${gpu.fan}%" aria-valuenow="${gpu.fan}" aria-valuemin="0" aria-valuemax="100"></div>
-                            </div>
-                        </div>
-
-                        <!-- Clocks and Power Metrics -->
-                        <div class="row g-2 mt-2 pt-2 border-top border-secondary-subtle text-center">
-                            <div class="col-4">
-                                <div class="small text-muted">Core Clock</div>
-                                <div class="fw-semibold small">${gpu.core_clock} MHz</div>
-                            </div>
-                            <div class="col-4">
-                                <div class="small text-muted">Mem Clock</div>
-                                <div class="fw-semibold small">${gpu.mem_clock} MHz</div>
-                            </div>
-                            <div class="col-4">
-                                <div class="small text-muted">Power</div>
-                                <div class="fw-semibold small text-danger-emphasis">${gpu.power}W <span class="text-muted small">/ ${gpu.power_limit}W</span></div>
-                            </div>
+                        <!-- Clocks and Power -->
+                        <div class="d-flex flex-wrap gap-3 mt-2 pt-2 border-top border-secondary-subtle small">
+                            <span class="text-muted">Core <span class="fw-semibold text-body">${gpu.core_clock} MHz</span></span>
+                            <span class="text-muted">Mem <span class="fw-semibold text-body">${gpu.mem_clock} MHz</span></span>
+                            <span class="text-muted">Power <span class="fw-semibold text-danger-emphasis">${gpu.power}W</span> <span class="text-muted">/ ${gpu.power_limit}W</span></span>
                         </div>
                     </div>
-                    
-                    <!-- Action Buttons -->
-                    <div class="mt-4">
-                        <button class="btn btn-sm btn-outline-primary w-100 py-2 fw-semibold d-flex align-items-center justify-content-center gap-1" 
-                                onclick="openOcModal('${gpu.brand}', ${gpu.index})">
-                            <i class="bi bi-sliders"></i> Edit Overclocks
+
+                    <!-- Action -->
+                    <div class="gpu-list-actions">
+                        <button class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" 
+                                title="Edit overclocks for GPU ${gpu.index}" onclick="openOcModal('${gpu.brand}', ${gpu.index})">
+                            <i class="bi bi-sliders"></i> OC
                         </button>
                     </div>
                 </div>
@@ -4813,9 +4806,8 @@ function showDashTab(tab) {
     // GPUs tab shows the gpu or igpu grid per the hardware sub-switch
     document.getElementById('gpuContainer').classList.toggle('d-none', !isGpusCards);
     document.getElementById('igpuContainer').classList.toggle('d-none', !isIgpu);
-    // CPU Mining card lives in the CPU iGPU sub-view, OC guide in the GPU Cards sub-view
+    // CPU Mining card lives in the CPU iGPU sub-view
     document.getElementById('cpuCardContainer').classList.toggle('d-none', !isIgpu);
-    document.getElementById('ocGuideContainer').classList.toggle('d-none', !isGpusCards);
     document.getElementById('ocAllContainer').classList.toggle('d-none', !isGpusCards);
     document.getElementById('walletsTabContainer').classList.toggle('d-none', tab !== 'wallets');
     document.getElementById('fansTabContainer').classList.toggle('d-none', tab !== 'fans');
