@@ -1201,6 +1201,7 @@ function updateGuardButton() {
     icon.className = on ? 'bi bi-shield-lock text-success'
                         : 'bi bi-cloud ' + (st ? 'text-info' : 'text-muted');
     btn.classList.toggle('guard-btn-local', on);
+    btn.classList.toggle('guard-btn-cloud', !on && !!st);
     btn.title = on
         ? name + ': Local mode — settings enforced by this panel (re-applied at boot and every 10 min)'
         : name + ': Cloud mode — default behavior, nothing enforced';
