@@ -1667,9 +1667,9 @@ hr {
 .guard-rig-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
     padding: 0.45rem 1rem;
+    /* no flex gap: the three cells get explicit margins so the name->badge
+       gap can be exactly half the badge->cloud gap */
 }
 
 .guard-rig-row:hover {
@@ -1685,27 +1685,43 @@ hr {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    /* min-width is set from JS: widest name + the minimum name-to-badge gap */
+    /* min-width is set from JS: the widest name in the list */
 }
 
-/* Status badges live in their own fixed-width column, right-aligned so they
-   line up in one row and hug the switches regardless of the rig name width */
+/* Status badges live in their own column, centered so they line up in one
+   row; the column is sized by JS to the widest badge (no extra inner inset)
+   and sits a small min-gap away from the names */
 .guard-rig-badges {
-    flex: 0 0 96px;
+    flex: 0 0 auto;
     display: flex;
-    justify-content: flex-end;
+    justify-content: center;
     align-items: center;
     white-space: nowrap;
+    margin-left: 8px; /* min name->badge gap: exactly half the badge->cloud one */
 }
 
 .guard-switch-wrap {
     display: flex;
     align-items: center;
     gap: 0.45rem;
+    margin-left: 16px; /* badge column -> cloud icon */
 }
 
 .guard-side-icon {
     font-size: 1rem;
+}
+
+/* Equal visual gaps on both sides of the switch: bootstrap's .form-check
+   reserves 1.5em of padding (the input escapes it with a negative margin),
+   which made the left gap look smaller than the right one */
+.guard-rig-row .form-check {
+    padding-left: 0;
+    min-height: 0;
+}
+
+.guard-rig-row .form-check-input {
+    margin-left: 0;
+    float: none;
 }
 
 /* Header Mode button accent while the managed rig runs Local mode */

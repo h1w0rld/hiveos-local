@@ -1255,13 +1255,18 @@ function renderGuardMenu() {
             '</div>' +
         '</div>';
     }).join('');
-    // Badge column hugs the names: fix every name cell to the widest name plus
-    // a small minimum gap, so badges line up in one column and the dropdown
-    // width follows the rig names (long names truncate, never shrink below it)
+    // Badge column hugs the names: fix every name cell to the widest name, so
+    // badges line up in one column; the badge column itself is sized to the
+    // widest badge (badges stay centered in it), keeping the visible
+    // name->badge gap at its minimum (half the badge->cloud gap)
     const names = list.querySelectorAll('.guard-rig-name');
     let maxNameW = 0;
     names.forEach(n => { maxNameW = Math.max(maxNameW, n.offsetWidth); });
-    names.forEach(n => { n.style.minWidth = (maxNameW + 14) + 'px'; });
+    names.forEach(n => { n.style.minWidth = maxNameW + 'px'; });
+    const badgeCols = list.querySelectorAll('.guard-rig-badges');
+    let maxBadgeW = 0;
+    badgeCols.forEach(b => { maxBadgeW = Math.max(maxBadgeW, b.scrollWidth); });
+    badgeCols.forEach(b => { b.style.width = maxBadgeW + 'px'; });
     updateGuardButton();
 }
 
