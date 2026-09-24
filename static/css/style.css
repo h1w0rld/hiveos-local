@@ -687,6 +687,66 @@ tr.af-sep td {
     font-weight: 700;
 }
 
+.brand-msi {
+    color: #ff5a5a;
+    font-weight: 700;
+}
+
+.brand-asus {
+    color: #35b5e5;
+    font-weight: 700;
+}
+
+.brand-gigabyte {
+    color: #ff9e2c;
+    font-weight: 700;
+}
+
+.brand-zotac {
+    color: #f7941d;
+    font-weight: 700;
+}
+
+.brand-evga {
+    color: #ff7b4d;
+    font-weight: 700;
+}
+
+.brand-pny {
+    color: #f9a51a;
+    font-weight: 700;
+}
+
+.brand-palit {
+    color: #f0714a;
+    font-weight: 700;
+}
+
+.brand-inno3d {
+    color: #9fc73c;
+    font-weight: 700;
+}
+
+.brand-kfa2 {
+    color: #c9a227;
+    font-weight: 700;
+}
+
+.brand-colorful {
+    color: #ff6b6b;
+    font-weight: 700;
+}
+
+.brand-gainward {
+    color: #e05d5d;
+    font-weight: 700;
+}
+
+.brand-pcpartner {
+    color: #b0a8ff;
+    font-weight: 700;
+}
+
 /* Metric Bars */
 .metric-row {
     margin-bottom: 10px;
@@ -780,11 +840,19 @@ tr.af-sep td {
 }
 
 .gpu-metric-name {
-    flex: 0 0 34px;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     font-size: 0.72rem;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+}
+
+.gpu-metric-name i,
+.gpu-mini-label i {
+    font-size: 0.72rem;
 }
 
 .gpu-metric-val {
@@ -795,6 +863,13 @@ tr.af-sep td {
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
 }
+
+/* Color-coded value palette (row accents) */
+.gv-green  { color: #34d399; }
+.gv-amber  { color: #fbbf24; }
+.gv-red    { color: #f87171; }
+.gv-cyan   { color: #22d3ee; }
+.gv-indigo { color: #a5b4fc; }
 
 /* Applied OC / clocks / power mini-columns: fixed label + fixed value widths
    keep every cell aligned across rows regardless of bar or value changes */
@@ -807,11 +882,19 @@ tr.af-sep td {
 }
 
 .gpu-mini-label {
-    flex: 0 0 30px;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     font-size: 0.6rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
+}
+
+.gpu-mini-label i {
+    font-size: 0.62rem;
+    opacity: 0.85;
 }
 
 .gpu-mini-val {
@@ -822,6 +905,14 @@ tr.af-sep td {
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
 }
+
+.gpu-mini-val.gv-off { color: #fbbf24; }
+.gpu-mini-val.gv-lock,
+.gpu-mini-val.gv-mem { color: #22d3ee; }
+.gpu-mini-val.gv-pl { color: #f87171; }
+.gpu-mini-val.gv-clk { color: #a5b4fc; }
+
+.gv-pwr-draw { color: #f87171; }
 
 .gpu-mini-val.gv-off,
 .gpu-mini-val.gv-lock,

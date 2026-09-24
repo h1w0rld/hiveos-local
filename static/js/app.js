@@ -1532,6 +1532,7 @@ function renderGpus(gpus) {
     const amdOc = oc.amd || {};
     const at = (arr, i) => (arr || [])[i];
     const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '' && v !== '0') || '';
+    const ico = n => `<i class="bi ${n}"></i>`;
     const mini = (label, valHtml, valCls) => `
         <div class="gpu-mini-cell">
             <span class="gpu-mini-label">${label}</span>
@@ -1558,8 +1559,11 @@ function renderGpus(gpus) {
         };
         
         // Identity meta: real vendor, bus, VRAM, VBIOS
-        const meta = [gpu.subvendor || gpu.brand, gpu.bus_id,
-                      gpu.vram_mb ? gpu.vram_mb + ' MB' : '', gpu.vbios].filter(Boolean).join(' • ');
+        const vendor = gpu.subvendor || gpu.brand || '';
+        const metaText = [vendor, gpu.bus_id,
+                          gpu.vram_mb ? gpu.vram_mb + ' MB' : '', gpu.vbios].filter(Boolean).join(' • ');
+        const metaHtml = `<span class="brand-${vendor.toLowerCase()}">${vendor}</span>` +
+            metaText.slice(vendor.length);
         
         // Power: draw / enforced limit / (min–max range)
         const pwrDraw = Math.round(gpu.power);
@@ -1571,10 +1575,10 @@ function renderGpus(gpus) {
             <div class="gpu-list-row d-flex flex-wrap align-items-center gap-2">
                 <!-- GPU identity -->
                 <div class="gpu-list-id">
-                    <span class="badge bg-secondary bg-opacity-25 text-muted fw-bold font-monospace">GPU ${i}</span>
+                    <span class="badge bg-primary bg-opacity-25 text-primary fw-bold font-monospace">GPU ${i}</span>
                     <div class="gpu-list-name">
                         <div class="gpu-list-model" title="${gpu.model}">${gpu.model}</div>
-                        <div class="gpu-list-sub" title="${meta}">${meta}</div>
+                        <div class="gpu-list-sub" title="${metaText}">${metaHtml}</div>
                     </div>
                 </div>
 
@@ -1583,29 +1587,29 @@ function renderGpus(gpus) {
 
                 <!-- Temperature / Fan progress bars (bars flex within fixed columns) -->
                 <div class="gpu-inline-metric">
-                    <span class="gpu-metric-name">Temp</span>
+                    <span class="gpu-metric-name">${ico('bi-thermometer-half')}Temp</span>
                     <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
                         <div class="progress-bar progress-bar-glow-${tempGlow}" 
                              role="progressbar" style="width: ${gpu.temp}%" aria-valuenow="${gpu.temp}" aria-valuemin="0" aria-valuemax="100"></div>
                     </div>
-                    <span class="gpu-metric-val">${gpu.temp}°C</span>
+                    <span class="gpu-metric-val gv-${tempGlow === 'red' ? 'red' : (tempGlow === 'primary' ? 'amber' : 'green')}">${gpu.temp}°C</span>
                 </div>
                 <div class="gpu-inline-metric">
-                    <span class="gpu-metric-name">Fan</span>
+                    <span class="gpu-metric-name">${ico('bi-fan')}Fan</span>
                     <div class="progress flex-grow-1 bg-black bg-opacity-20" style="height: 6px;">
                         <div class="progress-bar progress-bar-glow-${fanGlow}" 
                              role="progressbar" style="width: ${gpu.fan}%" aria-valuenow="${gpu.fan}" aria-valuemin="0" aria-valuemax="100"></div>
                     </div>
-                    <span class="gpu-metric-val">${gpu.fan}%</span>
+                    <span class="gpu-metric-val gv-${fanGlow === 'red' ? 'red' : 'cyan'}">${gpu.fan}%</span>
                 </div>
 
                 <!-- Applied OC + clocks + power (fixed-width columns) -->
-                ${mini('Off', ocVal(offV, true), 'gv-off')}
-                ${mini('Lock', lockV ? ocVal(lockV) : dash, 'gv-lock')}
-                ${mini('Mem', memV ? ocVal(memV) : dash, 'gv-mem')}
-                ${mini('PL', plV ? plV : dash, 'gv-pl')}
-                ${mini('Clk', `${gpu.core_clock}/${gpu.mem_clock}`, 'gv-clk')}
-                ${mini('Pwr', `${pwrDraw}${pwrLimit}${pwrRange}`, 'gv-pwr')}
+                ${mini(`${ico('bi-arrow-up-circle')}Off`, ocVal(offV, true), 'gv-off')}
+                ${mini(`${ico('bi-lock-fill')}Lock`, lockV ? ocVal(lockV) : dash, 'gv-lock')}
+                ${mini(`${ico('bi-memory')}Mem`, memV ? ocVal(memV) : dash, 'gv-mem')}
+                ${mini(`${ico('bi-plug-fill')}PL`, plV ? plV : dash, 'gv-pl')}
+                ${mini(`${ico('bi-speedometer2')}Clk`, `${gpu.core_clock}/${gpu.mem_clock}`, 'gv-clk')}
+                ${mini(`${ico('bi-lightning-charge-fill')}Pwr`, `<span class="gv-pwr-draw">${pwrDraw}</span>${pwrLimit}${pwrRange}`, 'gv-pwr')}
 
                 <!-- Action -->
                 <button class="btn btn-sm btn-outline-primary gpu-list-actions" 
