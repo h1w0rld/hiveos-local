@@ -3,7 +3,7 @@ let activeOverclocks = {};
 let csrfToken = '';
 let activeHardwareTab = 'gpus';
 let activeDashTab = 'gpus';
-let ocAllOpen = false;           // all-GPU overclock card starts collapsed
+let ocAllOpen = false;           // all-GPU overclock dialog state (button highlight)
 let lastStatsData = null;
 let lastHugepagesEnabled = false;
 
@@ -55,11 +55,17 @@ window.fetch = async function(url, options = {}) {
     return response;
 };
 
-// All-GPU overclock card is visible only when opened from the toolbar
-// and only in the GPU Cards sub-view of the GPUs tab
+// All-GPU overclock dialog: opened from the toolbar, only in the GPU Cards
+// sub-view of the GPUs tab — switching away closes it
 function updateOcAllVisibility() {
-    const visible = ocAllOpen && activeDashTab === 'gpus' && activeHardwareTab === 'gpus';
-    document.getElementById('ocAllContainer').classList.toggle('d-none', !visible);
+    const inView = activeDashTab === 'gpus' && activeHardwareTab === 'gpus';
+    if (ocAllOpen && !inView) {
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('ocAllContainer')).hide();
+    }
+    updateOcAllToggleStyle();
+}
+
+function updateOcAllToggleStyle() {
     const btn = document.getElementById('ocAllToggleBtn');
     btn.classList.toggle('btn-primary', ocAllOpen);
     btn.classList.toggle('btn-outline-primary', !ocAllOpen);
@@ -367,10 +373,17 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('showGpusBtn').addEventListener('click', () => switchHardwareTab(true));
     document.getElementById('showIgpusBtn').addEventListener('click', () => switchHardwareTab(false));
 
-    // All-GPU overclock card: collapsed by default, opened from the toolbar button
+    // All-GPU overclock dialog: opens over the page from the toolbar button
     document.getElementById('ocAllToggleBtn').addEventListener('click', () => {
-        ocAllOpen = !ocAllOpen;
-        updateOcAllVisibility();
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('ocAllContainer')).show();
+    });
+    document.getElementById('ocAllContainer').addEventListener('show.bs.modal', () => {
+        ocAllOpen = true;
+        updateOcAllToggleStyle();
+    });
+    document.getElementById('ocAllContainer').addEventListener('hidden.bs.modal', () => {
+        ocAllOpen = false;
+        updateOcAllToggleStyle();
     });
 
     // Dashboard section tabs (GPUs / Wallets / Flight Sheets)
@@ -1953,6 +1966,7 @@ async function submitAllOverclock() {
         const data = await response.json();
         if (response.ok && data.success) {
             showToast(data.message, true);
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('ocAllContainer')).hide();
             window._ocAllDirty = false; // allow the next stats fetch to re-prefill saved values
             fetchStats();
         } else {
@@ -2340,6 +2354,11 @@ async function loadTuningSettings() {
                 unitPicker.value = String(mult);
                 const shown = parseFloat((khs / mult).toFixed(2));
                 document.getElementById('wdMinHashrate').value = shown > 0 ? shown : '';
+                const rst = parseInt(wdData.wd_restart_min, 10), rb = parseInt(wdData.wd_reboot_min, 10);
+                if (rst > 0 && rb > 0) {
+                    document.getElementById('wdHint').textContent =
+                        `On low hashrate: miner restart after ${rst} min, then rig reboot after ${rb} min.`;
+                }
             }
         }
         

@@ -3932,7 +3932,9 @@ def handle_watchdog():
             "wd_min_hashrate": eff_khs,
             "wd_miner": miner,
             "wd_algo": algo,
-            "wd_min_hashrate_khs": eff_khs
+            "wd_min_hashrate_khs": eff_khs,
+            "wd_restart_min": (rig_conf.get("WD_MINER") or "").strip(),
+            "wd_reboot_min": (rig_conf.get("WD_REBOOT") or "").strip()
         })
 
     # POST
@@ -3973,7 +3975,7 @@ def handle_watchdog():
         run_command("sudo /hive/bin/wd restart")
         return jsonify({
             "success": True,
-            "message": f"Watchdog armed for '{target}' at {khs} kH/s. Low hashrate: miner restart after WD_MINER min, rig reboot after WD_REBOOT min.",
+            "message": "Watchdog settings saved!",
             "wd_min_hashrate_khs": khs
         })
     else:
