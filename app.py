@@ -5782,14 +5782,160 @@ def check_update():
             "error": "Failed to verify version against GitHub."
         })
 
+_env_versions_cache = {"ts": 0.0, "driver": "", "hiveos": ""}
+
+def _detect_env_versions(max_age=60):
+    """(driver_version, hiveos_version) with a short in-process cache.
+
+    driver: first line of `nvidia-smi --query-gpu=driver_version` (e.g. 595.91.07)
+    hiveos: installed `hive` apt package version (e.g. 0.6-231, what selfupgrade moves)
+    """
+    now = time.time()
+    if _env_versions_cache["ts"] and now - _env_versions_cache["ts"] < max_age:
+        return _env_versions_cache["driver"], _env_versions_cache["hiveos"]
+    driver, hiveos = "", ""
+    out, _, _ = run_command("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1")
+    driver = out.strip().splitlines()[0].strip() if out.strip() else ""
+    out, _, _ = run_command("dpkg-query -W -f='${Version}' hive 2>/dev/null")
+    hiveos = out.strip()
+    _env_versions_cache.update({"ts": now, "driver": driver, "hiveos": hiveos})
+    return driver, hiveos
+
 @app.route('/api/version', methods=['GET'])
 def api_version():
     """Lightweight per-rig version report (no GitHub round-trip).
 
     Used by the Cluster Update card: self calls it directly, peers through
-    the /api/remote/<id> SSH proxy.
+    the /api/remote/<id> SSH proxy. `version` is this dashboard's release,
+    `driver`/`hiveos` feed the update-form component switch (GPU Drivers /
+    Hive OS rows).
     """
-    return jsonify({"success": True, "version": VERSION})
+    driver, hiveos = _detect_env_versions()
+    return jsonify({"success": True, "version": VERSION, "driver": driver, "hiveos": hiveos})
+
+# ---------------- Component update jobs (GPU drivers / Hive OS) ----------------
+# Long-running system updates run in the background (driver download alone can
+# take 10+ minutes): POST /api/update/pull with component != 'panel' starts a
+# nohup job and returns immediately; GET /api/update/status reports progress.
+# Job state is derivable from the persisted status file (pid) + the job log
+# (UPDATE_EXIT_CODE marker), so it survives a panel restart mid-job.
+
+UPDATE_STATUS_PATH = os.path.join(HIVE_CONFIG_DIR, "update_status.json")
+UPDATE_LOG_DIR = "/var/log"
+UPDATE_COMPONENT_CMDS = {
+    # nvidia-driver-update stops the miner itself (nvstop) and restarts it after
+    "drivers": ("if ! command -v nvidia-smi >/dev/null 2>&1; then "
+                "echo 'No NVIDIA GPUs detected on this rig - driver update is not applicable'; exit 3; fi; "
+                "sudo /hive/sbin/nvidia-driver-update"),
+    "hiveos": "sudo /hive/bin/selfupgrade",
+}
+UPDATE_COMPONENT_LABELS = {
+    "drivers": "NVIDIA driver update",
+    "hiveos": "Hive OS upgrade",
+}
+
+def _update_log_path(component):
+    return os.path.join(UPDATE_LOG_DIR, f"hive-local-update-{component}.log")
+
+def _update_status_read():
+    try:
+        with open(UPDATE_STATUS_PATH) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def _update_status_write(data):
+    tmp = UPDATE_STATUS_PATH + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, UPDATE_STATUS_PATH)
+    except OSError:
+        pass
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+def _read_log_tail(path, limit=3000):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - limit * 4))
+            return fh.read().decode("utf-8", "replace")[-limit:]
+    except OSError:
+        return ""
+
+def _update_exit_code(log_text):
+    """Last UPDATE_EXIT_CODE:<n> marker written by the job wrapper."""
+    for line in reversed(log_text.splitlines()):
+        line = line.strip()
+        if line.startswith("UPDATE_EXIT_CODE:"):
+            try:
+                return int(line.split(":", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+def _update_job_state(component):
+    entry = _update_status_read().get(component)
+    if not isinstance(entry, dict) or not entry.get("pid"):
+        return None
+    state = {
+        "component": component,
+        "pid": entry.get("pid"),
+        "started_at": entry.get("started_at"),
+        "finished_at": entry.get("finished_at"),
+    }
+    if _pid_alive(entry.get("pid")):
+        state.update({"running": True, "ok": None, "exit_code": None,
+                      "log_tail": _read_log_tail(_update_log_path(component), 1500)})
+        return state
+    log_text = _read_log_tail(_update_log_path(component))
+    code = _update_exit_code(log_text)
+    state.update({"running": False, "exit_code": code, "ok": code == 0,
+                  "log_tail": log_text})
+    return state
+
+def _update_job_start(component):
+    """Start a background update job; returns its state, or None if busy."""
+    current = _update_job_state(component)
+    if current and current.get("running"):
+        return None
+    log_path = _update_log_path(component)
+    try:
+        open(log_path, "w").close()
+    except OSError:
+        pass
+    inner = "{cmd} > {log} 2>&1; rc=$?; echo UPDATE_EXIT_CODE:$rc >> {log}".format(
+        cmd=UPDATE_COMPONENT_CMDS[component], log=log_path)
+    try:
+        proc = subprocess.Popen(["bash", "-c", inner], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return False
+    status = _update_status_read()
+    status[component] = {"pid": proc.pid, "started_at": int(time.time())}
+    _update_status_write(status)
+    return _update_job_state(component)
+
+@app.route('/api/update/status', methods=['GET'])
+def update_job_status():
+    """Background update job progress (self direct, peers via SSH proxy)."""
+    states = {}
+    for component in UPDATE_COMPONENT_CMDS:
+        state = _update_job_state(component)
+        if state:
+            states[component] = state
+    return jsonify({"success": True, "jobs": states})
 
 GITHUB_TARBALL_URL = "https://codeload.github.com/h1w0rld/hiveos-local/tar.gz/refs/heads/main"
 
@@ -5838,7 +5984,27 @@ def pull_update():
         logging.warning(f"Failed update password verification attempt from IP: {request.remote_addr}")
         return jsonify({"success": False, "message": "Invalid password verification. Update aborted."}), 401
 
-    logging.info(f"Dashboard update authorized with password by IP: {request.remote_addr}")
+    component = str(data.get('component') or 'panel').strip()
+    if component not in ('panel',) + tuple(UPDATE_COMPONENT_CMDS):
+        return jsonify({"success": False, "message": "Unknown update component."}), 400
+
+    logging.info(f"Dashboard update authorized with password by IP: {request.remote_addr} (component={component})")
+
+    # Drivers / Hive OS: long background jobs — start and return immediately.
+    if component in UPDATE_COMPONENT_CMDS:
+        state = _update_job_start(component)
+        if state is None:
+            label = UPDATE_COMPONENT_LABELS[component]
+            return jsonify({"success": False,
+                            "message": f"{label} is already running on this rig."}), 409
+        if state is False:
+            return jsonify({"success": False,
+                            "message": "Failed to start the update job."}), 500
+        label = UPDATE_COMPONENT_LABELS[component]
+        logging.info(f"{label} started in background (pid {state.get('pid')})")
+        return jsonify({"success": True, "component": component, "async": True,
+                        "message": f"{label} started! Track progress in the Status column."})
+
     cwd = os.getcwd()
 
     updated = False
