@@ -2305,7 +2305,6 @@ function renderCuRows() {
     // meaningful for the Panel component only
     const badge = document.getElementById('cuLatestBadge');
     if (badge) {
-        badge.classList.toggle('d-none', cuComponent !== 'panel');
         if (cuLatest) {
             badge.textContent = 'latest v' + cuLatest;
             badge.className = 'badge bg-success-glow border border-success text-success small';
@@ -2315,6 +2314,7 @@ function renderCuRows() {
             badge.className = 'badge bg-warning-glow border border-warning text-warning small';
             badge.title = 'GitHub unreachable — cannot determine the latest release';
         }
+        badge.classList.toggle('d-none', cuComponent !== 'panel');
     }
     const vTh = document.getElementById('cuVersionTh');
     if (vTh) {
