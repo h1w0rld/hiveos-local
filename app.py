@@ -5801,17 +5801,56 @@ def _detect_env_versions(max_age=60):
     _env_versions_cache.update({"ts": now, "driver": driver, "hiveos": hiveos})
     return driver, hiveos
 
+_latest_env_cache = {"ts": 0.0, "driver": "", "hiveos": ""}
+
+def _detect_latest_versions(max_age=600):
+    """(driver_latest, hiveos_latest) — versions an update would move to.
+
+    driver: newest version offered by `nvidia-driver-update --list` (network
+    fetch of the hive driver index, so cached for 10 minutes; the rig has no
+    NVIDIA "stable" marker — max of all listed branches is the freshest).
+    hiveos: apt candidate of the `hive` package (from the rig's current apt
+    lists; selfupgrade refreshes them during the actual upgrade).
+    """
+    now = time.time()
+    if _latest_env_cache["ts"] and now - _latest_env_cache["ts"] < max_age:
+        return _latest_env_cache["driver"], _latest_env_cache["hiveos"]
+    driver_latest, hiveos_latest = "", ""
+
+    def _vt(v):
+        parts = re.findall(r"\d+", v or "")
+        return tuple(int(p) for p in parts[:4]) if parts else ()
+
+    out, _, _ = run_command("sudo /hive/sbin/nvidia-driver-update --list 2>/dev/null")
+    if out:
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        tokens = re.findall(r"\b\d{3,4}\.\d+(?:\.\d+)*\b", plain)
+        if tokens:
+            driver_latest = max(tokens, key=_vt)
+    out, _, _ = run_command("apt-cache policy hive 2>/dev/null")
+    m = re.search(r"Candidate:\s*(\S+)", out or "")
+    if m and m.group(1) != "(none)":
+        hiveos_latest = m.group(1)
+    _latest_env_cache.update({"ts": now, "driver": driver_latest, "hiveos": hiveos_latest})
+    return driver_latest, hiveos_latest
+
 @app.route('/api/version', methods=['GET'])
 def api_version():
     """Lightweight per-rig version report (no GitHub round-trip).
 
     Used by the Cluster Update card: self calls it directly, peers through
     the /api/remote/<id> SSH proxy. `version` is this dashboard's release,
-    `driver`/`hiveos` feed the update-form component switch (GPU Drivers /
-    Hive OS rows).
+    `driver`/`hiveos` (+ their `_latest` counterparts) feed the update-form
+    component switch (GPU Drivers / Hive OS rows).
     """
     driver, hiveos = _detect_env_versions()
-    return jsonify({"success": True, "version": VERSION, "driver": driver, "hiveos": hiveos})
+    driver_latest, hiveos_latest = _detect_latest_versions()
+    return jsonify({
+        "success": True,
+        "version": VERSION,
+        "driver": driver, "driver_latest": driver_latest,
+        "hiveos": hiveos, "hiveos_latest": hiveos_latest,
+    })
 
 # ---------------- Component update jobs (GPU drivers / Hive OS) ----------------
 # Long-running system updates run in the background (driver download alone can
