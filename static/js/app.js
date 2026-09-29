@@ -579,6 +579,9 @@ document.addEventListener('DOMContentLoaded', function() {
         renderCuRows();
     });
     document.getElementById('cuUpdateBtn').addEventListener('click', runClusterUpdate);
+    document.querySelectorAll('#cuComponentGroup [data-cu-component]').forEach(btn => {
+        btn.addEventListener('click', () => cuSetComponent(btn.dataset.cuComponent));
+    });
     document.getElementById('cuTbody').addEventListener('change', (e) => {
         const box = e.target.closest('.cu-rig-check');
         if (!box) return;
@@ -2021,11 +2024,25 @@ async function checkUpdate(isManual = false) {
 // rig always updates LAST because its restart kills this very page.
 
 let cuLatest = null;        // version published on GitHub (null = unknown)
-let cuRigInfo = {};         // rigId -> {version, err, phase, message}
+let cuRigInfo = {};         // rigId -> {version, driver, hiveos, err, phase, message}
 let cuChecked = new Set();  // rig ids ticked for update
 let cuBusy = false;         // an update run is in progress
 let cuRunId = 0;            // guards against stale async refreshes
 let cuLoadedOnce = false;   // a refresh landed with a live session
+let cuComponent = 'panel';  // what to update: panel | drivers | hiveos
+let cuJobs = {};            // rigId -> background job state ({running, ok, exit_code, log_tail})
+
+const CU_COMPONENTS = ['panel', 'drivers', 'hiveos'];
+const CU_COMPONENT_HINTS = {
+    panel: 'Tick rigs to update — the whole cluster or a selection; this rig restarts last.',
+    drivers: 'Runs nvidia-driver-update on the selected rigs — the miner pauses and restarts automatically (10-20 min per rig).',
+    hiveos: 'Runs Hive OS selfupgrade (apt) on the selected rigs — takes several minutes; reboot the rig afterwards if the kernel was updated.'
+};
+const CU_COMPONENT_LABELS = {
+    panel: 'Dashboard update',
+    drivers: 'NVIDIA driver update',
+    hiveos: 'Hive OS upgrade'
+};
 
 const cuSleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -2068,7 +2085,28 @@ async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!data.success || !data.version) throw new Error('Invalid payload');
-        return data.version;
+        return { version: data.version, driver: data.driver || '', hiveos: data.hiveos || '' };
+    } catch (e) {
+        if (e && e.name === 'AbortError') return { err: 'Timed out' };
+        return { err: String(e.message || e) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Background job state of the selected component on one rig
+async function cuFetchJob(rigId, isSelf, timeoutMs = 15000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const url = isSelf ? '/api/update/status'
+            : '/api/remote/' + encodeURIComponent(rigId) + '/api/update/status';
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (res.status === 401) return { err: 'HTTP 401' };
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data.success) throw new Error('Invalid payload');
+        return (data.jobs && data.jobs[cuComponent]) || null;
     } catch (e) {
         if (e && e.name === 'AbortError') return { err: 'Timed out' };
         return { err: String(e.message || e) };
@@ -2082,12 +2120,30 @@ function cuTabVisible() {
     return activeView === 'dashboard' && activeDashTab === 'updates';
 }
 
+function cuSetComponent(component) {
+    if (!CU_COMPONENTS.includes(component) || cuComponent === component) return;
+    cuComponent = component;
+    document.querySelectorAll('#cuComponentGroup [data-cu-component]').forEach(b => {
+        const active = b.dataset.cuComponent === component;
+        b.classList.toggle('active', active);
+        b.classList.toggle('btn-primary', active);
+        b.classList.toggle('btn-outline-primary', !active);
+    });
+    const hint = document.getElementById('cuHint');
+    if (hint) hint.textContent = CU_COMPONENT_HINTS[component] || '';
+    renderCuRows();
+    if (cuTabVisible() && !cuBusy) refreshClusterUpdate();
+}
+
 async function refreshClusterUpdate() {
     if (!cuTabVisible() || cuBusy) return;
     const runId = ++cuRunId;
     const rigs = (clusterData && clusterData.rigs) || [];
     renderCuRows();
     const jobs = [cuFetchLatest()].concat(rigs.map(r => cuFetchVersion(r.id, r.is_self)));
+    if (cuComponent !== 'panel') {
+        jobs.push(...rigs.map(r => cuFetchJob(r.id, r.is_self)));
+    }
     const results = await Promise.all(jobs);
     if (runId !== cuRunId) return; // a newer refresh/update superseded us
     // A 401 anywhere means the session is gone — stop without caching garbage,
@@ -2100,37 +2156,83 @@ async function refreshClusterUpdate() {
     rigs.forEach((r, i) => {
         const res = results[i + 1];
         const prev = cuRigInfo[r.id] || {};
-        if (typeof res === 'string') {
-            cuRigInfo[r.id] = { version: res, err: '', phase: prev.phase, message: prev.message };
+        if (res && res.version) {
+            cuRigInfo[r.id] = {
+                version: res.version, driver: res.driver || '', hiveos: res.hiveos || '',
+                err: '', phase: prev.phase, message: prev.message
+            };
         } else {
             // keep versions captured during an update run (panel restarts fail loudly)
             cuRigInfo[r.id] = {
-                version: prev.version || null,
+                version: prev.version || null, driver: prev.driver || '', hiveos: prev.hiveos || '',
                 err: (res && res.err) || 'Unreachable',
                 phase: prev.phase, message: prev.message
             };
+        }
+        if (cuComponent !== 'panel') {
+            const job = results[1 + rigs.length + i];
+            cuJobs[r.id] = (job && !job.err) ? job : null;
         }
     });
     cuLoadedOnce = true;
     renderCuRows();
 }
 
+function cuComponentVersion(rig) {
+    const info = cuRigInfo[rig.id] || {};
+    if (cuComponent === 'drivers') return info.driver || '';
+    if (cuComponent === 'hiveos') return info.hiveos || '';
+    return info.version || null;
+}
+
 function cuVersionBadgeHtml(rig) {
     const info = cuRigInfo[rig.id] || {};
-    const v = info.version;
+    const v = cuComponentVersion(rig);
     if (!v) {
+        const what = cuComponent === 'panel' ? 'Version unknown'
+            : cuComponent === 'drivers' ? 'Driver version unknown (no NVIDIA GPU?)'
+            : 'Hive OS version unknown';
         return '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
-            escapeHtml(info.err || 'Version unknown') + '">—</span>';
+            escapeHtml(info.err || what) + '">—</span>';
     }
-    const outdated = cuLatest && verCompare(v, cuLatest) < 0;
+    const outdated = cuComponent === 'panel' && cuLatest && verCompare(v, cuLatest) < 0;
     const cls = outdated
         ? 'bg-warning-glow border border-warning text-warning'
         : 'bg-success-glow border border-success text-success';
-    return '<span class="badge ' + cls + ' cu-version-badge" title="Dashboard version on this rig">v' +
+    const title = cuComponent === 'panel' ? 'Dashboard version on this rig'
+        : cuComponent === 'drivers' ? 'NVIDIA driver version on this rig'
+        : 'Hive OS package version on this rig';
+    return '<span class="badge ' + cls + ' cu-version-badge" title="' + title + '">v' +
         escapeHtml(v) + '</span>';
 }
 
+function cuJobStatusHtml(rig) {
+    const job = cuJobs[rig.id];
+    if (job && job.running) {
+        return '<span class="text-warning"><i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Updating...</span>';
+    }
+    if (job && job.ok === true) {
+        return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Done</span>';
+    }
+    if (job && job.ok === false) {
+        const tail = (job.log_tail || '').slice(-600);
+        return '<span class="text-danger" title="' + escapeHtml(tail || ('exit code ' + job.exit_code)) +
+            '"><i class="bi bi-x-circle-fill me-1"></i>Failed' +
+            (job.exit_code != null ? ' (exit ' + job.exit_code + ')' : '') + '</span>';
+    }
+    if (job && job.err) {
+        return '<span class="text-danger" title="' + escapeHtml(job.err) + '"><i class="bi bi-plug me-1"></i>Unreachable</span>';
+    }
+    return '<span class="text-muted"><i class="bi bi-dash-circle me-1"></i>Idle</span>';
+}
+
 function cuStatusHtml(rig) {
+    if (cuComponent !== 'panel') {
+        if (!rig.is_self && !rig.online) {
+            return '<span class="text-danger" title="' + escapeHtml(rig.last_error || '') + '"><i class="bi bi-plug me-1"></i>Offline</span>';
+        }
+        return cuJobStatusHtml(rig);
+    }
     const info = cuRigInfo[rig.id] || {};
     if (info.phase === 'updating') {
         return '<span class="text-warning"><i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Updating...</span>';
@@ -2218,6 +2320,7 @@ function cuPaintUpdateButton() {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-arrow-down-circle-fill"></i> Update';
     }
+    btn.title = CU_COMPONENT_HINTS[cuComponent] || '';
 }
 
 // One rig: POST update/pull (self directly, peers through the SSH proxy),
@@ -2267,6 +2370,86 @@ async function cuUpdateOneRig(rig, password) {
     return false;
 }
 
+// Component runs (drivers / hiveos): start the background job on every selected
+// rig (self direct, peers through the SSH proxy — the panel does not restart,
+// so everything fires in parallel), then poll each rig's /api/update/status
+// until the job finishes or the deadline hits.
+async function cuRunComponentUpdate(password) {
+    const label = CU_COMPONENT_LABELS[cuComponent];
+    const all = (clusterData && clusterData.rigs) || [];
+    const targets = all.filter(r => cuChecked.has(r.id) && (r.is_self || r.online));
+    if (!targets.length) {
+        showToast('Select at least one online rig.', false);
+        return;
+    }
+    const names = targets.map(r => r.name || r.id).join(', ');
+    if (cuComponent === 'drivers' &&
+        !confirm('Start NVIDIA driver update on ' + targets.length + ' rig(s): ' + names +
+            '? Mining pauses on each rig while the driver installs and the miner restarts' +
+            ' automatically afterwards (10-20 minutes). Do not reboot the rigs meanwhile.')) {
+        return;
+    }
+    if (cuComponent === 'hiveos' &&
+        !confirm('Start Hive OS upgrade (selfupgrade) on ' + targets.length + ' rig(s): ' + names +
+            '? This updates system packages over apt and takes several minutes.' +
+            ' Mining continues; reboot the rigs afterwards if the kernel was updated.')) {
+        return;
+    }
+
+    cuBusy = true;
+    cuRunId++;
+    targets.forEach(r => { cuJobs[r.id] = { running: true, ok: null, exit_code: null, log_tail: '' }; });
+    renderCuRows();
+
+    const postUrl = (r) => r.is_self ? '/api/update/pull'
+        : '/api/remote/' + encodeURIComponent(r.id) + '/api/update/pull';
+    const startResults = await Promise.all(targets.map(async (r) => {
+        try {
+            const res = await fetch(postUrl(r), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ password: password, component: cuComponent })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) {
+                cuJobs[r.id] = { running: false, ok: false, exit_code: null,
+                                 log_tail: '', err: data.message || ('HTTP ' + res.status) };
+                return false;
+            }
+            return true;
+        } catch (e) {
+            cuJobs[r.id] = { running: false, ok: false, exit_code: null, log_tail: '', err: 'Network error' };
+            return false;
+        }
+    }));
+    renderCuRows();
+
+    // Poll statuses; failed-to-start rigs are already painted as failed
+    const deadline = Date.now() + 25 * 60 * 1000;
+    const pollTargets = targets.filter((r, i) => startResults[i]);
+    while (pollTargets.length && Date.now() < deadline) {
+        await cuSleep(4000);
+        const states = await Promise.all(pollTargets.map(r => cuFetchJob(r.id, r.is_self, 8000)));
+        pollTargets.forEach((r, i) => {
+            const st = states[i];
+            if (st && !st.err) cuJobs[r.id] = st;
+            else if (st && st.err) cuJobs[r.id].unreachable = true;
+        });
+        renderCuRows();
+        if (states.every(st => st && !st.err && st.running === false)) break;
+    }
+
+    const okCount = targets.filter(r => cuJobs[r.id] && cuJobs[r.id].ok === true).length;
+    const failCount = targets.length - okCount;
+    cuBusy = false;
+    document.getElementById('cuPassword').value = '';
+    renderCuRows();
+    showToast(label + ' finished: ' + okCount + ' ok' +
+        (failCount ? ', ' + failCount + ' failed (see Status tooltip for the log)' : '') + '.',
+        failCount === 0);
+    refreshClusterUpdate(); // repaint fresh driver/hiveos versions
+}
+
 async function runClusterUpdate() {
     if (cuBusy) return;
     const password = document.getElementById('cuPassword').value.trim();
@@ -2278,6 +2461,10 @@ async function runClusterUpdate() {
     }
     if (!password) {
         showToast('Please enter your access password to confirm the update.', false);
+        return;
+    }
+    if (cuComponent !== 'panel') {
+        cuRunComponentUpdate(password);
         return;
     }
     if (!cuLatest) {
@@ -5281,11 +5468,16 @@ function showDashTab(tab) {
     document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
     document.getElementById('statsTabContainer').classList.toggle('d-none', tab !== 'stats');
     document.getElementById('updatesTabContainer').classList.toggle('d-none', tab !== 'updates');
-    // per-tab toolbar controls share the tab-strip line (right side)
+    // per-tab action toolbar on its own line under the tab strip
+    let tbVisible = false;
     ['gpus', 'fans', 'wallets', 'fsheets', 'presets', 'stats', 'updates'].forEach(t => {
         const el = document.getElementById(t + 'TabControls');
-        if (el) el.classList.toggle('d-none', tab !== t);
+        if (!el) return;
+        el.classList.toggle('d-none', tab !== t);
+        if (tab === t) tbVisible = true;
     });
+    const tbWrap = document.getElementById('dashTabToolbar');
+    if (tbWrap) tbWrap.classList.toggle('d-none', !tbVisible);
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
     if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }

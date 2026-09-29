@@ -512,7 +512,9 @@
                         <i class="bi bi-cloud-arrow-down-fill me-1"></i> Updates
                     </button>
                 </div>
-                <div class="d-flex flex-wrap align-items-center gap-2" id="dashTabToolbar">
+            </div>
+            <!-- Per-tab action toolbar: its own line under the tab strip, right-aligned -->
+            <div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mb-2" id="dashTabToolbar">
                     <div class="d-flex align-items-center gap-2" id="gpusTabControls">
                         <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
                             <i class="bi bi-share-fill"></i>Share
@@ -1058,6 +1060,17 @@
                                 <i class="bi bi-cloud-arrow-down-fill text-warning"></i> Cluster Update
                                 <span id="cuLatestBadge" class="badge bg-secondary-subtle text-secondary-emphasis small d-none" title="Latest release published on GitHub"></span>
                             </h2>
+                            <div class="btn-group btn-group-sm" role="group" id="cuComponentGroup" aria-label="What to update">
+                                <button type="button" class="btn btn-primary active" data-cu-component="panel" title="This dashboard's own software (pulls the latest release from GitHub)">
+                                    <i class="bi bi-grid-1x2-fill me-1"></i>Panel
+                                </button>
+                                <button type="button" class="btn btn-outline-primary" data-cu-component="drivers" title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">
+                                    <i class="bi bi-gpu-card me-1"></i>GPU Drivers
+                                </button>
+                                <button type="button" class="btn btn-outline-primary" data-cu-component="hiveos" title="Hive OS system packages via selfupgrade (apt)">
+                                    <i class="bi bi-motherboard me-1"></i>Hive OS
+                                </button>
+                            </div>
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
