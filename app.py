@@ -3912,6 +3912,8 @@ def _to_float(v):
 
 @app.route('/api/watchdog', methods=['GET', 'POST'])
 def handle_watchdog():
+    # wd_min_hashrate is canonical kH/s in both directions; the UI keeps a unit
+    # selector (kH/s, MH/s, GH/s, TH/s) and converts on its side.
     if request.method == 'GET':
         rig_conf = parse_shell_config(RIG_CONF_PATH)
         maps = _wd_threshold_maps(rig_conf)
@@ -3923,14 +3925,11 @@ def handle_watchdog():
         if eff_khs is None:
             # legacy flat value was written by old panel versions in MH/s form units
             legacy = _to_float(rig_conf.get("WD_MIN_HASHRATE", ""))
-            eff_mhs = legacy if legacy is not None else 0.0
-            eff_khs = None
-        else:
-            eff_mhs = eff_khs / 1000.0
+            eff_khs = legacy * 1000.0 if legacy is not None else 0.0
         return jsonify({
             "success": True,
             "wd_enabled": rig_conf.get("WD_ENABLED", "0"),
-            "wd_min_hashrate": eff_mhs,
+            "wd_min_hashrate": eff_khs,
             "wd_miner": miner,
             "wd_algo": algo,
             "wd_min_hashrate_khs": eff_khs
@@ -3942,18 +3941,18 @@ def handle_watchdog():
         return jsonify({"success": False, "message": "Invalid payload"}), 400
 
     enabled = str(data.get("wd_enabled", "0")).strip()
-    mhs = _to_float(data.get("wd_min_hashrate", "0"))
+    khs = _to_float(data.get("wd_min_hashrate", "0"))
 
     if enabled not in ["0", "1"]:
         return jsonify({"success": False, "message": "wd_enabled must be 0 or 1."}), 400
-    if mhs is None or mhs < 0:
+    if khs is None or khs < 0:
         return jsonify({"success": False, "message": "Min hashrate must be a valid number."}), 400
 
     rig_conf = parse_shell_config(RIG_CONF_PATH)
     miner = str(rig_conf.get("MINER") or "").strip()
     algo = _wd_current_algo()
     maps = _wd_threshold_maps(rig_conf)
-    khs = int(mhs * 1000)
+    khs = int(khs)
 
     if miner:
         maps["WD_MINHASHES"][miner] = khs

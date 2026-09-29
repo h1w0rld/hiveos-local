@@ -1013,8 +1013,16 @@
                                     </select>
                                 </div>
                                 <div class="col-sm-5">
-                                    <label class="form-label small fw-semibold text-muted mb-1">Min Hashrate (MH/s)</label>
-                                    <input type="number" step="0.1" class="form-control form-control-sm bg-dark-input text-white border-secondary-subtle" id="wdMinHashrate" placeholder="e.g. 150" required>
+                                    <label class="form-label small fw-semibold text-muted mb-1">Min Hashrate</label>
+                                    <div class="input-group input-group-sm">
+                                        <input type="number" step="any" class="form-control bg-dark-input text-white border-secondary-subtle" id="wdMinHashrate" placeholder="e.g. 300" required>
+                                        <select class="form-select bg-dark-input text-white border-secondary-subtle" id="wdUnit" style="max-width: 90px;" title="Hashrate unit">
+                                            <option value="1">kH/s</option>
+                                            <option value="1000" selected>MH/s</option>
+                                            <option value="1000000">GH/s</option>
+                                            <option value="1000000000">TH/s</option>
+                                        </select>
+                                    </div>
                                 </div>
                                 <div class="col-sm-3">
                                     <button type="submit" class="btn btn-sm btn-warning w-100 py-2 fw-semibold">Save</button>
