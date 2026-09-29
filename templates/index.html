@@ -513,6 +513,12 @@
                     </button>
                 </div>
                 <div class="d-flex align-items-center gap-2" id="gpusTabControls">
+                    <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
+                        <i class="bi bi-share-fill"></i>Share
+                    </button>
+                    <button id="ocAllToggleBtn" type="button" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Show / hide the all-GPU overclock form">
+                        <i class="bi bi-sliders"></i> Set settings
+                    </button>
                     <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
                         <button id="showGpusBtn" type="button" class="btn btn-sm btn-primary active">
                             <i class="bi bi-gpu-card me-1"></i> GPU Cards
@@ -541,9 +547,6 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-sliders text-primary"></i> Set settings for all GPUs
                             </h2>
-                            <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold me-2" title="Share these overclock settings with other rigs">
-                                <i class="bi bi-share-fill me-1"></i>Share
-                            </button>
                             <button id="ocAllApplyBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Apply the filled values to every NVIDIA GPU (empty fields are left unchanged)">Apply</button>
                         </div>
                         <div class="row g-2">

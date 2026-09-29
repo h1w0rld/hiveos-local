@@ -3,6 +3,7 @@ let activeOverclocks = {};
 let csrfToken = '';
 let activeHardwareTab = 'gpus';
 let activeDashTab = 'gpus';
+let ocAllOpen = false;           // all-GPU overclock card starts collapsed
 let lastStatsData = null;
 let lastHugepagesEnabled = false;
 
@@ -54,6 +55,17 @@ window.fetch = async function(url, options = {}) {
     return response;
 };
 
+// All-GPU overclock card is visible only when opened from the toolbar
+// and only in the GPU Cards sub-view of the GPUs tab
+function updateOcAllVisibility() {
+    const visible = ocAllOpen && activeDashTab === 'gpus' && activeHardwareTab === 'gpus';
+    document.getElementById('ocAllContainer').classList.toggle('d-none', !visible);
+    const btn = document.getElementById('ocAllToggleBtn');
+    btn.classList.toggle('btn-primary', ocAllOpen);
+    btn.classList.toggle('btn-outline-primary', !ocAllOpen);
+    btn.classList.toggle('active', ocAllOpen);
+}
+
 // Toggle between discrete GPU cards and CPU integrated graphics tab
 function switchHardwareTab(showGpus) {
     const gpuContainer = document.getElementById('gpuContainer');
@@ -75,7 +87,10 @@ function switchHardwareTab(showGpus) {
     igpusBtn.classList.toggle('btn-primary', !showGpus);
     igpusBtn.classList.toggle('btn-outline-primary', showGpus);
     igpusBtn.classList.toggle('active', !showGpus);
-    
+
+    // the all-GPU OC card belongs to the GPU Cards sub-view only
+    updateOcAllVisibility();
+
     if (lastStatsData) {
         updateHardwareStatBoxes(lastStatsData);
     }
@@ -351,6 +366,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Hardware view switch: discrete GPUs vs CPU integrated graphics
     document.getElementById('showGpusBtn').addEventListener('click', () => switchHardwareTab(true));
     document.getElementById('showIgpusBtn').addEventListener('click', () => switchHardwareTab(false));
+
+    // All-GPU overclock card: collapsed by default, opened from the toolbar button
+    document.getElementById('ocAllToggleBtn').addEventListener('click', () => {
+        ocAllOpen = !ocAllOpen;
+        updateOcAllVisibility();
+    });
 
     // Dashboard section tabs (GPUs / Wallets / Flight Sheets)
     document.getElementById('dashTabGpusBtn').addEventListener('click', () => showDashTab('gpus'));
@@ -5233,7 +5254,7 @@ function showDashTab(tab) {
     document.getElementById('igpuContainer').classList.toggle('d-none', !isIgpu);
     // CPU Mining card lives in the CPU iGPU sub-view
     document.getElementById('cpuCardContainer').classList.toggle('d-none', !isIgpu);
-    document.getElementById('ocAllContainer').classList.toggle('d-none', !isGpusCards);
+    updateOcAllVisibility();
     document.getElementById('walletsTabContainer').classList.toggle('d-none', tab !== 'wallets');
     document.getElementById('fansTabContainer').classList.toggle('d-none', tab !== 'fans');
     document.getElementById('presetsTabContainer').classList.toggle('d-none', tab !== 'presets');
