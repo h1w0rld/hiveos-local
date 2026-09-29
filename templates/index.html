@@ -512,30 +512,124 @@
                         <i class="bi bi-cloud-arrow-down-fill me-1"></i> Updates
                     </button>
                 </div>
-                <div class="d-flex align-items-center gap-2" id="gpusTabControls">
-                    <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
-                        <i class="bi bi-share-fill"></i>Share
-                    </button>
-                    <button id="ocAllToggleBtn" type="button" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Show / hide the all-GPU overclock form">
-                        <i class="bi bi-sliders"></i> Set settings
-                    </button>
-                    <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
-                        <button id="showGpusBtn" type="button" class="btn btn-sm btn-primary active">
-                            <i class="bi bi-gpu-card me-1"></i> GPU Cards
+                <div class="d-flex flex-wrap align-items-center gap-2" id="dashTabToolbar">
+                    <div class="d-flex align-items-center gap-2" id="gpusTabControls">
+                        <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
+                            <i class="bi bi-share-fill"></i>Share
                         </button>
-                        <button id="showIgpusBtn" type="button" class="btn btn-sm btn-outline-primary">
-                            <i class="bi bi-motherboard me-1"></i> CPU iGPU
+                        <button id="ocAllToggleBtn" type="button" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Show / hide the all-GPU overclock form">
+                            <i class="bi bi-sliders"></i> Set settings
+                        </button>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
+                            <button id="showGpusBtn" type="button" class="btn btn-sm btn-primary active">
+                                <i class="bi bi-gpu-card me-1"></i> GPU Cards
+                            </button>
+                            <button id="showIgpusBtn" type="button" class="btn btn-sm btn-outline-primary">
+                                <i class="bi bi-motherboard me-1"></i> CPU iGPU
+                            </button>
+                        </div>
+                        <div class="btn-group" role="group">
+                            <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="stats"></ul>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="fansTabControls">
+                        <button id="afShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share fan settings with other rigs">
+                            <i class="bi bi-share-fill me-1"></i>Share
+                        </button>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Fan settings view mode">
+                            <button type="button" id="afTableModeBtn" class="btn btn-primary" title="Compact table mode">
+                                <i class="bi bi-table me-1"></i>Table mode
+                            </button>
+                            <button type="button" id="afAdvancedModeBtn" class="btn btn-outline-primary" title="Space-separated lists per setting">
+                                <i class="bi bi-list-ul me-1"></i>Advanced mode
+                            </button>
+                        </div>
+                        <div class="btn-group" role="group">
+                            <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload extra fans (8MK_NET controller + motherboard fans)">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="fans"></ul>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="walletsTabControls">
+                        <button id="walletShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share wallets with other rigs">
+                            <i class="bi bi-share-fill me-1"></i>Share
+                        </button>
+                        <button id="walletAddBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add a wallet to the library">
+                            <i class="bi bi-plus-lg me-1"></i>Add
+                        </button>
+                        <div class="btn-group" role="group">
+                            <button id="walletsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload wallet list">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="wallets"></ul>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="fsheetsTabControls">
+                        <button id="fsShareBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Share flight sheets with other rigs">
+                            <i class="bi bi-share-fill"></i> Share
+                        </button>
+                        <button id="fsAddSheetBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Create a new flight sheet">
+                            <i class="bi bi-plus-lg"></i> Add flight sheet
+                        </button>
+                        <button id="importFsheetsBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Import flight sheets from JSON">
+                            <i class="bi bi-box-arrow-in-down"></i> Import
+                        </button>
+                        <div class="btn-group" role="group">
+                            <button id="fsheetsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload flight sheets">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="fsheets"></ul>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="presetsTabControls">
+                        <button id="ocPresetShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share OC presets with other rigs">
+                            <i class="bi bi-share-fill me-1"></i>Share
+                        </button>
+                        <button id="ocPresetAddBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add an OC preset">
+                            <i class="bi bi-plus-lg me-1"></i>Add
                         </button>
                     </div>
-                                <div class="btn-group" role="group">
-                                    <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                        <span class="visually-hidden">Auto-refresh interval</span>
-                                    </button>
-                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="stats"></ul>
-                                </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="statsTabControls">
+                        <button id="statsExportBtn" type="button" class="btn btn-sm btn-outline-secondary stats-export-btn" title="Download the selected range as CSV">
+                            <i class="bi bi-download me-1"></i> Export to CSV
+                        </button>
+                        <div class="btn-group" role="group">
+                            <button id="statsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload statistics history">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="metrics"></ul>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 d-none" id="updatesTabControls">
+                        <div class="btn-group" role="group">
+                            <button id="cuRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Re-check dashboard versions on all rigs">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                <span class="visually-hidden">Auto-refresh interval</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="updates"></ul>
+                        </div>
+                    </div>
                 </div>
             </div>
             
@@ -604,23 +698,6 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-wallet2 text-warning"></i> Wallets
                             </h2>
-                            <div class="d-flex gap-2">
-                                <button id="walletShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share wallets with other rigs">
-                                    <i class="bi bi-share-fill me-1"></i>Share
-                                </button>
-                                <div class="btn-group" role="group">
-                                    <button id="walletsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload wallet list">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                        <span class="visually-hidden">Auto-refresh interval</span>
-                                    </button>
-                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="wallets"></ul>
-                                </div>
-                                <button id="walletAddBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add a wallet to the library">
-                                    <i class="bi bi-plus-lg me-1"></i>Add
-                                </button>
-                            </div>
                         </div>
 
                         <!-- Coin filter chips -->
@@ -657,26 +734,6 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-folder2-open text-warning"></i> Flight Sheets
                             </h2>
-                            <div class="d-flex gap-2">
-                                <button id="fsShareBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Share flight sheets with other rigs">
-                                    <i class="bi bi-share-fill"></i> Share
-                                </button>
-                                <button id="fsAddSheetBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Create a new flight sheet">
-                                    <i class="bi bi-plus-lg"></i> Add flight sheet
-                                </button>
-                                <button id="importFsheetsBtn" class="btn btn-sm btn-outline-info d-flex align-items-center gap-1" title="Import flight sheets from JSON">
-                                    <i class="bi bi-box-arrow-in-down"></i> Import
-                                </button>
-                                <div class="btn-group" role="group">
-                                    <button id="fsheetsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload flight sheets">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                        <span class="visually-hidden">Auto-refresh interval</span>
-                                    </button>
-                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="fsheets"></ul>
-                                </div>
-                            </div>
                         </div>
                         <div class="small text-muted mb-3">
                             To manage your flight sheets or wallets, open the
@@ -748,19 +805,6 @@
                             <div class="form-check form-switch mb-0">
                                 <input class="form-check-input" type="checkbox" role="switch" id="afEnabledSwitch" title="Enable AutoFan fan control">
                                 <label class="form-check-label fw-semibold" for="afEnabledSwitch">AutoFan enabled</label>
-                            </div>
-                            <div class="d-flex align-items-center gap-2">
-                                <button id="afShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share fan settings with other rigs">
-                                    <i class="bi bi-share-fill me-1"></i>Share
-                                </button>
-                                <div class="btn-group btn-group-sm" role="group" aria-label="Fan settings view mode">
-                                    <button type="button" id="afTableModeBtn" class="btn btn-primary" title="Compact table mode">
-                                        <i class="bi bi-table me-1"></i>Table mode
-                                    </button>
-                                    <button type="button" id="afAdvancedModeBtn" class="btn btn-outline-primary" title="Space-separated lists per setting">
-                                        <i class="bi bi-list-ul me-1"></i>Advanced mode
-                                    </button>
-                                </div>
                             </div>
                         </div>
 
@@ -880,15 +924,6 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-motherboard text-info"></i> Extra Fans
                             </h2>
-                            <div class="btn-group" role="group">
-                                <button id="fansRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload extra fans (8MK_NET controller + motherboard fans)">
-                                    <i class="bi bi-arrow-clockwise"></i> Refresh
-                                </button>
-                                <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                    <span class="visually-hidden">Auto-refresh interval</span>
-                                </button>
-                                <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="fans"></ul>
-                            </div>
                         </div>
                         <div id="fansContainer" class="small">
                             <div class="text-muted small">Detecting controllable fans...</div>
@@ -905,14 +940,6 @@
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-gpu-card text-warning"></i> OC Presets
                             </h2>
-                            <div class="d-flex gap-2">
-                                <button id="ocPresetShareBtn" class="btn btn-sm btn-outline-info fw-semibold" title="Share OC presets with other rigs">
-                                    <i class="bi bi-share-fill me-1"></i>Share
-                                </button>
-                                <button id="ocPresetAddBtn" class="btn btn-sm btn-outline-primary fw-semibold" title="Add an OC preset">
-                                    <i class="bi bi-plus-lg me-1"></i>Add
-                                </button>
-                            </div>
                         </div>
                         <p class="text-muted small mb-3">
                             Overclock presets for the rig's NVIDIA GPUs. Bind a preset to a mining algorithm in the list
@@ -1031,17 +1058,6 @@
                                 <i class="bi bi-cloud-arrow-down-fill text-warning"></i> Cluster Update
                                 <span id="cuLatestBadge" class="badge bg-secondary-subtle text-secondary-emphasis small d-none" title="Latest release published on GitHub"></span>
                             </h2>
-                            <div class="d-flex gap-2 align-items-center">
-                                <div class="btn-group" role="group">
-                                    <button id="cuRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Re-check dashboard versions on all rigs">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                        <span class="visually-hidden">Auto-refresh interval</span>
-                                    </button>
-                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="updates"></ul>
-                                </div>
-                            </div>
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
@@ -1085,20 +1101,6 @@
                                 <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Period">
                                     <button id="stats1dBtn" type="button" class="btn btn-outline-primary stats-period-btn active">1d</button>
                                     <button id="stats3dBtn" type="button" class="btn btn-outline-primary stats-period-btn">3d</button>
-                                </div>
-                            </div>
-                            <div class="d-flex align-items-center gap-2">
-                                <button id="statsExportBtn" type="button" class="btn btn-sm btn-outline-secondary stats-export-btn" title="Download the selected range as CSV">
-                                    <i class="bi bi-download me-1"></i> Export to CSV
-                                </button>
-                                <div class="btn-group" role="group">
-                                    <button id="statsRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Reload statistics history">
-                                        <i class="bi bi-arrow-clockwise"></i> Refresh
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                                        <span class="visually-hidden">Auto-refresh interval</span>
-                                    </button>
-                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="metrics"></ul>
                                 </div>
                             </div>
                         </div>

@@ -5281,8 +5281,11 @@ function showDashTab(tab) {
     document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
     document.getElementById('statsTabContainer').classList.toggle('d-none', tab !== 'stats');
     document.getElementById('updatesTabContainer').classList.toggle('d-none', tab !== 'updates');
-    // Stats refresh + hardware sub-switch only make sense on the GPUs tab
-    document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
+    // per-tab toolbar controls share the tab-strip line (right side)
+    ['gpus', 'fans', 'wallets', 'fsheets', 'presets', 'stats', 'updates'].forEach(t => {
+        const el = document.getElementById(t + 'TabControls');
+        if (el) el.classList.toggle('d-none', tab !== t);
+    });
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
     if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }
