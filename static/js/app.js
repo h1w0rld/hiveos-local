@@ -1534,9 +1534,9 @@ async function fetchStats() {
 
     } catch (error) {
         console.error("Error fetching stats:", error);
-        document.getElementById('gpuContainer').innerHTML = `
-            <div class="col-12">
-                <div class="alert alert-danger text-center glass-card py-4" role="alert">
+        document.getElementById('gpuListRows').innerHTML = `
+            <div class="text-center py-4">
+                <div class="alert alert-danger border-0 mb-0" role="alert">
                     <i class="bi bi-wifi-off fs-1 d-block mb-2"></i>
                     <h4 class="alert-heading fw-bold">Failed to Load GPU Stats</h4>
                     <p class="mb-0 small">${error.message}</p>
@@ -1555,13 +1555,14 @@ async function fetchStats() {
 }
 
 // Render GPU layout dynamically (two-line stacked rows: identity grows, metrics pair up vertically)
+// Rows go under the static card header (Share / Set settings / Refresh live there)
 function renderGpus(gpus) {
-    const container = document.getElementById('gpuContainer');
+    const container = document.getElementById('gpuListRows');
     container.innerHTML = '';
-    
+
     if (gpus.length === 0) {
         container.innerHTML = `
-            <div class="col-12 text-center py-4">
+            <div class="text-center py-4">
                 <p class="text-muted">No mining GPUs detected on this rig.</p>
             </div>
         `;
@@ -1689,8 +1690,7 @@ function renderGpus(gpus) {
     }).join('');
     
     const wrap = document.createElement('div');
-    wrap.className = 'col-12';
-    wrap.innerHTML = `<div class="card glass-card gpu-list-card">${rows}</div>`;
+    wrap.innerHTML = rows;
     container.appendChild(wrap);
 }
 

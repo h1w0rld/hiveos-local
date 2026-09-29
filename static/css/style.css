@@ -787,6 +787,11 @@ tr.af-sep td {
     overflow: hidden;
 }
 
+.gpu-list-card-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+
 .gpu-list-row {
     display: flex;
     flex-wrap: wrap;

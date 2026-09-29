@@ -512,41 +512,50 @@
                         <i class="bi bi-cloud-arrow-down-fill me-1"></i> Updates
                     </button>
                 </div>
-            </div>
-            <!-- GPUs tab header: sub-view switch left, actions right (card-header style) -->
-            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2" id="gpusTabControls">
-                <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
-                    <button id="showGpusBtn" type="button" class="btn btn-sm btn-primary active">
-                        <i class="bi bi-gpu-card me-1"></i> GPU Cards
-                    </button>
-                    <button id="showIgpusBtn" type="button" class="btn btn-sm btn-outline-primary">
-                        <i class="bi bi-motherboard me-1"></i> CPU iGPU
-                    </button>
-                </div>
-                <div class="d-flex align-items-center gap-2">
-                    <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
-                        <i class="bi bi-share-fill"></i>Share
-                    </button>
-                    <button id="ocAllToggleBtn" type="button" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Show / hide the all-GPU overclock form">
-                        <i class="bi bi-sliders"></i> Set settings
-                    </button>
-                    <div class="btn-group" role="group">
-                        <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                <div class="d-flex align-items-center gap-2" id="gpusTabControls">
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Hardware view switch">
+                        <button id="showGpusBtn" type="button" class="btn btn-sm btn-primary active">
+                            <i class="bi bi-gpu-card me-1"></i> GPU Cards
                         </button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
-                            <span class="visually-hidden">Auto-refresh interval</span>
+                        <button id="showIgpusBtn" type="button" class="btn btn-sm btn-outline-primary">
+                            <i class="bi bi-motherboard me-1"></i> CPU iGPU
                         </button>
-                        <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="stats"></ul>
                     </div>
                 </div>
             </div>
             
             <div id="gpuContainer" class="row g-3">
-                <!-- Cards injected dynamically via JS -->
-                <div class="col-12 text-center py-4">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading GPU Stats...</span>
+                <div class="col-12">
+                    <div class="card glass-card gpu-list-card">
+                        <div class="gpu-list-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
+                                <i class="bi bi-gpu-card text-primary"></i> GPUs
+                            </h2>
+                            <div class="d-flex align-items-center gap-2">
+                                <button id="ocAllShareBtn" class="btn btn-sm btn-outline-info fw-semibold d-flex align-items-center gap-1" title="Share these overclock settings with other rigs">
+                                    <i class="bi bi-share-fill"></i>Share
+                                </button>
+                                <button id="ocAllToggleBtn" type="button" class="btn btn-sm btn-outline-primary fw-semibold d-flex align-items-center gap-1" title="Show / hide the all-GPU overclock form">
+                                    <i class="bi bi-sliders"></i> Set settings
+                                </button>
+                                <div class="btn-group" role="group">
+                                    <button id="refreshStatsBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1">
+                                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
+                                        <span class="visually-hidden">Auto-refresh interval</span>
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-end auto-refresh-menu" data-target="stats"></ul>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="gpuListRows">
+                            <div class="text-center py-4">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Loading GPU Stats...</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
