@@ -3861,37 +3861,122 @@ def get_miner_log():
     return jsonify({"success": True, "miner": miner, "log": log_content})
 
 # 3. Watchdog Config Management
+#
+# HiveOS watchdog daemon (/hive/bin/wd, unit hive-watchdog) reads thresholds from
+# JSON maps, NOT from a flat key:
+#   WD_TYPE=miner -> WD_MINHASHES='{"<MINER>": <kH/s>}'        (per miner)
+#   WD_TYPE=algo  -> WD_MINHASHES_ALGO='{"<algo>": <kH/s>}'   (per algorithm)
+# If the map has no entry for the running miner/algo, the hashrate check is
+# silently skipped ("minimal hashrate is not set") - the watchdog then only
+# checks LA/GPU-offline. The legacy flat key WD_MIN_HASHRATE (which older
+# panel versions wrote) is ignored by current wd versions entirely.
+# Thresholds are in kH/s (the agent's /run/hive/khs file); the UI sends MH/s,
+# converted here (x1000). Actions on low hashrate come from rig.conf keys
+# WD_MINER (minutes -> miner restart) and WD_REBOOT (minutes -> rig reboot).
+def _wd_threshold_maps(rig_conf):
+    maps = {}
+    for key in ("WD_MINHASHES", "WD_MINHASHES_ALGO"):
+        try:
+            m = json.loads(rig_conf.get(key, "") or "{}")
+            maps[key] = m if isinstance(m, dict) else {}
+        except Exception:
+            maps[key] = {}
+    return maps
+
+
+def _wd_current_algo():
+    try:
+        wc = parse_shell_config(WALLET_CONF_PATH)
+        algo = str(wc.get("CUSTOM_ALGO") or "").strip().lower()
+        if algo:
+            return algo
+    except Exception:
+        pass
+    try:
+        with open("/run/hive/last_stat.json") as f:
+            st = json.load(f)
+        algo = str((st.get("params") or {}).get("miner_stats", {}).get("algo") or "").strip().lower()
+        if algo and algo != "null":
+            return algo
+    except Exception:
+        pass
+    return ""
+
+
+def _to_float(v):
+    try:
+        return float(str(v).strip())
+    except Exception:
+        return None
+
+
 @app.route('/api/watchdog', methods=['GET', 'POST'])
 def handle_watchdog():
     if request.method == 'GET':
         rig_conf = parse_shell_config(RIG_CONF_PATH)
+        maps = _wd_threshold_maps(rig_conf)
+        miner = str(rig_conf.get("MINER") or "").strip()
+        algo = _wd_current_algo()
+        eff_khs = _to_float(maps["WD_MINHASHES"].get(miner)) if miner else None
+        if eff_khs is None and algo:
+            eff_khs = _to_float(maps["WD_MINHASHES_ALGO"].get(algo))
+        if eff_khs is None:
+            # legacy flat value was written by old panel versions in MH/s form units
+            legacy = _to_float(rig_conf.get("WD_MIN_HASHRATE", ""))
+            eff_mhs = legacy if legacy is not None else 0.0
+            eff_khs = None
+        else:
+            eff_mhs = eff_khs / 1000.0
         return jsonify({
             "success": True,
             "wd_enabled": rig_conf.get("WD_ENABLED", "0"),
-            "wd_min_hashrate": rig_conf.get("WD_MIN_HASHRATE", "0")
+            "wd_min_hashrate": eff_mhs,
+            "wd_miner": miner,
+            "wd_algo": algo,
+            "wd_min_hashrate_khs": eff_khs
         })
-        
+
     # POST
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
-        
+
     enabled = str(data.get("wd_enabled", "0")).strip()
-    min_hashrate = str(data.get("wd_min_hashrate", "0")).strip()
-    
+    mhs = _to_float(data.get("wd_min_hashrate", "0"))
+
     if enabled not in ["0", "1"]:
         return jsonify({"success": False, "message": "wd_enabled must be 0 or 1."}), 400
-    if not re.match(r'^[0-9\.]+$', min_hashrate):
+    if mhs is None or mhs < 0:
         return jsonify({"success": False, "message": "Min hashrate must be a valid number."}), 400
-        
+
     rig_conf = parse_shell_config(RIG_CONF_PATH)
+    miner = str(rig_conf.get("MINER") or "").strip()
+    algo = _wd_current_algo()
+    maps = _wd_threshold_maps(rig_conf)
+    khs = int(mhs * 1000)
+
+    if miner:
+        maps["WD_MINHASHES"][miner] = khs
+    if algo:
+        maps["WD_MINHASHES_ALGO"][algo] = khs
+    if not miner and not algo:
+        return jsonify({"success": False, "message": "Cannot determine current miner or algorithm on this rig."}), 400
+
     rig_conf["WD_ENABLED"] = enabled
-    rig_conf["WD_MIN_HASHRATE"] = min_hashrate
-    
+    rig_conf["WD_MINHASHES"] = json.dumps(maps["WD_MINHASHES"], separators=(",", ":"))
+    rig_conf["WD_MINHASHES_ALGO"] = json.dumps(maps["WD_MINHASHES_ALGO"], separators=(",", ":"))
+    # legacy flat key is not read by current wd versions - drop it to avoid confusion
+    rig_conf.pop("WD_MIN_HASHRATE", None)
+
     if write_shell_config(RIG_CONF_PATH, rig_conf):
-        logging.info(f"Watchdog settings updated by IP: {request.remote_addr} (Enabled={enabled}, Min={min_hashrate})")
+        target = miner or algo
+        logging.info(f"Watchdog settings updated by IP: {request.remote_addr} (Enabled={enabled}, {target}: {khs} kH/s)")
         run_command("sudo /hive/bin/wd restart")
-        return jsonify({"success": True, "message": "Watchdog settings saved and daemon restarted!"})
+        return jsonify({
+            "success": True,
+            "message": f"Watchdog armed for '{target}' at {khs} kH/s. Low hashrate: miner restart after WD_MINER min, rig reboot after WD_REBOOT min.",
+            "wd_min_hashrate_khs": khs
+        })
     else:
         return jsonify({"success": False, "message": "Failed to write watchdog settings to rig.conf."}), 500
 
