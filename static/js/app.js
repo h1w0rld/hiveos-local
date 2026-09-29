@@ -2031,12 +2031,11 @@ let cuRunId = 0;            // guards against stale async refreshes
 let cuLoadedOnce = false;   // a refresh landed with a live session
 let cuComponent = 'panel';  // what to update: panel | drivers | hiveos
 let cuJobs = {};            // rigId -> background job state ({running, ok, exit_code, log_tail})
-
 const CU_COMPONENTS = ['panel', 'drivers', 'hiveos'];
 const CU_COMPONENT_HINTS = {
     panel: 'Tick rigs to update — the whole cluster or a selection; this rig restarts last.',
-    drivers: 'Runs nvidia-driver-update on the selected rigs — the miner pauses and restarts automatically (10-20 min per rig).',
-    hiveos: 'Runs Hive OS selfupgrade (apt) on the selected rigs — takes several minutes; reboot the rig afterwards if the kernel was updated.'
+    drivers: 'Runs nvidia-driver-update on the selected rigs — the miner pauses and restarts automatically (10-20 min per rig). Latest version comes from the hive driver index.',
+    hiveos: 'Runs Hive OS selfupgrade (apt) on the selected rigs — takes several minutes; reboot the rig afterwards if the kernel was updated. Latest version reflects the rig\u2019s apt lists.'
 };
 const CU_COMPONENT_LABELS = {
     panel: 'Dashboard update',
@@ -2085,7 +2084,11 @@ async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!data.success || !data.version) throw new Error('Invalid payload');
-        return { version: data.version, driver: data.driver || '', hiveos: data.hiveos || '' };
+        return {
+            version: data.version,
+            driver: data.driver || '', driver_latest: data.driver_latest || '',
+            hiveos: data.hiveos || '', hiveos_latest: data.hiveos_latest || ''
+        };
     } catch (e) {
         if (e && e.name === 'AbortError') return { err: 'Timed out' };
         return { err: String(e.message || e) };
@@ -2159,12 +2162,14 @@ async function refreshClusterUpdate() {
         if (res && res.version) {
             cuRigInfo[r.id] = {
                 version: res.version, driver: res.driver || '', hiveos: res.hiveos || '',
+                driver_latest: res.driver_latest || '', hiveos_latest: res.hiveos_latest || '',
                 err: '', phase: prev.phase, message: prev.message
             };
         } else {
             // keep versions captured during an update run (panel restarts fail loudly)
             cuRigInfo[r.id] = {
                 version: prev.version || null, driver: prev.driver || '', hiveos: prev.hiveos || '',
+                driver_latest: prev.driver_latest || '', hiveos_latest: prev.hiveos_latest || '',
                 err: (res && res.err) || 'Unreachable',
                 phase: prev.phase, message: prev.message
             };
@@ -2185,6 +2190,20 @@ function cuComponentVersion(rig) {
     return info.version || null;
 }
 
+// The version an update of the selected component would move this rig to
+function cuComponentLatest(rig) {
+    const info = cuRigInfo[rig.id] || {};
+    if (cuComponent === 'drivers') return info.driver_latest || '';
+    if (cuComponent === 'hiveos') return info.hiveos_latest || '';
+    return cuLatest;
+}
+
+// True when the rig already runs the newest known release of the component
+function cuComponentUpToDate(rig) {
+    const v = cuComponentVersion(rig), latest = cuComponentLatest(rig);
+    return !!(v && latest && verCompare(v, latest) >= 0);
+}
+
 function cuVersionBadgeHtml(rig) {
     const info = cuRigInfo[rig.id] || {};
     const v = cuComponentVersion(rig);
@@ -2195,15 +2214,23 @@ function cuVersionBadgeHtml(rig) {
         return '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
             escapeHtml(info.err || what) + '">—</span>';
     }
-    const outdated = cuComponent === 'panel' && cuLatest && verCompare(v, cuLatest) < 0;
+    const latest = cuComponentLatest(rig);
+    const outdated = latest && verCompare(v, latest) < 0;
     const cls = outdated
         ? 'bg-warning-glow border border-warning text-warning'
         : 'bg-success-glow border border-success text-success';
-    const title = cuComponent === 'panel' ? 'Dashboard version on this rig'
+    const what = cuComponent === 'panel' ? 'Dashboard version on this rig'
         : cuComponent === 'drivers' ? 'NVIDIA driver version on this rig'
         : 'Hive OS package version on this rig';
-    return '<span class="badge ' + cls + ' cu-version-badge" title="' + title + '">v' +
+    const title = latest ? (what + ' — latest available: v' + latest)
+        : (what + ' — latest unknown');
+    let html = '<span class="badge ' + cls + ' cu-version-badge" title="' + escapeHtml(title) + '">v' +
         escapeHtml(v) + '</span>';
+    if (outdated) {
+        html += ' <span class="text-warning small fw-semibold" style="white-space:nowrap" title="Latest available version">&nbsp;\u2192 v' +
+            escapeHtml(latest) + '</span>';
+    }
+    return html;
 }
 
 function cuJobStatusHtml(rig) {
@@ -2223,7 +2250,18 @@ function cuJobStatusHtml(rig) {
     if (job && job.err) {
         return '<span class="text-danger" title="' + escapeHtml(job.err) + '"><i class="bi bi-plug me-1"></i>Unreachable</span>';
     }
-    return '<span class="text-muted"><i class="bi bi-dash-circle me-1"></i>Idle</span>';
+    const v = cuComponentVersion(rig), latest = cuComponentLatest(rig);
+    if (!v) {
+        return '<span class="text-muted" title="' +
+            escapeHtml((cuRigInfo[rig.id] || {}).err || '') + '"><i class="bi bi-dash-circle me-1"></i>Unknown</span>';
+    }
+    if (!latest) {
+        return '<span class="text-muted" title="Latest available version could not be detected"><i class="bi bi-dash-circle me-1"></i>Latest unknown</span>';
+    }
+    if (verCompare(v, latest) < 0) {
+        return '<span class="text-warning"><i class="bi bi-arrow-down-circle-fill me-1"></i>Update available</span>';
+    }
+    return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Up to date</span>';
 }
 
 function cuStatusHtml(rig) {
@@ -2263,9 +2301,11 @@ function cuStatusHtml(rig) {
 function renderCuRows() {
     const tbody = document.getElementById('cuTbody');
     if (!tbody) return;
-    // Latest-release badge (green when GitHub answered, amber when not)
+    // Latest-release badge (green when GitHub answered, amber when not) —
+    // meaningful for the Panel component only
     const badge = document.getElementById('cuLatestBadge');
     if (badge) {
+        badge.classList.toggle('d-none', cuComponent !== 'panel');
         if (cuLatest) {
             badge.textContent = 'latest v' + cuLatest;
             badge.className = 'badge bg-success-glow border border-success text-success small';
@@ -2275,6 +2315,11 @@ function renderCuRows() {
             badge.className = 'badge bg-warning-glow border border-warning text-warning small';
             badge.title = 'GitHub unreachable — cannot determine the latest release';
         }
+    }
+    const vTh = document.getElementById('cuVersionTh');
+    if (vTh) {
+        vTh.textContent = cuComponent === 'drivers' ? 'Driver Version'
+            : cuComponent === 'hiveos' ? 'Hive OS Version' : 'Version';
     }
     const rigs = ((clusterData && clusterData.rigs) || []).slice().sort(naturalRigCompare);
     if (!rigs.length) {
@@ -2286,7 +2331,7 @@ function renderCuRows() {
         const selectable = rig.is_self || rig.online;
         const checked = cuChecked.has(rig.id);
         const selfMark = rig.is_self
-            ? ' <span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>' : '';
+            ? ' <span class="badge bg-success-glow border border-success text-success small ms-1">THIS RIG</span>' : '';
         return '<tr' + (selectable ? '' : ' class="opacity-50"') + '>' +
             '<td class="text-center"><input type="checkbox" class="form-check-input m-0 cu-rig-check" data-rig="' +
             escapeHtml(rig.id) + '"' + (checked ? ' checked' : '') + ((selectable && !cuBusy) ? '' : ' disabled') + '></td>' +
@@ -2377,20 +2422,29 @@ async function cuUpdateOneRig(rig, password) {
 async function cuRunComponentUpdate(password) {
     const label = CU_COMPONENT_LABELS[cuComponent];
     const all = (clusterData && clusterData.rigs) || [];
-    const targets = all.filter(r => cuChecked.has(r.id) && (r.is_self || r.online));
-    if (!targets.length) {
+    const selected = all.filter(r => cuChecked.has(r.id) && (r.is_self || r.online));
+    if (!selected.length) {
         showToast('Select at least one online rig.', false);
         return;
     }
+    // Rigs already on the newest known version are skipped — no pointless jobs
+    const targets = selected.filter(r => !cuComponentUpToDate(r));
+    const skipped = selected.length - targets.length;
+    if (!targets.length) {
+        showToast('All selected rigs are already on the latest ' +
+            (cuComponent === 'drivers' ? 'driver' : 'Hive OS') + '.', true);
+        return;
+    }
     const names = targets.map(r => r.name || r.id).join(', ');
+    const skippedNote = skipped ? ' (' + skipped + ' already up to date will be skipped)' : '';
     if (cuComponent === 'drivers' &&
-        !confirm('Start NVIDIA driver update on ' + targets.length + ' rig(s): ' + names +
+        !confirm('Start NVIDIA driver update on ' + targets.length + ' rig(s): ' + names + skippedNote +
             '? Mining pauses on each rig while the driver installs and the miner restarts' +
             ' automatically afterwards (10-20 minutes). Do not reboot the rigs meanwhile.')) {
         return;
     }
     if (cuComponent === 'hiveos' &&
-        !confirm('Start Hive OS upgrade (selfupgrade) on ' + targets.length + ' rig(s): ' + names +
+        !confirm('Start Hive OS upgrade (selfupgrade) on ' + targets.length + ' rig(s): ' + names + skippedNote +
             '? This updates system packages over apt and takes several minutes.' +
             ' Mining continues; reboot the rigs afterwards if the kernel was updated.')) {
         return;
@@ -5468,16 +5522,8 @@ function showDashTab(tab) {
     document.getElementById('fsheetsTabContainer').classList.toggle('d-none', tab !== 'fsheets');
     document.getElementById('statsTabContainer').classList.toggle('d-none', tab !== 'stats');
     document.getElementById('updatesTabContainer').classList.toggle('d-none', tab !== 'updates');
-    // per-tab action toolbar on its own line under the tab strip
-    let tbVisible = false;
-    ['gpus', 'fans', 'wallets', 'fsheets', 'presets', 'stats', 'updates'].forEach(t => {
-        const el = document.getElementById(t + 'TabControls');
-        if (!el) return;
-        el.classList.toggle('d-none', tab !== t);
-        if (tab === t) tbVisible = true;
-    });
-    const tbWrap = document.getElementById('dashTabToolbar');
-    if (tbWrap) tbWrap.classList.toggle('d-none', !tbVisible);
+    // GPUs tab header (sub-view switch + actions) only makes sense on the GPUs tab
+    document.getElementById('gpusTabControls').classList.toggle('d-none', !isGpus);
     if (isWalletsTab(tab)) renderWallets();
     if (tab === 'fsheets') loadFsheets();
     if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }
