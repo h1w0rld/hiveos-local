@@ -791,10 +791,12 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault();
         const btn = this.querySelector('button[type="submit"]');
         btn.disabled = true;
-        
+
+        const unitMult = parseFloat(document.getElementById('wdUnit').value) || 1;
+        const unitVal = parseFloat(document.getElementById('wdMinHashrate').value) || 0;
         const payload = {
             wd_enabled: document.getElementById('wdEnabled').value,
-            wd_min_hashrate: document.getElementById('wdMinHashrate').value
+            wd_min_hashrate: unitVal * unitMult // canonical kH/s
         };
         
         try {
@@ -1532,7 +1534,12 @@ function renderGpus(gpus) {
     const oc = activeOverclocks || {};
     const nvOc = oc.nvidia || {};
     const amdOc = oc.amd || {};
-    const at = (arr, i) => (arr || [])[i];
+    // Hive nvidia-oc semantics: short per-GPU lists are padded with the last
+    // token up to GPU count (scalar = every GPU) — mirror that for display
+    const at = (arr, i) => {
+        if (!arr || arr.length === 0) return undefined;
+        return arr[i] !== undefined ? arr[i] : arr[arr.length - 1];
+    };
     const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '' && v !== '0') || '';
     const ico = n => `<i class="bi ${n}"></i>`;
     const dash = '<span class="gpu-mini-empty">–</span>';
@@ -2301,7 +2308,17 @@ async function loadTuningSettings() {
             const wdData = await wdRes.json();
             if (wdData.success) {
                 document.getElementById('wdEnabled').value = wdData.wd_enabled;
-                document.getElementById('wdMinHashrate').value = wdData.wd_min_hashrate;
+                // wd_min_hashrate arrives canonical in kH/s; pick a readable unit
+                const khs = Number(wdData.wd_min_hashrate_khs ?? wdData.wd_min_hashrate) || 0;
+                const unitPicker = document.getElementById('wdUnit');
+                const wdUnits = [[1e9, 'TH/s'], [1e6, 'GH/s'], [1e3, 'MH/s'], [1, 'kH/s']];
+                let mult = 1;
+                for (const [m, name] of wdUnits) {
+                    if (khs >= m) { mult = m; break; }
+                }
+                unitPicker.value = String(mult);
+                const shown = parseFloat((khs / mult).toFixed(2));
+                document.getElementById('wdMinHashrate').value = shown > 0 ? shown : '';
             }
         }
         
