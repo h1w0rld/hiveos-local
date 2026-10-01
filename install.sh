@@ -73,7 +73,10 @@ echo "[+] Detected installation directory: $DIR"
 # 1. Install Dependencies (Flask + Waitress + sshpass for cluster SSH auth)
 echo "[+] Checking/Installing Python3 dependencies (Flask, Waitress, sshpass)..."
 if command -v apt-get &> /dev/null; then
-  apt-get update -y && apt-get install -y python3-flask python3-pip sshpass
+  # apt-get update failing (e.g. dead third-party repos) must not skip the
+  # package install - cached lists are enough for the distro packages
+  apt-get update -y
+  apt-get install -y python3-flask python3-pip sshpass
   # Try to install waitress via apt or pip requirements
   apt-get install -y python3-waitress || python3 -m pip install -r "$DIR/requirements.txt"
 else
@@ -85,6 +88,11 @@ python3 -c "import flask, waitress" &> /dev/null
 if [ $? -ne 0 ]; then
   echo "[+] Attempting force-install of flask/waitress via pip..."
   python3 -m pip install -r "$DIR/requirements.txt"
+fi
+python3 -c "import flask, waitress" &> /dev/null
+if [ $? -ne 0 ]; then
+  echo "[-] ERROR: flask/waitress are still not importable - dependency install failed (check apt sources above)."
+  exit 1
 fi
 
 # 2. Create Systemd Service File
