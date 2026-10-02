@@ -1049,29 +1049,25 @@
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
                                 <colgroup>
-                                    <col style="width: 22%"><col style="width: 18%"><col style="width: 18%"><col style="width: 18%"><col>
+                                    <col style="width: 15%"><col style="width: 30px"><col style="width: 14%">
+                                    <col style="width: 30px"><col style="width: 15%">
+                                    <col style="width: 30px"><col style="width: 14%"><col>
                                 </colgroup>
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
                                         <th>Rig</th>
-                                        <th class="text-center" title="This dashboard's own software (pulls the latest release from GitHub)">
-                                            <div>Panel</div>
-                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
-                                                <input type="checkbox" class="form-check-input m-0" id="cuAllPanel" title="Select all rigs for Panel update">
-                                            </div>
+                                        <th class="text-center align-middle" title="Select all rigs for Panel update">
+                                            <input type="checkbox" class="form-check-input m-0" id="cuAllPanel">
                                         </th>
-                                        <th class="text-center" title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">
-                                            <div>GPU Drivers</div>
-                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
-                                                <input type="checkbox" class="form-check-input m-0" id="cuAllDrivers" title="Select all rigs for driver update">
-                                            </div>
+                                        <th title="This dashboard's own software (pulls the latest release from GitHub)">Panel</th>
+                                        <th class="text-center align-middle" title="Select all rigs for driver update">
+                                            <input type="checkbox" class="form-check-input m-0" id="cuAllDrivers">
                                         </th>
-                                        <th class="text-center" title="Hive OS system packages via selfupgrade (apt)">
-                                            <div>Hive OS</div>
-                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
-                                                <input type="checkbox" class="form-check-input m-0" id="cuAllHiveos" title="Select all rigs for Hive OS upgrade">
-                                            </div>
+                                        <th title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">GPU Drivers</th>
+                                        <th class="text-center align-middle" title="Select all rigs for Hive OS upgrade">
+                                            <input type="checkbox" class="form-check-input m-0" id="cuAllHiveos">
                                         </th>
+                                        <th title="Hive OS system packages via selfupgrade (apt)">Hive OS</th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>

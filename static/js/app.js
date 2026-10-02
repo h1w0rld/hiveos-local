@@ -2194,66 +2194,70 @@ async function refreshClusterUpdate() {
     renderCuRows();
 }
 
-// Per-component status chip inside a component cell: normally the version
-// badge, during a run — spinner/done/failed for that component only
-function cuCompCellHtml(rig, comp) {
-    const rigSelectable = rig.is_self || rig.online;
+// Select-all checkbox cell for one component column
+function cuCheckCellHtml(rig, comp) {
+    const selectable = rig.is_self || rig.online;
     const pair = cuPair(rig.id, comp);
     const checked = cuChecked.has(pair);
-    const info = cuRigInfo[rig.id] || {};
-    const job = (cuJobs[rig.id] || {})[comp];
-    let statusHtml = '';
-    if (job) {
-        if (job.running) {
-            statusHtml = '<span class="text-warning small"><i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Updating...</span>';
-        } else if (job.ok === true) {
-            statusHtml = '<span class="text-success small"><i class="bi bi-check-circle-fill me-1"></i>Done</span>';
-        } else if (job.ok === false) {
-            const tail = (job.log_tail || '').slice(-600);
-            statusHtml = '<span class="text-danger small" title="' + escapeHtml(tail || ('exit code ' + job.exit_code)) +
-                '"><i class="bi bi-x-circle-fill me-1"></i>Failed' +
-                (job.exit_code != null ? ' (' + job.exit_code + ')' : '') + '</span>';
-        } else if (job.err) {
-            statusHtml = '<span class="text-danger small" title="' + escapeHtml(job.err) +
-                '"><i class="bi bi-plug me-1"></i>Error</span>';
-        }
-    }
-    if (!statusHtml) {
-        const v = cuCompVersion(rig.id, comp);
-        if (!v) {
-            const what = comp === 'panel' ? 'Version unknown'
-                : comp === 'drivers' ? 'Driver version unknown (no NVIDIA GPU?)'
-                : 'Hive OS version unknown';
-            statusHtml = '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
-                escapeHtml(info.err || what) + '">—</span>';
-        } else {
-            const latest = cuCompLatest(rig.id, comp);
-            const outdated = latest && verCompare(v, latest) < 0;
-            const cls = outdated
-                ? 'bg-warning-glow border border-warning text-warning'
-                : 'bg-success-glow border border-success text-success';
-            const what = comp === 'panel' ? 'Dashboard version on this rig'
-                : comp === 'drivers' ? 'NVIDIA driver version on this rig'
-                : 'Hive OS package version on this rig';
-            const title = latest ? (what + ' — latest available: v' + latest)
-                : (what + ' — latest unknown');
-            statusHtml = '<span class="badge ' + cls + ' cu-version-badge" title="' + escapeHtml(title) + '">v' +
-                escapeHtml(v) + '</span>';
-            if (outdated) {
-                statusHtml += ' <span class="text-warning small fw-semibold" title="Latest available version">\u2192 v' +
-                    escapeHtml(latest) + '</span>';
-            }
-        }
-    }
-    const box = '<input type="checkbox" class="form-check-input m-0 cu-comp-check" data-rig="' +
+    return '<input type="checkbox" class="form-check-input m-0 cu-comp-check" data-rig="' +
         escapeHtml(rig.id) + '" data-comp="' + comp + '"' + (checked ? ' checked' : '') +
-        ((rigSelectable && !cuBusy) ? '' : ' disabled') +
+        ((selectable && !cuBusy) ? '' : ' disabled') +
         ' title="Update ' + escapeHtml(CU_COMPONENT_LABELS[comp]) + ' on this rig">';
-    return '<div class="d-flex flex-column align-items-center gap-1 py-1">' +
-        '<div>' + box + '</div><div>' + statusHtml + '</div></div>';
 }
 
-// Whole-row status: offline, running, done-with-failures summary, else silent
+// Version cell for one component: current version badge + a compact second
+// line with the latest available release and what it means for this rig
+function cuCompInfoHtml(rig, comp) {
+    const info = cuRigInfo[rig.id] || {};
+    const job = (cuJobs[rig.id] || {})[comp];
+    const v = cuCompVersion(rig.id, comp);
+    const latest = cuCompLatest(rig.id, comp);
+    const what = comp === 'panel' ? 'Dashboard version on this rig'
+        : comp === 'drivers' ? 'NVIDIA driver version on this rig'
+        : 'Hive OS package version on this rig';
+    // second line: job state while a run is in progress, else latest-version info
+    let sub, subCls = 'text-muted';
+    if (job && job.running) {
+        sub = '<i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Updating...';
+        subCls = 'text-warning';
+    } else if (job && job.ok === true) {
+        sub = '<i class="bi bi-check-circle-fill me-1"></i>Done';
+        subCls = 'text-success';
+    } else if (job && job.ok === false) {
+        const tail = (job.log_tail || '').slice(-600);
+        sub = '<i class="bi bi-x-circle-fill me-1"></i>Failed' +
+            (job.exit_code != null ? ' (exit ' + job.exit_code + ')' : '');
+        subCls = 'text-danger';
+        var failTitle = ' title="' + escapeHtml(tail || ('exit code ' + job.exit_code)) + '"';
+    } else if (job && job.err) {
+        sub = '<i class="bi bi-plug me-1"></i>Error';
+        subCls = 'text-danger';
+        var failTitle = ' title="' + escapeHtml(job.err) + '"';
+    } else if (!v) {
+        const why = info.err || (comp === 'drivers' ? 'no NVIDIA GPU?' : 'unknown');
+        sub = 'version ' + escapeHtml(why);
+    } else if (latest && verCompare(v, latest) < 0) {
+        sub = '<i class="bi bi-arrow-down-circle-fill me-1"></i>update to v' + escapeHtml(latest);
+        subCls = 'text-warning fw-semibold';
+    } else if (!latest) {
+        sub = 'latest unknown';
+    } else {
+        sub = '<i class="bi bi-check-circle-fill me-1"></i>up to date';
+        subCls = 'text-success';
+    }
+    const badge = v
+        ? '<span class="badge ' + (latest && verCompare(v, latest) < 0
+            ? 'bg-warning-glow border border-warning text-warning'
+            : 'bg-success-glow border border-success text-success') +
+          ' cu-version-badge" title="' + escapeHtml(what + (latest ? ' — latest available: v' + latest : ' — latest unknown')) +
+          '">v' + escapeHtml(v) + '</span>'
+        : '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
+          escapeHtml(info.err || (what + ' — unknown')) + '">—</span>';
+    return '<div style="line-height:1.3" class="py-1">' + badge + '<div class="small ' + subCls + '"' +
+        (typeof failTitle !== 'undefined' ? failTitle : '') + ' style="white-space:nowrap">' + sub + '</div></div>';
+}
+
+// Whole-row status: offline, run progress, else a summary of what's outdated
 function cuRowStatusHtml(rig) {
     if (!rig.is_self && !rig.online) {
         return '<span class="text-danger" title="' + escapeHtml(rig.last_error || '') +
@@ -2274,7 +2278,23 @@ function cuRowStatusHtml(rig) {
         return '<span class="' + (ok.length ? 'text-warning' : 'text-danger') + '"><i class="bi bi-x-circle-fill me-1"></i>' +
             failed.length + ' failed' + (ok.length ? ', ' + ok.length + ' ok' : '') + '</span>';
     }
-    return '<span class="text-muted"><i class="bi bi-dash me-1"></i>Idle</span>';
+    // idle: summarize what could be updated on this rig
+    const outdated = CU_COMPONENTS.filter(c => {
+        const v = cuCompVersion(rig.id, c), latest = cuCompLatest(rig.id, c);
+        return v && latest && verCompare(v, latest) < 0;
+    });
+    const known = CU_COMPONENTS.filter(c => cuCompVersion(rig.id, c));
+    if (!known.length) {
+        return '<span class="text-muted" title="' + escapeHtml((cuRigInfo[rig.id] || {}).err || '') +
+            '"><i class="bi bi-dash-circle me-1"></i>Versions unknown</span>';
+    }
+    if (outdated.length) {
+        return '<span class="text-warning" title="' +
+            escapeHtml(outdated.map(c => CU_COMPONENT_LABELS[c]).join(', ')) +
+            '"><i class="bi bi-arrow-down-circle-fill me-1"></i>' + outdated.length + ' update' +
+            (outdated.length > 1 ? 's' : '') + ' ready</span>';
+    }
+    return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>All up to date</span>';
 }
 
 function renderCuRows() {
@@ -2295,7 +2315,7 @@ function renderCuRows() {
     }
     const rigs = ((clusterData && clusterData.rigs) || []).slice().sort(naturalRigCompare);
     if (!rigs.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Loading versions...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">Loading versions...</td></tr>';
         syncCuSelectAllBoxes();
         cuPaintUpdateButton();
         return;
@@ -2303,11 +2323,14 @@ function renderCuRows() {
     tbody.innerHTML = rigs.map(rig => {
         const selfMark = rig.is_self
             ? ' <span class="badge bg-success-glow border border-success text-success small ms-1">THIS RIG</span>' : '';
+        const compTds = CU_COMPONENTS.map(c =>
+            '<td class="text-center align-middle" style="width:34px">' + cuCheckCellHtml(rig, c) + '</td>' +
+            '<td class="align-middle">' + cuCompInfoHtml(rig, c) + '</td>').join('');
         return '<tr' + ((rig.is_self || rig.online) ? '' : ' class="opacity-50"') + '>' +
-            '<td class="text-truncate" style="max-width:220px" title="' + escapeHtml(rig.host_label || '') + '">' +
+            '<td class="text-truncate align-middle" style="max-width:200px" title="' + escapeHtml(rig.host_label || '') + '">' +
             '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span>' + selfMark + '</td>' +
-            CU_COMPONENTS.map(c => '<td class="text-center">' + cuCompCellHtml(rig, c) + '</td>').join('') +
-            '<td>' + cuRowStatusHtml(rig) + '</td></tr>';
+            compTds +
+            '<td class="align-middle">' + cuRowStatusHtml(rig) + '</td></tr>';
     }).join('');
     syncCuSelectAllBoxes();
     cuPaintUpdateButton();
