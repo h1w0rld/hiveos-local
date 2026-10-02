@@ -1370,7 +1370,7 @@
 
     <!-- Overclock Modal (NVIDIA) -->
     <div class="modal fade" id="nvOcModal" tabindex="-1" aria-labelledby="nvOcModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content glass-modal border border-secondary-subtle">
                 <div class="modal-header">
                     <h5 class="modal-title fw-bold" id="nvOcModalLabel">
@@ -1382,76 +1382,63 @@
                     <input type="hidden" name="index" class="gpu-index-input">
                     <input type="hidden" name="brand" value="NVIDIA">
                     <div class="modal-body">
-                        <div class="alert alert-warning small border-warning-subtle" role="alert">
-                            <i class="bi bi-exclamation-triangle-fill"></i> <strong>Safety Warning:</strong> Apply settings in small steps. Aggressive overclocks will crash the system!
-                        </div>
-
-                        <div class="mb-3">
-                            <label for="nvCore" class="form-label fw-medium">Core Clock Offset, MHz</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvCore" name="core" placeholder="e.g. 280">
-                        </div>
-
-                        <div class="mb-3">
-                            <label for="nvLcore" class="form-label fw-medium">Fixed Core Clock, MHz</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvLcore" name="lcore" placeholder="e.g. 1410">
-                            <div class="form-text small">Locks the core to an absolute frequency (overrides the offset).</div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label for="nvMem" class="form-label fw-medium">Memory Clock Offset, MHz</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvMem" name="mem" placeholder="e.g. 2000">
-                            <div class="form-text small">In Linux, double the Windows offset value.</div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label for="nvLmem" class="form-label fw-medium">Lock Memory Clock, MHz</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvLmem" name="lmem" placeholder="e.g. 5000">
-                        </div>
-
-                        <div class="row g-3">
-                            <div class="col-6 mb-3">
-                                <label for="nvPl" class="form-label fw-medium">Power Limit, W</label>
-                                <input type="number" class="form-control bg-dark-input" id="nvPl" name="pl" placeholder="e.g. 130">
+                        <div class="row g-2">
+                            <div class="col-md-3 col-6">
+                                <label for="nvCore" class="form-label small fw-medium mb-1">Core Clock Offset, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvCore" name="core" placeholder="e.g. 280">
                             </div>
-                            <div class="col-6 mb-3">
-                                <label for="nvFan" class="form-label fw-medium">Fan Speed (%)</label>
-                                <input type="number" class="form-control bg-dark-input" id="nvFan" name="fan" min="0" max="100" placeholder="e.g. 60">
-                                <div class="form-text small">0 = Auto Fan control.</div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvLcore" class="form-label small fw-medium mb-1">Fixed Core Clock, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvLcore" name="lcore" placeholder="e.g. 1410" title="Locks the core to an absolute frequency (overrides the offset)">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvMem" class="form-label small fw-medium mb-1">Memory Clock Offset, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvMem" name="mem" placeholder="e.g. 2000" title="In Linux, double the Windows offset value">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvLmem" class="form-label small fw-medium mb-1">Lock Memory Clock, MHz</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvLmem" name="lmem" placeholder="e.g. 5000">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvPl" class="form-label small fw-medium mb-1">Power Limit, W</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvPl" name="pl" placeholder="e.g. 130">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvFan" class="form-label small fw-medium mb-1">Fan Speed, %</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvFan" name="fan" min="0" max="100" placeholder="0 = auto">
+                            </div>
+                            <div class="col-md-3 col-6">
+                                <label for="nvDelay" class="form-label small fw-medium mb-1">Delay before applying OC, s</label>
+                                <input type="number" class="form-control form-control-sm bg-dark-input" id="nvDelay" name="delay" placeholder="e.g. 30">
                             </div>
                         </div>
-
-                        <div class="mb-3">
-                            <label for="nvDelay" class="form-label fw-medium">Delay before applying OC, s</label>
-                            <input type="number" class="form-control bg-dark-input" id="nvDelay" name="delay" placeholder="e.g. 30">
-                        </div>
-
-                        <hr class="border-secondary-subtle">
-                        <div class="row g-2 small">
-                            <div class="col-6">
+                        <div class="row g-2 mt-1 align-items-center small">
+                            <div class="col-md-3 col-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="nvLed" name="led">
                                     <label class="form-check-label" for="nvLed">Disable LEDs</label>
                                 </div>
                             </div>
-                            <div class="col-6">
+                            <div class="col-md-3 col-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="nvPill" name="pill" title="OhGodAnETHlargementPill for GDDR5X cards (1080 Ti)">
                                     <label class="form-check-label" for="nvPill">"Tablet" for GDDR5X</label>
                                 </div>
                             </div>
-                            <div class="col-6">
+                            <div class="col-md-3 col-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="nvP0" name="p0">
                                     <label class="form-check-label" for="nvP0">Force P0 mode</label>
                                 </div>
                             </div>
-                            <div class="col-6">
+                            <div class="col-md-3 col-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="nvIdle" name="idle">
                                     <label class="form-check-label" for="nvIdle">Idle power reduction</label>
                                 </div>
                             </div>
                         </div>
+                        <div class="form-text small mt-2 mb-0">Apply settings in small steps — aggressive overclocks will crash the system. Empty fields are left unchanged.</div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -2098,7 +2085,7 @@
     </div>
 
 <div class="modal fade" id="ocGpuModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content glass-modal border border-secondary-subtle">
                 <div class="modal-header py-2">
                     <h6 class="modal-title fw-bold" id="ocGpuModalTitle">GPU</h6>
@@ -2106,24 +2093,26 @@
                 </div>
                 <div class="modal-body py-2">
                     <div class="row g-2">
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGCore">Core +</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGCore">Core +</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGCore"></div>
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGLcore">Core lock</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGLcore">Core lock</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGLcore"></div>
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGMem">Mem +</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGMem">Mem +</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGMem"></div>
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGLmem">Mem lock</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGLmem">Mem lock</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGLmem"></div>
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGPl">PL</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGPl">PL</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGPl"></div>
-                        <div class="col-6"><label class="form-label small mb-1" for="ocGFan">Fan</label>
+                        <div class="col-md-2 col-4"><label class="form-label small mb-1" for="ocGFan">Fan</label>
                             <input type="number" class="form-control form-control-sm bg-dark-input" id="ocGFan"></div>
                     </div>
-                    <div class="form-text small mt-2 mb-0">Values go into the GPU's position of the list fields. Empty = 0 (leave unchanged).</div>
-                </div>
-                <div class="modal-footer py-2">
-                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-sm btn-primary fw-semibold" id="ocGpuOkBtn">OK</button>
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                        <div class="form-text small mb-0">Values go into the GPU's position of the list fields. Empty = 0 (leave unchanged).</div>
+                        <div class="d-flex gap-2">
+                            <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="button" class="btn btn-sm btn-primary fw-semibold" id="ocGpuOkBtn">OK</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
