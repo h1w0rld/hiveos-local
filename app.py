@@ -1918,6 +1918,9 @@ METRICS_MAX_DAYS = 4              # keep the 3d view + one buffer day
 METRICS_MAX_EVENTS = 600
 _METRICS_EVENT_LEVELS = ("info", "file", "danger", "warning", "success")
 _metrics_last_miner_running = {"value": None}
+# Serializes load->modify->save flows on the metrics store (sampler thread vs
+# request threads used to lose events/samples written concurrently)
+_metrics_lock = threading.Lock()
 
 def _metrics_day_key(ts):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
@@ -1957,13 +1960,14 @@ def record_metrics_event(level, message, ts=None):
     try:
         if level not in _METRICS_EVENT_LEVELS:
             level = "info"
-        store = _load_metrics_store()
-        events = store.get("events", [])
-        events.append({"ts": int(ts if ts is not None else time.time()),
-                       "level": level, "message": str(message)[:300]})
-        cutoff = time.time() - METRICS_MAX_DAYS * 86400
-        store["events"] = [e for e in events if isinstance(e, dict) and e.get("ts", 0) >= cutoff][-METRICS_MAX_EVENTS:]
-        _save_metrics_store(store)
+        with _metrics_lock:
+            store = _load_metrics_store()
+            events = store.get("events", [])
+            events.append({"ts": int(ts if ts is not None else time.time()),
+                           "level": level, "message": str(message)[:300]})
+            cutoff = time.time() - METRICS_MAX_DAYS * 86400
+            store["events"] = [e for e in events if isinstance(e, dict) and e.get("ts", 0) >= cutoff][-METRICS_MAX_EVENTS:]
+            _save_metrics_store(store)
     except Exception as e:
         logging.error(f"Failed to record metrics event: {e}")
 
@@ -1987,19 +1991,20 @@ def _metrics_take_sample():
     total_mh = round(float(payload.get("total_hashrate_mh", 0) or 0), 2)
     sample = [ts, temps, fans, powers, hashrates, total_w, total_mh]
 
-    store = _load_metrics_store()
-    days = store.setdefault("days", {})
-    day = days.setdefault(_metrics_day_key(ts), {"samples": []})
-    samples = day.setdefault("samples", [])
-    if not samples or samples[-1][0] < ts - METRICS_SAMPLE_INTERVAL - 5:
-        samples.append(sample)
-    store["meta"] = {"algo": str(payload.get("miner_algo") or ""), "gpu_count": len(gpus)}
-    cutoff_key = _metrics_day_key(ts - METRICS_MAX_DAYS * 86400)
-    for k in [k for k in list(days.keys()) if k < cutoff_key]:
-        del days[k]
-    cutoff = ts - METRICS_MAX_DAYS * 86400
-    store["events"] = [e for e in store.get("events", []) if isinstance(e, dict) and e.get("ts", 0) >= cutoff]
-    _save_metrics_store(store)
+    with _metrics_lock:
+        store = _load_metrics_store()
+        days = store.setdefault("days", {})
+        day = days.setdefault(_metrics_day_key(ts), {"samples": []})
+        samples = day.setdefault("samples", [])
+        if not samples or samples[-1][0] < ts - METRICS_SAMPLE_INTERVAL - 5:
+            samples.append(sample)
+        store["meta"] = {"algo": str(payload.get("miner_algo") or ""), "gpu_count": len(gpus)}
+        cutoff_key = _metrics_day_key(ts - METRICS_MAX_DAYS * 86400)
+        for k in [k for k in list(days.keys()) if k < cutoff_key]:
+            del days[k]
+        cutoff = ts - METRICS_MAX_DAYS * 86400
+        store["events"] = [e for e in store.get("events", []) if isinstance(e, dict) and e.get("ts", 0) >= cutoff]
+        _save_metrics_store(store)
 
     # Miner state transitions -> Activity events (skip the very first check)
     running = bool((payload.get("system") or {}).get("miner_running"))
@@ -2137,6 +2142,15 @@ def guard_capture_snapshot():
     _guard_save(st)
     return st
 
+def _guard_merge_save(st, fields):
+    """Save only the given pass-owned fields over the FRESH on-disk/in-memory
+    state, so a snapshot refreshed concurrently (guard_note_config_change)
+    is never rolled back by a stale copy from the start of a check pass."""
+    fresh = _guard_load()
+    for k in fields:
+        fresh[k] = st.get(k)
+    _guard_save(fresh)
+
 def guard_note_config_change():
     """Hook fired after every config write made through this panel: refresh the
     protected snapshot so the guard enforces the rig's newest settings, not a
@@ -2163,7 +2177,7 @@ def guard_run_check(apply=True):
     drifted = [name for name in snapshot if name in GUARD_FILES and _guard_read_file(name) != snapshot[name]]
     report["drifted"] = drifted
     if not drifted:
-        _guard_save(st)
+        _guard_merge_save(st, ["last_check"])
         return report
 
     st["last_drift"] = now
@@ -2196,7 +2210,10 @@ def guard_run_check(apply=True):
     st["last_action"] = "reverted " + ", ".join(drifted) + ("; " + "; ".join(actions) if actions else "")
     report["fixed"] = bool(restored)
     report["action"] = st["last_action"]
-    _guard_save(st)
+    # Merge-only save: a panel config write may have refreshed the snapshot
+    # (guard_note_config_change) while this pass was running — keep it instead
+    # of overwriting with the stale copy captured at pass start.
+    _guard_merge_save(st, ["last_check", "last_drift", "last_fix", "last_action"])
     if apply and restored:
         record_metrics_event("warning", "Local guard: config overwritten externally (" +
                              ", ".join(drifted) + ") - local settings re-applied")
@@ -2386,6 +2403,18 @@ def start_cluster_worker():
     t.start()
     logging.info("Cluster sync worker started")
 
+# Atomic file write: tmp + fsync + os.replace — a crash mid-write can never
+# truncate the previous content (same class of bug as the 1.10.22 ghost-rig fix)
+def _atomic_write_file(path, content, mode=0o600):
+    with config_lock:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, 'w') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+
 # Load or generate dashboard access password (legacy 6-digit PINs stay valid as passwords)
 def load_or_generate_access_key():
     with config_lock:
@@ -2398,14 +2427,12 @@ def load_or_generate_access_key():
                         return key
             except Exception as e:
                 logging.error(f"Failed to read access password: {e}")
-        
+
         # Generate new 6-digit random password
         key = "".join([str(random.randint(0, 9)) for _ in range(6)])
         try:
-            with open(PIN_PATH, 'w') as f:
-                f.write(key)
-            os.chmod(PIN_PATH, 0o600) # Read/write by root only
-            logging.info(f"Generated new dashboard access password: {key}")
+            _atomic_write_file(PIN_PATH, key) # Read/write by root only
+            logging.info("Generated new dashboard access password (value not logged)")
         except Exception as e:
             logging.error(f"Failed to write access password: {e}")
         return key
@@ -3306,7 +3333,7 @@ def require_auth():
     if request.method == 'POST':
         token = request.headers.get('X-CSRF-Token')
         expected = session.get('csrf_token')
-        if not token or not expected or token != expected:
+        if not token or not expected or not hmac.compare_digest(str(token), str(expected)):
             logging.warning(f"CSRF Alert: Invalid or missing token from IP {request.remote_addr}")
             return jsonify({"success": False, "message": "CSRF verification failed."}), 403
 
@@ -3342,6 +3369,9 @@ def api_login():
         return jsonify({"success": True, "message": "Authenticated successfully!", "csrf_token": csrf_token})
     
     # Log failure and increment counters
+    # Prune stale entries so a distributed scan cannot grow the dict unbounded
+    for bad_ip in [k for k, v in failed_login_attempts.items() if v.get("blocked_until", 0.0) < now]:
+        del failed_login_attempts[bad_ip]
     if ip not in failed_login_attempts:
         failed_login_attempts[ip] = {"count": 1, "blocked_until": 0.0}
     else:
@@ -3376,10 +3406,7 @@ def change_password():
         return jsonify({"success": False, "message": "Password contains unsupported characters."}), 400
 
     try:
-        with config_lock:
-            with open(PIN_PATH, 'w') as f:
-                f.write(new_password)
-            os.chmod(PIN_PATH, 0o600)
+        _atomic_write_file(PIN_PATH, new_password)
     except Exception as e:
         logging.error(f"Failed to write new access password: {e}")
         return jsonify({"success": False, "message": "Failed to save the new password."}), 500
@@ -3651,6 +3678,22 @@ def save_overclock():
     # brand == "AMD" (validated above)
     filepath = AMD_OC_CONF
     config = parse_shell_config(filepath)
+
+    if apply_all:
+        # "all" previously produced gpu_index=None -> TypeError on list padding.
+        # Resolve the AMD GPU count from live stats; fall back to the longest
+        # existing per-GPU list so the payload still applies to known entries.
+        fields_probe = ["CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF"]
+        try:
+            amd_gpus = [g for g in get_gpu_stats().get("gpus", []) if g.get("brand") == "AMD"]
+        except Exception:
+            amd_gpus = []
+        if amd_gpus:
+            gpu_index = len(amd_gpus) - 1
+        else:
+            gpu_index = max([len(config.get(f, "").split()) for f in fields_probe] + [1]) - 1
+        if gpu_index < 0:
+            gpu_index = 0
 
     fields = ["CORE", "MEM", "VDD", "VDDCI", "MVDD", "FAN", "PL", "DPM", "REF"]
     parsed_fields = {}
@@ -5067,10 +5110,7 @@ def _load_json_store(path, default):
 
 def _save_json_store(path, data):
     try:
-        with config_lock:
-            with open(path, 'w') as f:
-                json.dump(data, f, indent=2)
-            os.chmod(path, 0o600)
+        _atomic_write_file(path, json.dumps(data, indent=2))
         return True
     except Exception as e:
         logging.error(f"Failed to write {path}: {e}")
@@ -6135,10 +6175,11 @@ def api_metrics_rate():
         return jsonify({"success": False, "message": "Rate must be a number."}), 400
     if not (0 <= rate <= 10000):
         return jsonify({"success": False, "message": "Rate out of range (0-10000)."}), 400
-    store = _load_metrics_store()
-    old = float(store.get("rate", 0.0) or 0.0)
-    store["rate"] = rate
-    _save_metrics_store(store)
+    with _metrics_lock:
+        store = _load_metrics_store()
+        old = float(store.get("rate", 0.0) or 0.0)
+        store["rate"] = rate
+        _save_metrics_store(store)
     if old != rate:
         record_metrics_event("info", f"Electricity rate set to {rate:g} RUB/kWh")
     return jsonify({"success": True, "rate": rate, "message": f"Rate saved: {rate:g} RUB/kWh"})
@@ -6344,7 +6385,12 @@ def api_cluster_rig_save():
             existing["name"] = name
             existing["host_label"] = host_label
             if password:
-                existing["password"] = password
+                # UI resubmits unchanged secrets as the '********' mask — never store it
+                if password == "********":
+                    if not existing.get("password"):
+                        return jsonify({"success": False, "message": "Dashboard password of the remote rig is required."}), 400
+                else:
+                    existing["password"] = password
         existing["updated_at"] = now
         action = "updated"
 
@@ -7018,7 +7064,7 @@ if __name__ == '__main__':
     print("="*60)
     print(" -> STATUS: Running in PRODUCTION MODE (HiveOS host verified)")
     print(" -> CONFIGS: Reading/Writing from /hive-config/")
-    print(f" -> ACCESS PASSWORD: {app.config['ACCESS_PASSWORD']}")
+    print(f" -> ACCESS PASSWORD: {'*' * len(str(app.config['ACCESS_PASSWORD']))} (see /hive-config/dashboard.key)")
     print(f" -> DASHBOARD ADDRESS: http://{local_ip}:{port}")
     print("="*60 + "\n")
     

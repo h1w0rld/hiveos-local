@@ -1011,8 +1011,8 @@ const AUTO_REFRESH_LOADERS = {
     jumps: () => loadAccessList({jumps: true}),
     cluster: () => { if (activeView === 'cluster') loadClusterData(true); },
     updates: () => { if (cuTabVisible()) refreshClusterUpdate(); },
-    wallets: () => renderWallets(),
-    fsheets: () => loadFsheets(),
+    wallets: () => { if (activeView === 'dashboard' && activeDashTab === 'wallets') renderWallets(); },
+    fsheets: () => { if (activeView === 'dashboard' && activeDashTab === 'fsheets') loadFsheets(); },
     fans: () => { if (activeView === 'dashboard' && activeDashTab === 'fans') loadFans(); },
     metrics: () => { if (activeView === 'dashboard' && activeDashTab === 'stats') loadMetricsTab(); }
 };
@@ -1136,6 +1136,7 @@ function switchRig(rigId) {
     window._ocAllDirty = false; // new rig -> the all-GPU OC card can re-prefill
     window._mknetUI = null; // new rig -> the 8MK_NET form reloads its config
     lastStatsData = null;
+    statsRunId++; // invalidate any in-flight fetchStats of the previous rig
     updateRigScopeUi();
     fetchStats();
     loadTuningSettings();
@@ -1395,6 +1396,7 @@ async function toggleGuardMode(rigId, checkbox) {
 window.toggleGuardMode = toggleGuardMode;
 
 // Toast notification helper
+let _toastTimer = null;
 function showToast(message, isSuccess = true, isWarn = false) {
     const toastEl = document.getElementById('statusToast');
     const toastMessage = document.getElementById('toastMessage');
@@ -1412,9 +1414,11 @@ function showToast(message, isSuccess = true, isWarn = false) {
         toastEl.className = 'toast align-items-center text-bg-danger border-0 show';
         toastIcon.className = 'bi bi-exclamation-octagon-fill fs-5';
     }
-    
-    setTimeout(() => {
+
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => {
         toastEl.classList.remove('show');
+        _toastTimer = null;
     }, 4500);
 }
 
@@ -1437,7 +1441,9 @@ function showLoginOverlay() {
 }
 
 // Fetch stats from backend API
+let statsRunId = 0; // stale-guard: only the latest fetch may paint the dashboard
 async function fetchStats() {
+    const runId = ++statsRunId;
     try {
         const response = await apiFetch('/api/stats');
 
@@ -1446,13 +1452,17 @@ async function fetchStats() {
             showLoginOverlay();
             return;
         }
-        
+
         if (!response.ok) {
             const errText = await response.text();
             throw new Error(`HTTP ${response.status}: ${errText}`);
         }
-        
+
         const data = await response.json();
+
+        // A newer fetch (interval tick / rig switch) superseded this one —
+        // never let a stale response overwrite fresh dashboard state
+        if (runId !== statsRunId) return;
         
         // Hide login if active (restored session on page reload)
         if (!document.getElementById('loginOverlay').classList.contains('d-none')) {
@@ -1490,9 +1500,9 @@ async function fetchStats() {
         let gpuCount = data.gpus.length;
 
         data.gpus.forEach(gpu => {
-            totalPower += gpu.power;
-            sumTemp += gpu.temp;
-            sumFan += gpu.fan;
+            totalPower += parseFloat(gpu.power) || 0;
+            sumTemp += parseFloat(gpu.temp) || 0;
+            sumFan += parseFloat(gpu.fan) || 0;
         });
 
         let avgTemp = gpuCount > 0 ? (sumTemp / gpuCount).toFixed(1) : 0;
@@ -1520,7 +1530,7 @@ async function fetchStats() {
             hpStatus.className = "stat-value text-danger";
         }
         
-        const hashrate = data.system.cpu.hashrate;
+        const hashrate = parseFloat((data.system.cpu || {}).hashrate) || 0;
         const formattedHash = hashrate > 1000 ? (hashrate / 1000).toFixed(2) + ' KH/s' : hashrate.toFixed(0) + ' H/s';
         document.getElementById('cpuHashrateBadge').textContent = formattedHash;
         lastHugepagesEnabled = !!data.system.cpu.hugepages;
@@ -1539,7 +1549,7 @@ async function fetchStats() {
                 <div class="alert alert-danger border-0 mb-0" role="alert">
                     <i class="bi bi-wifi-off fs-1 d-block mb-2"></i>
                     <h4 class="alert-heading fw-bold">Failed to Load GPU Stats</h4>
-                    <p class="mb-0 small">${error.message}</p>
+                    <p class="mb-0 small">${escapeHtml(error.message)}</p>
                 </div>
             </div>
         `;
@@ -1620,12 +1630,14 @@ function renderGpus(gpus) {
             return (plus && n > 0 ? '+' + n : v);
         };
         
-        // Identity meta: real vendor, bus, VRAM, VBIOS
+        // Identity meta: real vendor, bus, VRAM, VBIOS (values come from the rig's
+        // nvidia-smi output — escape before they touch innerHTML)
         const vendor = gpu.subvendor || gpu.brand || '';
+        const vendorCls = /^[a-z0-9_-]+$/i.test(vendor) ? vendor.toLowerCase() : 'unknown';
         const metaText = [vendor, gpu.bus_id,
                           gpu.vram_mb ? gpu.vram_mb + ' MB' : '', gpu.vbios].filter(Boolean).join(' • ');
-        const metaHtml = `<span class="brand-${vendor.toLowerCase()}">${vendor}</span>` +
-            metaText.slice(vendor.length);
+        const metaHtml = `<span class="brand-${vendorCls}">${escapeHtml(vendor)}</span>` +
+            escapeHtml(metaText.slice(vendor.length));
         
         // Power: draw / enforced limit / (min–max range)
         const pwrDraw = Math.round(gpu.power);
@@ -1650,8 +1662,8 @@ function renderGpus(gpus) {
                 <div class="gpu-list-id">
                     <span class="badge bg-primary bg-opacity-25 text-primary fw-bold font-monospace">GPU ${i}</span>
                     <div class="gpu-list-name">
-                        <div class="gpu-list-model" title="${gpu.model}">${gpu.model}</div>
-                        <div class="gpu-list-sub" title="${metaText}">${metaHtml}</div>
+                        <div class="gpu-list-model" title="${escapeHtml(gpu.model)}">${escapeHtml(gpu.model)}</div>
+                        <div class="gpu-list-sub" title="${escapeHtml(metaText)}">${metaHtml}</div>
                     </div>
                 </div>
 
@@ -1717,7 +1729,7 @@ function renderIgpus(igpus, system) {
                             <span class="badge bg-accent-glow text-info fw-bold font-monospace">${cpuHashStr}</span>
                         </div>
                         
-                        <h3 class="h6 fw-bold mb-1" style="font-size: 0.95rem;">${cpu.model}</h3>
+                        <h3 class="h6 fw-bold mb-1" style="font-size: 0.95rem;">${escapeHtml(cpu.model)}</h3>
                         <p class="small text-muted mb-3">
                             <span class="brand-intel">XMRig CPU Mining</span> • Huge Pages: ${cpu.hugepages ? '<span class="text-success fw-semibold">Enabled</span>' : '<span class="text-danger fw-semibold">Disabled</span>'}
                         </p>
@@ -1771,9 +1783,9 @@ function renderIgpus(igpus, system) {
                         <span class="badge bg-accent-glow text-info fw-bold">Integrated</span>
                     </div>
                     
-                    <h3 class="h5 fw-bold mb-1">${igpu.model}</h3>
+                    <h3 class="h5 fw-bold mb-1">${escapeHtml(igpu.model)}</h3>
                     <p class="small text-muted mb-3">
-                        <span class="brand-${igpu.brand.toLowerCase()}">${igpu.brand}</span> • Built into processor, not used for mining
+                        <span class="brand-${/^[a-z0-9_-]+$/i.test(igpu.brand || '') ? igpu.brand.toLowerCase() : 'unknown'}">${escapeHtml(igpu.brand)}</span> • Built into processor, not used for mining
                     </p>
                     
                     <div class="metric-row">
@@ -2402,12 +2414,12 @@ async function cuUpdateOneRig(rig, password) {
     while (Date.now() < deadline) {
         await cuSleep(3000);
         const v = await cuFetchVersion(rig.id, rig.is_self, 8000);
-        if (typeof v === 'string') {
-            if (cuLatest && verCompare(v, cuLatest) >= 0) {
-                paint('updated', '', v);
+        if (v && v.version) {
+            if (cuLatest && verCompare(v.version, cuLatest) >= 0) {
+                paint('updated', '', v.version);
                 return true;
             }
-            paint('updating', '', v); // old build still answering — restart pending
+            paint('updating', '', v.version); // old build still answering — restart pending
         }
         // else: panel restarting / unreachable — keep polling
     }
