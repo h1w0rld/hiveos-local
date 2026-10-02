@@ -2005,3 +2005,24 @@ hr {
     cursor: not-allowed;
     opacity: 0.5;
 }
+
+/* Updates tab: one line per rig — checkbox, current and latest version inline */
+.cu-table {
+    table-layout: auto;
+    width: 100%;
+}
+.cu-table td, .cu-table th {
+    vertical-align: middle;
+    white-space: nowrap;
+    padding-top: .35rem;
+    padding-bottom: .35rem;
+}
+.cu-table .cu-check-col {
+    width: 1%;
+    padding-left: .5rem;
+    padding-right: .5rem;
+}
+.cu-table td:not(.cu-check-col), .cu-table th:not(.cu-check-col) {
+    padding-left: .75rem;
+    padding-right: .75rem;
+}

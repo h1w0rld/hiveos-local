@@ -1047,24 +1047,19 @@
                             <span id="cuRunBannerText" class="fw-semibold">Updating...</span>
                         </div>
                         <div class="table-responsive">
-                            <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
-                                <colgroup>
-                                    <col style="width: 15%"><col style="width: 30px"><col style="width: 14%">
-                                    <col style="width: 30px"><col style="width: 15%">
-                                    <col style="width: 30px"><col style="width: 14%"><col>
-                                </colgroup>
+                            <table class="table table-sm table-borderless align-middle mb-2 cu-table" style="font-size: 0.88rem;">
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
                                         <th>Rig</th>
-                                        <th class="text-center align-middle" title="Select all rigs for Panel update">
+                                        <th class="text-center align-middle cu-check-col" title="Select all rigs for Panel update">
                                             <input type="checkbox" class="form-check-input m-0" id="cuAllPanel">
                                         </th>
                                         <th title="This dashboard's own software (pulls the latest release from GitHub)">Panel</th>
-                                        <th class="text-center align-middle" title="Select all rigs for driver update">
+                                        <th class="text-center align-middle cu-check-col" title="Select all rigs for driver update">
                                             <input type="checkbox" class="form-check-input m-0" id="cuAllDrivers">
                                         </th>
                                         <th title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">GPU Drivers</th>
-                                        <th class="text-center align-middle" title="Select all rigs for Hive OS upgrade">
+                                        <th class="text-center align-middle cu-check-col" title="Select all rigs for Hive OS upgrade">
                                             <input type="checkbox" class="form-check-input m-0" id="cuAllHiveos">
                                         </th>
                                         <th title="Hive OS system packages via selfupgrade (apt)">Hive OS</th>
