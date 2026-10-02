@@ -5902,11 +5902,17 @@ def api_version():
 UPDATE_STATUS_PATH = os.path.join(HIVE_CONFIG_DIR, "update_status.json")
 UPDATE_LOG_DIR = "/var/log"
 UPDATE_COMPONENT_CMDS = {
+    # sudo resets PATH to secure_path, which drops /hive/bin and /hive/sbin -
+    # selfupgrade internally calls miner/hpkg/wd/autofan and dies with exit 127
+    # ("command not found") when run from a non-login context (panel). Restore
+    # the full Hive PATH explicitly for the child process.
     # nvidia-driver-update stops the miner itself (nvstop) and restarts it after
     "drivers": ("if ! command -v nvidia-smi >/dev/null 2>&1; then "
                 "echo 'No NVIDIA GPUs detected on this rig - driver update is not applicable'; exit 3; fi; "
-                "sudo /hive/sbin/nvidia-driver-update"),
-    "hiveos": "sudo /hive/bin/selfupgrade",
+                "sudo env PATH=/hive/sbin:/hive/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+                "/hive/sbin/nvidia-driver-update"),
+    "hiveos": ("sudo env PATH=/hive/sbin:/hive/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+               "/hive/bin/selfupgrade"),
 }
 UPDATE_COMPONENT_LABELS = {
     "drivers": "NVIDIA driver update",
