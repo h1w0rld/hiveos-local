@@ -1832,6 +1832,21 @@ hr {
     flex: 0 0 130px;
 }
 
+.stats-event-bucket-bar {
+    margin-bottom: 0.4rem;
+}
+
+.stats-event-showall {
+    color: var(--text-muted);
+}
+.stats-event-showall:hover {
+    color: var(--text-primary);
+}
+
+#statsActivityChart {
+    cursor: crosshair;
+}
+
 /* OC preset modal per-GPU table: transparent like the wallet/preset tables,
    hairline borders, compact number inputs per GPU row */
 .oc-preset-pergpu-table { --bs-table-bg: transparent; }

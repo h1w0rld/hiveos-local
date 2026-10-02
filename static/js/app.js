@@ -7439,6 +7439,35 @@ function statsActivityBuckets() {
     return { startTs, bucketMs, nBuckets };
 }
 
+function statsEventsForBucket(idx, events) {
+    const { startTs, bucketMs } = statsActivityBuckets();
+    const lvl = statsState.filter;
+    return (events || []).filter(e =>
+        (lvl === 'all' || e.level === lvl) &&
+        Math.floor((e.ts * 1000 - startTs) / bucketMs) === idx);
+}
+
+function statsBucketRangeLabel(idx) {
+    const { startTs, bucketMs } = statsActivityBuckets();
+    return statsFullLabel((startTs + idx * bucketMs) / 1000) + ' \u2013 ' + statsFullLabel((startTs + (idx + 1) * bucketMs) / 1000);
+}
+
+// tooltip body lines: actual event messages of a bucket, truncated
+function statsBucketTooltipLines(idx, events) {
+    const evs = statsEventsForBucket(idx, events);
+    if (!evs.length) return [];
+    const lines = evs.slice(0, 5).map(e => {
+        const msg = e.message.length > 64 ? e.message.slice(0, 61) + '\u2026' : e.message;
+        return ' \u2022 ' + msg;
+    });
+    if (evs.length > 5) lines.push(' \u2026 +' + (evs.length - 5) + ' more (click)');
+    return lines;
+}
+
+function statsActivityTooltipPlugin(events) {
+    return { afterBody: (items) => statsBucketTooltipLines(items[0].dataIndex, events) };
+}
+
 function statsRenderActivity() {
     const data = statsState.data;
     if (statsState.charts.activity) { statsState.charts.activity.destroy(); statsState.charts.activity = null; }
@@ -7468,10 +7497,12 @@ function statsRenderActivity() {
             tooltip: {
                 callbacks: {
                     title: (items) => statsFullLabel((startTs + items[0].dataIndex * bucketMs) / 1000),
-                    label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y
+                    label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y,
+                    afterBody: statsActivityTooltipPlugin(data.events).afterBody
                 }
             }
         },
+        onClick: (evt, els) => { if (els.length) openStatsDetail('activity', els[0].dataIndex); },
         scales: {
             x: {
                 stacked: true,
@@ -7498,30 +7529,43 @@ function setActivityFilter(filter) {
     if (statsState.data) statsRenderActivity();
 }
 
-function statsRenderEventList(container, events) {
-    if (!events.length) {
-        container.innerHTML = '<div class="text-muted small">No events in this range</div>';
-        return;
+function statsRenderEventList(container, events, bucketIdx) {
+    let head = '';
+    if (Number.isInteger(bucketIdx)) {
+        head = '<div class="stats-event-bucket-bar d-flex flex-wrap align-items-center gap-2">' +
+            '<span class="badge rounded-pill text-bg-secondary">' + escapeHtml(statsBucketRangeLabel(bucketIdx)) + '</span>' +
+            '<a href="#" class="stats-event-showall small">Show all</a></div>';
     }
-    container.innerHTML = events.slice().reverse().map(e =>
-        '<div class="stats-event-row">' +
-        '<span class="stats-legend-dot" style="background:' + (STATS_EVENT_COLORS[e.level] || '#c6ccd2') + '"></span>' +
-        '<span class="stats-event-time">' + escapeHtml(statsFullLabel(e.ts)) + '</span>' +
-        '<span class="stats-event-msg">' + escapeHtml(e.message) + '</span></div>'
-    ).join('');
+    const rows = events.length
+        ? events.slice().reverse().map(e =>
+            '<div class="stats-event-row">' +
+            '<span class="stats-legend-dot" style="background:' + (STATS_EVENT_COLORS[e.level] || '#c6ccd2') + '"></span>' +
+            '<span class="stats-event-time">' + escapeHtml(statsFullLabel(e.ts)) + '</span>' +
+            '<span class="stats-event-msg">' + escapeHtml(e.message) + '</span></div>'
+        ).join('')
+        : '<div class="text-muted small">' + (Number.isInteger(bucketIdx) ? 'No events in this interval' : 'No events in this range') + '</div>';
+    container.innerHTML = head + rows;
+    const sa = container.querySelector('.stats-event-showall');
+    if (sa) sa.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        statsState.detailBucket = null;
+        openStatsDetail('activity');
+    });
 }
 
-function openStatsDetail(key) {
+function openStatsDetail(key, bucketIdx) {
     const data = statsState.data;
     if (!data || typeof Chart === 'undefined') return;
     const algo = data.algo || 'Hashrate';
     const titles = { activity: 'Activity', temp: 'TEMP', fan: 'FAN', power: 'POWER', hashrate: algo, powertotal: 'Power', hashtotal: algo + ' (total)' };
     document.getElementById('statsDetailTitle').textContent = titles[key] || 'Detail view';
+    statsState.detailBucket = (key === 'activity' && Number.isInteger(bucketIdx)) ? bucketIdx : null;
     const eventsBox = document.getElementById('statsDetailEvents');
     const isActivity = key === 'activity';
     eventsBox.classList.toggle('d-none', !isActivity);
     if (isActivity) {
-        statsRenderEventList(eventsBox, (data.events || []).filter(e => statsState.filter === 'all' || e.level === statsState.filter));
+        const evs = (data.events || []).filter(e => statsState.filter === 'all' || e.level === statsState.filter);
+        statsRenderEventList(eventsBox, statsState.detailBucket != null ? statsEventsForBucket(statsState.detailBucket, evs) : evs, statsState.detailBucket);
     }
     if (statsState.detailChart) { statsState.detailChart.destroy(); statsState.detailChart = null; }
 
@@ -7545,7 +7589,21 @@ function openStatsDetail(key) {
         }));
         options = {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y } } },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y,
+                        afterBody: statsActivityTooltipPlugin(data.events).afterBody
+                    }
+                }
+            },
+            onClick: (evt, els) => {
+                if (!els.length) return;
+                statsState.detailBucket = els[0].dataIndex;
+                const evs = (data.events || []).filter(e => statsState.filter === 'all' || e.level === statsState.filter);
+                statsRenderEventList(eventsBox, statsEventsForBucket(els[0].dataIndex, evs), els[0].dataIndex);
+            },
             scales: {
                 x: { stacked: true, ticks: { color: 'rgba(198,204,210,0.6)', font: { size: 11 }, autoSkip: true, maxTicksLimit: 12 }, grid: { display: false } },
                 y: { stacked: true, beginAtZero: true, ticks: { color: 'rgba(198,204,210,0.6)', precision: 0 }, grid: { color: 'rgba(198,204,210,0.07)' } }
