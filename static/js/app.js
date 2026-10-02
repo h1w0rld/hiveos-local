@@ -2242,12 +2242,12 @@ function cuCompInfoHtml(rig, comp) {
         cls = 'text-danger';
         var failTitle = ' title="' + escapeHtml(job.err) + '"';
     } else if (outdated) {
-        tail = '<span title="Latest available version">\u2192 v' + escapeHtml(latest) + '</span>';
+        tail = '<span title="Latest available version">update available \u2192 v' + escapeHtml(latest) + '</span>';
         cls = 'text-warning fw-semibold';
     } else if (v && !latest) {
-        tail = '<span title="Latest available version could not be detected">latest ?</span>';
+        tail = '<span title="Latest available version could not be detected">latest version unknown</span>';
     } else if (v) {
-        tail = '<i class="bi bi-check-circle-fill me-1" title="Up to date"></i>';
+        tail = '<span title="Up to date"><i class="bi bi-check-circle-fill me-1"></i>up to date</span>';
         cls = 'text-success';
     } // v==='' : badge already explains (no NVIDIA GPU / unknown)
     return '<span class="d-inline-flex align-items-center gap-1 text-nowrap">' + badge +
@@ -2290,9 +2290,10 @@ function cuRowStatusHtml(rig) {
         return '<span class="text-warning" title="' +
             escapeHtml(outdated.map(c => CU_COMPONENT_LABELS[c]).join(', ')) +
             '"><i class="bi bi-arrow-down-circle-fill me-1"></i>' + outdated.length + ' update' +
-            (outdated.length > 1 ? 's' : '') + ' ready</span>';
+            (outdated.length > 1 ? 's' : '') + ' ready — ' +
+            escapeHtml(outdated.map(c => CU_COMPONENT_LABELS[c]).join(', ')) + '</span>';
     }
-    return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>All up to date</span>';
+    return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>All components up to date</span>';
 }
 
 function renderCuRows() {
@@ -2325,8 +2326,9 @@ function renderCuRows() {
             '<td class="text-center align-middle cu-check-col">' + cuCheckCellHtml(rig, c) + '</td>' +
             '<td class="align-middle">' + cuCompInfoHtml(rig, c) + '</td>').join('');
         return '<tr' + ((rig.is_self || rig.online) ? '' : ' class="opacity-50"') + '>' +
-            '<td class="text-truncate align-middle" style="max-width:200px" title="' + escapeHtml(rig.host_label || '') + '">' +
-            '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span>' + selfMark + '</td>' +
+            '<td class="align-middle" title="' + escapeHtml(rig.host_label || '') + '">' +
+            '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span>' + selfMark +
+            (rig.host_label ? ' <span class="small text-muted ms-2">' + escapeHtml(rig.host_label) + '</span>' : '') + '</td>' +
             compTds +
             '<td class="align-middle">' + cuRowStatusHtml(rig) + '</td></tr>';
     }).join('');

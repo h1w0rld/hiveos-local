@@ -2014,8 +2014,8 @@ hr {
 .cu-table td, .cu-table th {
     vertical-align: middle;
     white-space: nowrap;
-    padding-top: .35rem;
-    padding-bottom: .35rem;
+    padding-top: .15rem;
+    padding-bottom: .15rem;
 }
 .cu-table .cu-check-col {
     width: 1%;
