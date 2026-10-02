@@ -395,7 +395,6 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('dashTabServicesBtn').addEventListener('click', () => showDashTab('services'));
     document.getElementById('dashTabStatsBtn').addEventListener('click', () => showDashTab('stats'));
     document.getElementById('dashTabUpdatesBtn').addEventListener('click', () => showDashTab('updates'));
-    document.getElementById('gotoWalletsBtn').addEventListener('click', () => showDashTab('wallets'));
 
     // GPU Fans tab (1:1 copy of the HiveOS worker Autofan page)
     document.getElementById('afTableModeBtn').addEventListener('click', () => {
@@ -5092,7 +5091,7 @@ function fsExpandHtml(f) {
         '<div class="d-flex justify-content-end gap-2 mt-2">' +
             '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="expand-clear" data-id="' + fid + '">Clear</button>' +
             '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="expand-cancel" data-id="' + fid + '">Cancel</button>' +
-            '<button type="button" class="btn btn-sm btn-warning fw-semibold px-3" data-action="expand-save" data-id="' + fid + '">Apply changes</button>' +
+            '<button type="button" class="btn btn-sm btn-primary fw-semibold" data-action="expand-save" data-id="' + fid + '">Apply</button>' +
         '</div>' +
     '</div>';
 }
