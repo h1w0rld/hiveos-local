@@ -131,17 +131,6 @@ function fmtSpeed(mh) {
     return '0 MH/s';
 }
 
-// Short duration for stat boxes: input seconds, output like "3d 4h" / "5h 12m" / "42m"
-function fmtDurationShort(sec) {
-    sec = Math.max(0, parseInt(sec, 10) || 0);
-    const d = Math.floor(sec / 86400);
-    const h = Math.floor((sec % 86400) / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    if (d > 0) return d + 'd ' + h + 'h';
-    if (h > 0) return h + 'h ' + m + 'm';
-    return m + 'm';
-}
-
 function fmtSpeedHtml(mh) {
     return '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
 }
@@ -1505,42 +1494,6 @@ async function fetchStats() {
         document.getElementById('statMiner').textContent = data.system.active_miner;
         document.getElementById('statVersion').textContent = data.system.hive_version;
 
-        // HiveOS update-available icon (circular arrow next to the version)
-        const verUpdIcon = document.getElementById('statVerUpdateIcon');
-        if (verUpdIcon) {
-            const upd = !!data.hiveos_update_available;
-            verUpdIcon.classList.toggle('d-none', !upd);
-            if (upd && data.hiveos_latest) {
-                verUpdIcon.title = 'New HiveOS version available: ' + data.hiveos_latest + ' — see the Updates tab';
-            }
-        }
-
-        // Miner uptime
-        const minerUpEl = document.getElementById('statMinerUptime');
-        if (minerUpEl) {
-            const upS = data.miner_uptime_s;
-            minerUpEl.textContent = (upS == null) ? 'Stopped' : fmtDurationShort(upS);
-            minerUpEl.className = 'stat-value' + (upS == null ? ' text-danger' : '');
-            minerUpEl.title = (upS == null) ? 'Miner screen session is not running' : 'Time since the miner started';
-        }
-
-        // Shares (accepted / rejected)
-        const sharesEl = document.getElementById('statShares');
-        if (sharesEl) {
-            const sh = data.shares;
-            if (!sh) {
-                sharesEl.textContent = '—';
-                sharesEl.className = 'stat-value';
-                sharesEl.title = 'Share counters unavailable (miner stats API did not report them)';
-            } else {
-                const tot = (sh.accepted || 0) + (sh.rejected || 0);
-                const rejPct = tot > 0 ? (100 * (sh.rejected || 0) / tot) : 0;
-                sharesEl.textContent = (sh.accepted || 0).toLocaleString() + ' ✓ / ' + (sh.rejected || 0) + ' ✗';
-                sharesEl.className = 'stat-value ' + (rejPct > 3 ? 'text-danger' : 'text-success');
-                sharesEl.title = 'Rejected: ' + rejPct.toFixed(1) + '%';
-            }
-        }
-
         // Calculate and Update GPU Overall Summaries
         let totalPower = 0;
         let sumTemp = 0;
@@ -1561,44 +1514,6 @@ async function fetchStats() {
         document.getElementById('statTotalPower').textContent = totalPower.toFixed(1) + ' W';
         const coinAlgo = (data.system.coin || 'Unknown') + (data.miner_algo ? ' (' + data.miner_algo + ')' : '');
         document.getElementById('statCoin').textContent = coinAlgo;
-
-        // GPU health row: hottest card, overheating count, autofan status, efficiency
-        if (gpuCount > 0) {
-            let hottest = data.gpus[0];
-            let hotCount = 0;
-            let fansPinned = 0;
-            data.gpus.forEach(g => {
-                const t = parseFloat(g.temp) || 0;
-                const f = parseFloat(g.fan) || 0;
-                if (t > (parseFloat(hottest.temp) || 0)) hottest = g;
-                if (t >= 75) hotCount++;
-                if (f >= 99) fansPinned++;
-            });
-            const hotEl = document.getElementById('statHottestGpu');
-            const hotT = parseFloat(hottest.temp) || 0;
-            hotEl.textContent = hotT.toFixed(0) + ' °C · GPU ' + hottest.index;
-            hotEl.className = 'stat-value ' + (hotT >= 80 ? 'text-danger' : (hotT >= 75 ? 'text-warning' : ''));
-            const hcEl = document.getElementById('statHotCount');
-            hcEl.textContent = hotCount;
-            hcEl.className = 'stat-value ' + (hotCount > 0 ? 'text-danger' : 'text-success');
-            hcEl.title = 'GPUs at or above 75 °C';
-            const fanEl = document.getElementById('statAvgFan');
-            fanEl.textContent = avgFan + ' %' + (fansPinned > 0 ? ' (' + fansPinned + '×100%)' : '');
-            fanEl.title = fansPinned > 0 ? fansPinned + ' fan(s) pinned at maximum' : 'Average fan speed';
-        }
-        const afEl = document.getElementById('statAutofan');
-        if (afEl) {
-            const st = data.autofan_status || '—';
-            afEl.textContent = st;
-            afEl.className = 'stat-value ' + (st === 'Off' ? 'text-danger' : (st === 'Auto' || st === 'Smart' ? 'text-success' : ''));
-            afEl.title = 'AutoFan daemon mode (autofan.conf)';
-        }
-        const effEl = document.getElementById('statEfficiency');
-        if (effEl) {
-            const totalMh = data.gpus.reduce((s, g) => s + (g.hashrate || 0), 0);
-            effEl.textContent = totalPower > 0 ? (totalMh / totalPower).toFixed(2) + ' MH/W' : '—';
-            effEl.title = 'Total hashrate per watt';
-        }
         
         // Total GPUs / Total Speed reflect the active hardware tab
         updateHardwareStatBoxes(data);
