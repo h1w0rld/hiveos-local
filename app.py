@@ -3233,6 +3233,19 @@ _SHARES_KEY_PAIRS = (
     ("accepted", "rejected"),
 )
 
+def _shares_num(v):
+    """Numeric value tolerant to string-encoded numbers (SRBMiner style)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return None
+
 def _extract_api_shares(data):
     """(accepted, rejected) from miner JSON stats, None when not reported."""
     if not isinstance(data, dict):
@@ -3240,14 +3253,17 @@ def _extract_api_shares(data):
     blocks = [data]
     if isinstance(data.get("miner"), dict):
         blocks.append(data["miner"])
+    if isinstance(data.get("pools"), list):
+        blocks.extend(p for p in data["pools"] if isinstance(p, dict))
     for block in blocks:
         for ak, rk in _SHARES_KEY_PAIRS:
-            a, r = block.get(ak), block.get(rk)
-            if isinstance(a, (int, float)) and isinstance(r, (int, float)):
+            a, r = _shares_num(block.get(ak)), _shares_num(block.get(rk))
+            if a is not None and r is not None:
                 return int(a), int(r)
     return None
 
 _miner_shares_cache = {"ts": 0.0, "val": None}
+_miner_shares_log_ts = {"ts": 0.0}
 
 def get_miner_shares():
     """Accepted/rejected share counters from local miner stats APIs; None when unknown."""
@@ -3265,6 +3281,12 @@ def get_miner_shares():
                 if shares:
                     val = {"accepted": shares[0], "rejected": shares[1]}
                     break
+                # Diagnostics: log the response shape once per 10 min so unknown
+                # miner API formats can be identified from hiveos-local.log
+                if now - _miner_shares_log_ts["ts"] > 600:
+                    _miner_shares_log_ts["ts"] = now
+                    keys = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
+                    logging.warning(f"miner stats API :{port} has no known share keys; top-level keys: {keys}")
             except Exception:
                 continue
     _miner_shares_cache.update({"ts": now, "val": val})

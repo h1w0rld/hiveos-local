@@ -142,8 +142,8 @@ function fmtDurationShort(sec) {
     return m + 'm';
 }
 
-// GPU health mini-cards (System Diagnostics row 3): temp + fan per card,
-// dynamic count, Hive-palette temp colors
+// GPU health mini-cards (System Diagnostics row 3): exact Fans-tab live chips
+// (thermometer + fan mk-chips, hsl speed color) compacted for the stat row
 function renderGpuMiniCards(gpus) {
     const el = document.getElementById('gpuMiniCards');
     if (!el) return;
@@ -151,17 +151,20 @@ function renderGpuMiniCards(gpus) {
         el.innerHTML = '<span class="text-muted small">No GPUs detected</span>';
         return;
     }
+    const speedColor = v => {
+        const h = Math.round(130 - v * 1.3);
+        return ' style="color:hsl(' + h + ',85%,70%);border-color:hsla(' + h + ',85%,60%,0.45);background:hsla(' + h + ',85%,60%,0.08);"';
+    };
     el.innerHTML = gpus.map(g => {
-        const t = parseFloat(g.temp) || 0;
-        const f = parseFloat(g.fan) || 0;
-        const tCls = t >= 80 ? 'gmc-temp-crit' : (t >= 75 ? 'gmc-temp-hot' : (t < 60 ? 'gmc-temp-cool' : 'gmc-temp-warm'));
-        const fCls = f >= 99 ? ' gmc-fan-pinned' : '';
-        const tTitle = t >= 80 ? 'Critical temp' : (t >= 75 ? 'Hot' : (t < 60 ? 'Cool' : 'Normal'));
-        return '<div class="gpu-mini-card" title="GPU ' + g.index + (g.name ? ' · ' + escapeHtml(g.name) : '') +
-            ' — ' + t + ' °C (' + tTitle + '), fan ' + f + '%' + '">' +
-            '<span class="gmc-index">GPU ' + g.index + '</span>' +
-            '<span class="gmc-temp ' + tCls + '">' + t.toFixed(0) + '°</span>' +
-            '<span class="gmc-fan' + fCls + '"><i class="bi bi-fan"></i>' + f.toFixed(0) + '%</span>' +
+        const idx = (g.index !== undefined && g.index !== null) ? g.index : 0;
+        const t = g.temp, f = g.fan;
+        const hasT = t !== null && t !== undefined && t !== '' && !isNaN(t);
+        const hasF = f !== null && f !== undefined && f !== '' && !isNaN(f);
+        const fanOn = hasF && Number(f) > 0;
+        return '<div class="af-live-col" title="GPU' + idx + (g.name ? ' · ' + escapeHtml(g.name) : '') + '">' +
+            '<span class="af-live-gpu">GPU' + idx + '</span>' +
+            '<span class="mk-chip mk-temp"><i class="bi bi-thermometer-half"></i> ' + (hasT ? afEsc(t) + '&deg;C' : '&mdash;') + '</span>' +
+            '<span class="mk-chip' + (fanOn ? '' : ' mk-off') + '"' + (fanOn ? speedColor(Number(f)) : '') + '><i class="bi bi-fan"></i> ' + (hasF ? afEsc(f) + '%' : '&mdash;') + '</span>' +
         '</div>';
     }).join('');
 }
