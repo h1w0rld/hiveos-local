@@ -1028,22 +1028,11 @@
                         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
                             <h2 class="h5 fw-bold mb-0 d-flex align-items-center gap-2">
                                 <i class="bi bi-cloud-arrow-down-fill text-warning"></i> Cluster Update
-                                <span id="cuLatestBadge" class="badge bg-secondary-subtle text-secondary-emphasis small d-none" title="Latest release published on GitHub"></span>
+                                <span id="cuLatestBadge" class="badge bg-secondary-subtle text-secondary-emphasis small" title="Latest dashboard release published on GitHub"></span>
                             </h2>
                             <div class="d-flex gap-2 align-items-center">
-                                <div class="btn-group btn-group-sm" role="group" id="cuComponentGroup" aria-label="What to update">
-                                    <button type="button" class="btn d-flex align-items-center gap-1 btn-primary active" data-cu-component="panel" title="This dashboard's own software (pulls the latest release from GitHub)">
-                                        <i class="bi bi-grid-1x2-fill"></i>Panel
-                                    </button>
-                                    <button type="button" class="btn d-flex align-items-center gap-1 btn-outline-primary" data-cu-component="drivers" title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">
-                                        <i class="bi bi-gpu-card"></i>GPU Drivers
-                                    </button>
-                                    <button type="button" class="btn d-flex align-items-center gap-1 btn-outline-primary" data-cu-component="hiveos" title="Hive OS system packages via selfupgrade (apt)">
-                                        <i class="bi bi-motherboard"></i>Hive OS
-                                    </button>
-                                </div>
                                 <div class="btn-group" role="group">
-                                    <button id="cuRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Re-check dashboard versions on all rigs">
+                                    <button id="cuRefreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Re-check versions on all rigs">
                                         <i class="bi bi-arrow-clockwise"></i> Refresh
                                     </button>
                                     <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="Auto-refresh interval">
@@ -1053,30 +1042,50 @@
                                 </div>
                             </div>
                         </div>
+                        <div id="cuRunBanner" class="alert alert-warning d-flex align-items-center gap-2 py-2 px-3 mb-2 d-none" role="status">
+                            <i class="bi bi-arrow-repeat cu-status-spin"></i>
+                            <span id="cuRunBannerText" class="fw-semibold">Updating...</span>
+                        </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2" style="font-size: 0.88rem;">
                                 <colgroup>
-                                    <col style="width: 36px"><col style="width: 26%"><col style="width: 18%"><col>
+                                    <col style="width: 22%"><col style="width: 18%"><col style="width: 18%"><col style="width: 18%"><col>
                                 </colgroup>
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
-                                        <th class="text-center"><input type="checkbox" class="form-check-input m-0" id="cuSelectAll" title="Select all rigs for update"></th>
                                         <th>Rig</th>
-                                        <th id="cuVersionTh">Version</th>
+                                        <th class="text-center" title="This dashboard's own software (pulls the latest release from GitHub)">
+                                            <div>Panel</div>
+                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
+                                                <input type="checkbox" class="form-check-input m-0" id="cuAllPanel" title="Select all rigs for Panel update">
+                                            </div>
+                                        </th>
+                                        <th class="text-center" title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">
+                                            <div>GPU Drivers</div>
+                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
+                                                <input type="checkbox" class="form-check-input m-0" id="cuAllDrivers" title="Select all rigs for driver update">
+                                            </div>
+                                        </th>
+                                        <th class="text-center" title="Hive OS system packages via selfupgrade (apt)">
+                                            <div>Hive OS</div>
+                                            <div class="d-flex justify-content-center align-items-center gap-1 mt-1">
+                                                <input type="checkbox" class="form-check-input m-0" id="cuAllHiveos" title="Select all rigs for Hive OS upgrade">
+                                            </div>
+                                        </th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>
                                 <tbody id="cuTbody">
-                                    <tr><td colspan="4" class="text-center text-muted py-3">Loading versions...</td></tr>
+                                    <tr><td colspan="5" class="text-center text-muted py-3">Loading versions...</td></tr>
                                 </tbody>
                             </table>
                         </div>
                         <div class="d-flex flex-wrap align-items-center gap-2">
                             <input type="password" id="cuPassword" class="form-control form-control-sm text-center bg-dark-input fw-bold font-monospace" placeholder="Password" style="width: 150px;" autocomplete="off">
-                            <button id="cuUpdateBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Pull the latest update from GitHub and restart the dashboards of the selected rigs (miners are not affected)">
+                            <button id="cuUpdateBtn" class="btn btn-sm btn-warning fw-semibold d-flex align-items-center gap-1" title="Run the ticked updates on the selected rigs (Panel / GPU Drivers / Hive OS)">
                                 <i class="bi bi-arrow-down-circle-fill"></i> Update
                             </button>
-                            <span class="small text-muted" id="cuHint">Tick rigs to update — the whole cluster or a selection; this rig restarts last.</span>
+                            <span class="small text-muted" id="cuHint">Tick components per rig — different rigs can get different updates in one run.</span>
                         </div>
                     </div>
                 </div>
