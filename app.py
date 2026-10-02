@@ -1903,6 +1903,9 @@ def collect_stats_payload():
         "total_hashrate_mh": round(total_mh, 2),
         "miner_algo": algo,
         "overclocks": get_overclocks_formatted(),
+        "miner_uptime_s": get_miner_uptime_seconds(),
+        "shares": get_miner_shares(),
+        "extra_fans": get_extra_fans_summary(),
         # csrf_token only makes sense inside a request context (worker threads have none)
         "csrf_token": session.get('csrf_token', '') if has_request_context() else ''
     }
@@ -3208,6 +3211,77 @@ def is_miner_screen_running():
     """True when a HiveOS miner screen session (N.miner) is alive."""
     _, _, code = run_command("screen -ls 2>/dev/null | grep -qE '[0-9]+\\.miner'")
     return code == 0
+
+def get_miner_uptime_seconds():
+    """Seconds since the HiveOS miner screen session started; None when not running."""
+    out, _, code = run_command("screen -ls 2>/dev/null | grep -oE '[0-9]+\\.miner' | head -n 1 | cut -d. -f1")
+    pid = out.strip()
+    if code != 0 or not pid.isdigit():
+        return None
+    out2, _, code2 = run_command(f"ps -o etimes= -p {pid} 2>/dev/null")
+    if code2 != 0 or not out2.strip().isdigit():
+        return None
+    try:
+        return int(out2.strip())
+    except (TypeError, ValueError):
+        return None
+
+_SHARES_KEY_PAIRS = (
+    ("total_accepted_shares", "total_rejected_shares"),   # srbminer (top-level)
+    ("accepted_shares", "rejected_shares"),
+    ("accepted_count", "rejected_count"),                 # t-rex
+    ("accepted", "rejected"),
+)
+
+def _extract_api_shares(data):
+    """(accepted, rejected) from miner JSON stats, None when not reported."""
+    if not isinstance(data, dict):
+        return None
+    blocks = [data]
+    if isinstance(data.get("miner"), dict):
+        blocks.append(data["miner"])
+    for block in blocks:
+        for ak, rk in _SHARES_KEY_PAIRS:
+            a, r = block.get(ak), block.get(rk)
+            if isinstance(a, (int, float)) and isinstance(r, (int, float)):
+                return int(a), int(r)
+    return None
+
+_miner_shares_cache = {"ts": 0.0, "val": None}
+
+def get_miner_shares():
+    """Accepted/rejected share counters from local miner stats APIs; None when unknown."""
+    now = time.time()
+    if now - _miner_shares_cache["ts"] < 5:
+        return _miner_shares_cache["val"]
+    val = None
+    if is_miner_screen_running():
+        for port in (5000, 4067, 4068, 4028, 21373, 21473):
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    data = json.loads(resp.read().decode(errors="ignore"))
+                shares = _extract_api_shares(data)
+                if shares:
+                    val = {"accepted": shares[0], "rejected": shares[1]}
+                    break
+            except Exception:
+                continue
+    _miner_shares_cache.update({"ts": now, "val": val})
+    return val
+
+def get_extra_fans_summary():
+    """{'count': N, 'avg_duty': X} for non-GPU hwmon PWM fans; None when none present."""
+    duties = []
+    try:
+        for hw, chip, idx in _iter_hwmon_pwm():
+            entry = _read_fan_entry(hw, chip, idx)
+            duties.append(entry.get("duty", 0))
+    except Exception:
+        return None
+    if not duties:
+        return None
+    return {"count": len(duties), "avg_duty": round(sum(duties) / len(duties))}
 
 def get_miner_hashrate():
     """Returns (total_mh, per_gpu dict, algo) from local miner stats API, log fallback."""

@@ -131,6 +131,41 @@ function fmtSpeed(mh) {
     return '0 MH/s';
 }
 
+// Short duration for stat boxes: input seconds, output like "3d 4h" / "5h 12m" / "42m"
+function fmtDurationShort(sec) {
+    sec = Math.max(0, parseInt(sec, 10) || 0);
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+}
+
+// GPU health mini-cards (System Diagnostics row 3): temp + fan per card,
+// dynamic count, Hive-palette temp colors
+function renderGpuMiniCards(gpus) {
+    const el = document.getElementById('gpuMiniCards');
+    if (!el) return;
+    if (!gpus || !gpus.length) {
+        el.innerHTML = '<span class="text-muted small">No GPUs detected</span>';
+        return;
+    }
+    el.innerHTML = gpus.map(g => {
+        const t = parseFloat(g.temp) || 0;
+        const f = parseFloat(g.fan) || 0;
+        const tCls = t >= 80 ? 'gmc-temp-crit' : (t >= 75 ? 'gmc-temp-hot' : (t < 60 ? 'gmc-temp-cool' : 'gmc-temp-warm'));
+        const fCls = f >= 99 ? ' gmc-fan-pinned' : '';
+        const tTitle = t >= 80 ? 'Critical temp' : (t >= 75 ? 'Hot' : (t < 60 ? 'Cool' : 'Normal'));
+        return '<div class="gpu-mini-card" title="GPU ' + g.index + (g.name ? ' · ' + escapeHtml(g.name) : '') +
+            ' — ' + t + ' °C (' + tTitle + '), fan ' + f + '%' + '">' +
+            '<span class="gmc-index">GPU ' + g.index + '</span>' +
+            '<span class="gmc-temp ' + tCls + '">' + t.toFixed(0) + '°</span>' +
+            '<span class="gmc-fan' + fCls + '"><i class="bi bi-fan"></i>' + f.toFixed(0) + '%</span>' +
+        '</div>';
+    }).join('');
+}
+
 function fmtSpeedHtml(mh) {
     return '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
 }
@@ -1493,6 +1528,44 @@ async function fetchStats() {
         document.getElementById('statRam').textContent = data.system.ram_used_pct + '% / ' + data.system.ram_total_gb + ' GB';
         document.getElementById('statMiner').textContent = data.system.active_miner;
         document.getElementById('statVersion').textContent = data.system.hive_version;
+
+        // Row 3: shares / extra fans / miner uptime / GPU mini-cards
+        const sharesEl = document.getElementById('statShares');
+        if (sharesEl) {
+            const sh = data.shares;
+            if (!sh) {
+                sharesEl.textContent = '—';
+                sharesEl.className = 'stat-value';
+                sharesEl.title = 'Share counters unavailable (miner stats API did not report them)';
+            } else {
+                const tot = (sh.accepted || 0) + (sh.rejected || 0);
+                const rejPct = tot > 0 ? (100 * (sh.rejected || 0) / tot) : 0;
+                sharesEl.textContent = (sh.accepted || 0).toLocaleString() + ' ✓ / ' + (sh.rejected || 0) + ' ✗';
+                sharesEl.className = 'stat-value ' + (rejPct > 3 ? 'text-danger' : 'text-success');
+                sharesEl.title = 'Rejected: ' + rejPct.toFixed(1) + '%';
+            }
+        }
+        const xfEl = document.getElementById('statExtraFans');
+        if (xfEl) {
+            const xf = data.extra_fans;
+            if (!xf) {
+                xfEl.textContent = '—';
+                xfEl.className = 'stat-value';
+                xfEl.title = 'No controllable (PWM) extra fans detected';
+            } else {
+                xfEl.textContent = xf.avg_duty + ' %';
+                xfEl.className = 'stat-value';
+                xfEl.title = 'Average duty of ' + xf.count + ' extra fan(s)';
+            }
+        }
+        const minerUpEl = document.getElementById('statMinerUptime');
+        if (minerUpEl) {
+            const upS = data.miner_uptime_s;
+            minerUpEl.textContent = (upS == null) ? 'Stopped' : fmtDurationShort(upS);
+            minerUpEl.className = 'stat-value' + (upS == null ? ' text-danger' : '');
+            minerUpEl.title = (upS == null) ? 'Miner screen session is not running' : 'Time since the miner started';
+        }
+        renderGpuMiniCards(data.gpus);
 
         // Calculate and Update GPU Overall Summaries
         let totalPower = 0;

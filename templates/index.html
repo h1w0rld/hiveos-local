@@ -393,6 +393,12 @@
                             </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
+                                    <span class="stat-label">Total GPUs</span>
+                                    <span id="statGpuCount" class="stat-value text-success">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
                                     <span class="stat-label">Uptime</span>
                                     <span id="statUptime" class="stat-value">Loading...</span>
                                 </div>
@@ -409,12 +415,6 @@
                                     <span id="statRam" class="stat-value">Loading...</span>
                                 </div>
                             </div>
-                                <div class="col-6 col-sm-4 col-md-2">
-                                    <div class="stat-box">
-                                        <span class="stat-label">Active Miner</span>
-                                        <span id="statMiner" class="stat-value text-cyan-gradient">Loading...</span>
-                                    </div>
-                                </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
                                     <span class="stat-label">HiveOS Ver</span>
@@ -424,18 +424,6 @@
                         </div>
                         <hr class="my-3 border-secondary-subtle">
                         <div class="row g-3">
-                            <div class="col-6 col-sm-4 col-md-2">
-                                <div class="stat-box">
-                                    <span class="stat-label">Total GPUs</span>
-                                    <span id="statGpuCount" class="stat-value text-success">Loading...</span>
-                                </div>
-                            </div>
-                            <div class="col-6 col-sm-4 col-md-2">
-                                <div class="stat-box">
-                                    <span class="stat-label">Total Speed</span>
-                                    <span id="statTotalHashrate" class="stat-value text-primary-gradient fw-bold">Loading...</span>
-                                </div>
-                            </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
                                     <span class="stat-label">Avg Temp</span>
@@ -450,14 +438,55 @@
                             </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
-                                    <span class="stat-label">Total Power</span>
-                                    <span id="statTotalPower" class="stat-value text-danger-emphasis">Loading...</span>
+                                    <span class="stat-label">Active Miner</span>
+                                    <span id="statMiner" class="stat-value text-cyan-gradient">Loading...</span>
                                 </div>
                             </div>
                             <div class="col-6 col-sm-4 col-md-2">
                                 <div class="stat-box">
                                     <span class="stat-label">Mined Crypto</span>
                                     <span id="statCoin" class="stat-value text-amber-gradient fw-bold">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Total Speed</span>
+                                    <span id="statTotalHashrate" class="stat-value text-primary-gradient fw-bold">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Total Power</span>
+                                    <span id="statTotalPower" class="stat-value text-danger-emphasis">Loading...</span>
+                                </div>
+                            </div>
+                        </div>
+                        <hr class="my-3 border-secondary-subtle">
+                        <div class="row g-3 align-items-stretch">
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Shares</span>
+                                    <span id="statShares" class="stat-value">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Extra Fans</span>
+                                    <span id="statExtraFans" class="stat-value">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-6 col-sm-4 col-md-2">
+                                <div class="stat-box">
+                                    <span class="stat-label">Miner Uptime</span>
+                                    <span id="statMinerUptime" class="stat-value">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <div class="stat-box">
+                                    <span class="stat-label">GPU Status</span>
+                                    <div id="gpuMiniCards" class="gpu-mini-cards mt-1">
+                                        <span class="text-muted small">Loading...</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>

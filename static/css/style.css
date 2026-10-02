@@ -651,6 +651,67 @@ tr.af-sep td {
     height: 100%;
 }
 
+/* GPU mini-cards row (System Diagnostics, row 3) */
+.gpu-mini-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.gpu-mini-card {
+    flex: 1 1 64px;
+    min-width: 60px;
+    max-width: 96px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 5px 6px 4px;
+    text-align: center;
+    line-height: 1.15;
+    transition: border-color 0.2s ease;
+}
+
+.gpu-mini-card:hover {
+    border-color: var(--bs-primary);
+}
+
+.gpu-mini-card .gmc-index {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.gpu-mini-card .gmc-temp {
+    display: block;
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.gpu-mini-card .gmc-fan {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.gpu-mini-card .gmc-fan .bi {
+    font-size: 0.72rem;
+}
+
+/* temp threshold accents (Hive palette) */
+.gmc-temp-cool   { color: #84bf40; }
+.gmc-temp-warm   { color: var(--text-primary); }
+.gmc-temp-hot    { color: #ffae00; }
+.gmc-temp-crit   { color: #ff3733; }
+.gmc-fan-pinned  { color: #ffae00 !important; }
+
 .stat-label {
     color: var(--text-muted);
     font-size: 0.75rem;
