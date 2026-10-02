@@ -2296,6 +2296,18 @@ function cuRowStatusHtml(rig) {
     return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>All components up to date</span>';
 }
 
+// Availability badge in its own column: THIS RIG / Online / Offline
+function cuAvailabilityHtml(rig) {
+    if (rig.is_self) {
+        return '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>';
+    }
+    if (rig.online) {
+        return '<span class="badge bg-success-glow border border-success text-success">Online</span>';
+    }
+    return '<span class="badge bg-danger-glow border border-danger text-danger" title="' +
+        escapeHtml(rig.last_error || '') + '">Offline</span>';
+}
+
 function renderCuRows() {
     const tbody = document.getElementById('cuTbody');
     if (!tbody) return;
@@ -2314,20 +2326,19 @@ function renderCuRows() {
     }
     const rigs = ((clusterData && clusterData.rigs) || []).slice().sort(naturalRigCompare);
     if (!rigs.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">Loading versions...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">Loading versions...</td></tr>';
         syncCuSelectAllBoxes();
         cuPaintUpdateButton();
         return;
     }
     tbody.innerHTML = rigs.map(rig => {
-        const selfMark = rig.is_self
-            ? ' <span class="badge bg-success-glow border border-success text-success small ms-3">THIS RIG</span>' : '';
         const compTds = CU_COMPONENTS.map(c =>
             '<td class="text-center align-middle cu-check-col">' + cuCheckCellHtml(rig, c) + '</td>' +
             '<td class="align-middle">' + cuCompInfoHtml(rig, c) + '</td>').join('');
         return '<tr' + ((rig.is_self || rig.online) ? '' : ' class="opacity-50"') + '>' +
             '<td class="align-middle" title="' + escapeHtml(rig.host_label || '') + '">' +
-            '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span>' + selfMark + '</td>' +
+            '<span class="fw-semibold">' + escapeHtml(rig.name || rig.id) + '</span></td>' +
+            '<td class="align-middle">' + cuAvailabilityHtml(rig) + '</td>' +
             compTds +
             '<td class="align-middle">' + cuRowStatusHtml(rig) + '</td></tr>';
     }).join('');
