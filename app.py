@@ -5843,12 +5843,13 @@ def _detect_env_versions(max_age=60):
 
 _latest_env_cache = {"ts": 0.0, "driver": "", "hiveos": ""}
 
-def _detect_latest_versions(max_age=600):
+def _detect_latest_versions(max_age=60):
     """(driver_latest, hiveos_latest) — versions an update would move to.
 
     driver: newest version offered by `nvidia-driver-update --list` (network
-    fetch of the hive driver index, so cached for 10 minutes; the rig has no
-    NVIDIA "stable" marker — max of all listed branches is the freshest).
+    fetch of the hive driver index, cached for 60s so a manual Refresh picks up
+    new releases promptly; the rig has no NVIDIA "stable" marker — max of all
+    listed branches is the freshest).
     hiveos: apt candidate of the `hive` package (from the rig's current apt
     lists; selfupgrade refreshes them during the actual upgrade).
     """

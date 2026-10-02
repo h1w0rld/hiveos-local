@@ -561,7 +561,7 @@ document.addEventListener('DOMContentLoaded', function() {
         cuRefreshBtn.disabled = true;
         const icon = cuRefreshBtn.querySelector('i');
         icon.className = 'bi bi-arrow-clockwise spin-animation';
-        await refreshClusterUpdate();
+        await Promise.all([refreshClusterUpdate(), checkUpdate()]); // table + top banner
         setTimeout(() => {
             cuRefreshBtn.disabled = false;
             icon.className = 'bi bi-arrow-clockwise';
@@ -5527,8 +5527,9 @@ function showDashTab(tab) {
     if (tab === 'presets') loadOcPresetsList();
     if (tab === 'stats') loadMetricsTab();
     if (tab === 'updates') {
-        // fresh rig list/online flags feed the version table
+        // fresh rig list/online flags feed the version table + re-check the banner
         loadClusterData(true).then(() => refreshClusterUpdate());
+        checkUpdate();
     }
 }
 
