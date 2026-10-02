@@ -3331,17 +3331,32 @@ def get_miner_shares():
     return val
 
 def get_extra_fans_summary():
-    """{'count': N, 'avg_duty': X} for non-GPU hwmon PWM fans; None when none present."""
+    """{'count': N, 'avg_duty': X, 'source': 'hwmon'|'mknet'} for non-GPU fans; None when none.
+
+    Sources: hwmon PWM channels first, then the 8MK_NET USB fan controller
+    (RIG9-style rigs expose their case fans there, not via hwmon)."""
     duties = []
     try:
         for hw, chip, idx in _iter_hwmon_pwm():
             entry = _read_fan_entry(hw, chip, idx)
             duties.append(entry.get("duty", 0))
     except Exception:
-        return None
-    if not duties:
-        return None
-    return {"count": len(duties), "avg_duty": round(sum(duties) / len(duties))}
+        duties = []
+    if duties:
+        return {"count": len(duties), "avg_duty": round(sum(duties) / len(duties)), "source": "hwmon"}
+    try:
+        st = _mknet_stats()
+        cf = st.get("casefan") if isinstance(st, dict) else None
+        vals = []
+        for v in cf or []:
+            n = _shares_num(v)
+            if n is not None:
+                vals.append(n)
+        if vals:
+            return {"count": len(vals), "avg_duty": round(sum(vals) / len(vals)), "source": "mknet"}
+    except Exception:
+        pass
+    return None
 
 def get_miner_hashrate():
     """Returns (total_mh, per_gpu dict, algo) from local miner stats API, log fallback."""

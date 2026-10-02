@@ -1558,7 +1558,8 @@ async function fetchStats() {
             } else {
                 xfEl.textContent = xf.avg_duty + ' %';
                 xfEl.className = 'stat-value';
-                xfEl.title = 'Average duty of ' + xf.count + ' extra fan(s)';
+                xfEl.title = 'Average speed of ' + xf.count + ' extra fan(s)' +
+                    (xf.source === 'mknet' ? ' (8MK_NET controller)' : '');
             }
         }
         const minerUpEl = document.getElementById('statMinerUptime');
