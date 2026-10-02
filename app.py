@@ -3246,8 +3246,19 @@ def _shares_num(v):
             return None
     return None
 
+def _shares_sum_dict(v):
+    """Sum of a per-GPU share dict like {'gpu0': 73, 'gpu1': 66}; None when not a dict."""
+    if isinstance(v, dict) and v:
+        return sum(_shares_num(x) or 0 for x in v.values())
+    return None
+
 def _extract_api_shares(data):
-    """(accepted, rejected) from miner JSON stats, None when not reported."""
+    """(accepted, rejected) from miner JSON stats, None when not reported.
+
+    Known shapes: srbminer algorithms[].shares {accepted, rejected} (+ per-GPU
+    gpu_accepted_shares/gpu_rejected_shares dicts), srbminer/t-rex/gminer
+    top-level total_*_shares counters (numbers or strings), miner{} block,
+    pools[] entries."""
     if not isinstance(data, dict):
         return None
     blocks = [data]
@@ -3260,6 +3271,33 @@ def _extract_api_shares(data):
             a, r = _shares_num(block.get(ak)), _shares_num(block.get(rk))
             if a is not None and r is not None:
                 return int(a), int(r)
+    # srbminer: algorithms[].shares aggregates + per-GPU dicts
+    if isinstance(data.get("algorithms"), list):
+        acc = rej = 0
+        found = False
+        for a in data["algorithms"]:
+            if not isinstance(a, dict):
+                continue
+            sh = a.get("shares")
+            if isinstance(sh, dict):
+                av, rv = _shares_num(sh.get("accepted")), _shares_num(sh.get("rejected"))
+                if av is not None and rv is not None:
+                    acc += av
+                    rej += rv
+                    found = True
+                    continue
+            av = _shares_num(a.get("gpu_accepted_shares"))
+            rv = _shares_num(a.get("gpu_rejected_shares"))
+            if av is None:
+                av = _shares_sum_dict(a.get("gpu_accepted_shares"))
+            if rv is None:
+                rv = _shares_sum_dict(a.get("gpu_rejected_shares"))
+            if av is not None and rv is not None:
+                acc += av
+                rej += rv
+                found = True
+        if found:
+            return int(acc), int(rej)
     return None
 
 _miner_shares_cache = {"ts": 0.0, "val": None}
