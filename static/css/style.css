@@ -105,15 +105,6 @@ body {
     -webkit-text-fill-color: transparent;
 }
 
-/* Algo-family green-teal (#00b091 — the algorithm title color on the Stats tab),
-   used for Extra Fans (fixed color instead of the fan hue scale) */
-.text-algo-gradient {
-    background: linear-gradient(135deg, #00d6a4 0%, #008f72 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-
 /* Connection status dots on the SSH accesses tab */
 .conn-dot {
     display: inline-block;

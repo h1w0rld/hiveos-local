@@ -187,7 +187,9 @@ function tempGradientClass(t) {
 function fanSpeedGradientStyle(v) {
     v = Math.max(0, Math.min(100, Number(v) || 0));
     const h = Math.round(130 - v * 1.3);
-    return 'background:linear-gradient(135deg,hsl(' + h + ',85%,68%) 0%,hsl(' + Math.max(0, h - 25) + ',85%,55%) 100%);' +
+    // lightness 64%/50% (was 68%/55%): keeps the yellow end rich instead of
+    // washing out toward near-white at high fan speeds (customer review)
+    return 'background:linear-gradient(135deg,hsl(' + h + ',85%,64%) 0%,hsl(' + Math.max(0, h - 25) + ',85%,50%) 100%);' +
         '-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;';
 }
 
@@ -1597,11 +1599,9 @@ async function fetchStats() {
                 xfEl.removeAttribute('style');
                 xfEl.title = 'No controllable (PWM) extra fans detected';
             } else {
-                // Fixed algo-family green-teal (#00b091) per customer review —
-                // the dynamic fan hue scale read as too light/yellow at high duty
-                xfEl.textContent = xf.avg_duty + ' %';
-                xfEl.removeAttribute('style');
-                xfEl.className = 'stat-value text-algo-gradient';
+                // Same dynamic fan hue scale as Avg Fan (yellow -> orange -> red),
+                // per customer review v1.12.50 (the fixed algo teal was reverted)
+                setFanStatValue(xfEl, xf.avg_duty + ' %', xf.avg_duty);
                 xfEl.title = 'Average speed of ' + xf.count + ' extra fan(s)' +
                     (xf.source === 'mknet' ? ' (8MK_NET controller)' : '');
             }
