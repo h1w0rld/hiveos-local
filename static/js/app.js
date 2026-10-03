@@ -173,6 +173,36 @@ function fmtSpeedHtml(mh) {
     return '<span class="text-primary-gradient fw-bold">' + fmtSpeed(mh) + '</span>';
 }
 
+// Gradient color helpers for stat-box values (System Diagnostics / Cluster / CPU):
+// temperature follows HiveOS-ish thresholds (cool <70 green / warm 70-80 amber / hot >=80 red),
+// fan speed reuses the live-chip green→red hue scale (hsl(130 - v*1.3))
+function tempGradientClass(t) {
+    t = Number(t);
+    if (!isFinite(t)) return 'text-secondary-gradient';
+    if (t >= 80) return 'text-danger-gradient';
+    if (t >= 70) return 'text-amber-gradient';
+    return 'text-success-gradient';
+}
+
+function fanSpeedGradientStyle(v) {
+    v = Math.max(0, Math.min(100, Number(v) || 0));
+    const h = Math.round(130 - v * 1.3);
+    return 'background:linear-gradient(135deg,hsl(' + h + ',85%,68%) 0%,hsl(' + Math.max(0, h - 25) + ',85%,55%) 100%);' +
+        '-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;';
+}
+
+// Fill a fan-speed stat value: running → dynamic hue gradient, 0/off → dim slate
+function setFanStatValue(el, text, v) {
+    el.textContent = text;
+    if (!v || isNaN(Number(v)) || Number(v) <= 0) {
+        el.removeAttribute('style');
+        el.className = 'stat-value text-secondary-gradient';
+    } else {
+        el.style.cssText = fanSpeedGradientStyle(v);
+        el.className = 'stat-value';
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // 1. Theme Toggle Logic
     const htmlElement = document.documentElement;
@@ -1538,14 +1568,24 @@ async function fetchStats() {
             const sh = data.shares;
             if (!sh) {
                 sharesEl.textContent = '—';
-                sharesEl.className = 'stat-value';
+                sharesEl.className = 'stat-value text-secondary-gradient';
+                sharesEl.removeAttribute('style');
                 sharesEl.title = 'Share counters unavailable (miner stats API did not report them)';
             } else {
-                const tot = (sh.accepted || 0) + (sh.rejected || 0);
-                const rejPct = tot > 0 ? (100 * (sh.rejected || 0) / tot) : 0;
-                sharesEl.textContent = (sh.accepted || 0).toLocaleString() + ' ✓ / ' + (sh.rejected || 0) + ' ✗';
-                sharesEl.className = 'stat-value ' + (rejPct > 3 ? 'text-danger' : 'text-success');
-                sharesEl.title = 'Rejected: ' + rejPct.toFixed(1) + '%';
+                const acc = sh.accepted || 0, rej = sh.rejected || 0;
+                const tot = acc + rej;
+                const rejPct = tot > 0 ? (100 * rej / tot) : 0;
+                const accPct = 100 - rejPct;
+                const pctCls = rejPct > 3 ? 'text-danger-gradient' : (rejPct > 1 ? 'text-amber-gradient' : 'text-success-gradient');
+                sharesEl.innerHTML =
+                    '<span class="text-success-gradient">' + acc.toLocaleString() + ' ✓</span>' +
+                    ' <span class="text-secondary-gradient">/</span> ' +
+                    '<span class="' + (rej > 0 ? 'text-danger-gradient' : 'text-secondary-gradient') + '">' + rej.toLocaleString() + ' ✗</span>' +
+                    ' <span class="' + pctCls + '" style="font-size:0.72em">(' + accPct.toFixed(1) + '%)</span>';
+                sharesEl.className = 'stat-value';
+                sharesEl.removeAttribute('style');
+                sharesEl.title = 'Accepted ' + accPct.toFixed(1) + '% · Rejected ' + rejPct.toFixed(1) + '%' +
+                    (rejPct > 3 ? ' — high reject rate!' : '');
             }
         }
         const xfEl = document.getElementById('statExtraFans');
@@ -1553,11 +1593,11 @@ async function fetchStats() {
             const xf = data.extra_fans;
             if (!xf) {
                 xfEl.textContent = '—';
-                xfEl.className = 'stat-value';
+                xfEl.className = 'stat-value text-secondary-gradient';
+                xfEl.removeAttribute('style');
                 xfEl.title = 'No controllable (PWM) extra fans detected';
             } else {
-                xfEl.textContent = xf.avg_duty + ' %';
-                xfEl.className = 'stat-value';
+                setFanStatValue(xfEl, xf.avg_duty + ' %', xf.avg_duty);
                 xfEl.title = 'Average speed of ' + xf.count + ' extra fan(s)' +
                     (xf.source === 'mknet' ? ' (8MK_NET controller)' : '');
             }
@@ -1566,7 +1606,7 @@ async function fetchStats() {
         if (minerUpEl) {
             const upS = data.miner_uptime_s;
             minerUpEl.textContent = (upS == null) ? 'Stopped' : fmtDurationShort(upS);
-            minerUpEl.className = 'stat-value' + (upS == null ? ' text-danger' : '');
+            minerUpEl.className = 'stat-value ' + (upS == null ? 'text-danger-gradient' : 'text-success-gradient');
             minerUpEl.title = (upS == null) ? 'Miner screen session is not running' : 'Time since the miner started';
         }
         renderGpuMiniCards(data.gpus);
@@ -1586,8 +1626,11 @@ async function fetchStats() {
         let avgTemp = gpuCount > 0 ? (sumTemp / gpuCount).toFixed(1) : 0;
         let avgFan = gpuCount > 0 ? (sumFan / gpuCount).toFixed(1) : 0;
 
-        document.getElementById('statAvgTemp').textContent = avgTemp + ' °C';
-        document.getElementById('statAvgFan').textContent = avgFan + ' %';
+        const avgTempEl = document.getElementById('statAvgTemp');
+        avgTempEl.textContent = avgTemp + ' °C';
+        avgTempEl.className = 'stat-value ' + (gpuCount > 0 ? tempGradientClass(avgTemp) : 'text-secondary-gradient');
+        const avgFanEl = document.getElementById('statAvgFan');
+        setFanStatValue(avgFanEl, avgFan + ' %', gpuCount > 0 ? avgFan : 0);
         document.getElementById('statTotalPower').textContent = totalPower.toFixed(1) + ' W';
         const coinAlgo = (data.system.coin || 'Unknown') + (data.miner_algo ? ' (' + data.miner_algo + ')' : '');
         document.getElementById('statCoin').textContent = coinAlgo;
@@ -1597,15 +1640,17 @@ async function fetchStats() {
         
         // Update CPU Mining Panel
         document.getElementById('cpuModelName').textContent = data.system.cpu.model;
-        document.getElementById('cpuTemp').textContent = data.system.cpu.temp + ' °C';
-        
+        const cpuTempEl = document.getElementById('cpuTemp');
+        cpuTempEl.textContent = data.system.cpu.temp + ' °C';
+        cpuTempEl.className = 'stat-value ' + tempGradientClass(data.system.cpu.temp);
+
         const hpStatus = document.getElementById('hugePagesStatus');
         if (data.system.cpu.hugepages) {
             hpStatus.textContent = "Enabled";
-            hpStatus.className = "stat-value text-success";
+            hpStatus.className = "stat-value text-success-gradient";
         } else {
             hpStatus.textContent = "Disabled";
-            hpStatus.className = "stat-value text-danger";
+            hpStatus.className = "stat-value text-danger-gradient";
         }
         
         const hashrate = parseFloat((data.system.cpu || {}).hashrate) || 0;
@@ -3185,7 +3230,7 @@ function updateLastSyncDisplay() {
     if (!el || !clusterData || !(clusterData.last_sync > 0)) return;
     const ago = Math.max(0, Math.round((Date.now() / 1000) - clusterData.last_sync));
     el.textContent = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
-    el.className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success' : 'text-danger');
+    el.className = 'stat-value ' + (clusterData.last_sync_ok ? 'text-success-gradient' : 'text-danger-gradient');
 }
 
 // Natural sort by rig name: RIG1, RIG2, ..., RIG10 (numbers compared numerically)
@@ -3238,7 +3283,10 @@ function renderCluster() {
     document.getElementById('clusterTotalHashrate').innerHTML = fmtSpeedHtml(totalMh);
     document.getElementById('clusterTotalPower').textContent = totalPower.toFixed(1) + ' W';
     document.getElementById('clusterTotalGpus').textContent = totalGpus;
-    document.getElementById('clusterAvgTemp').textContent = (tempCount ? (tempSum / tempCount).toFixed(1) : 0) + ' °C';
+    const clusterAvgEl = document.getElementById('clusterAvgTemp');
+    const clusterAvg = tempCount ? (tempSum / tempCount).toFixed(1) : 0;
+    clusterAvgEl.textContent = clusterAvg + ' °C';
+    clusterAvgEl.className = 'stat-value ' + (tempCount ? tempGradientClass(clusterAvg) : 'text-secondary-gradient');
 
     // Cluster sections (rig groups) + unassigned rigs
     const clusters = clusterData.clusters || [];

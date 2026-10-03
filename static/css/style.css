@@ -69,6 +69,27 @@ body {
     -webkit-text-fill-color: transparent;
 }
 
+.text-success-gradient {
+    background: var(--success-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.text-danger-gradient {
+    background: var(--danger-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.text-secondary-gradient {
+    background: var(--secondary-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
 /* Connection status dots on the SSH accesses tab */
 .conn-dot {
     display: inline-block;
