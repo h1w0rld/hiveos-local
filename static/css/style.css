@@ -17,8 +17,8 @@
     
     /* Brand Gradients */
     --primary-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-    --success-gradient: linear-gradient(135deg, #10b981 0%, #059669 100%);
-    --danger-gradient: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    --success-gradient: linear-gradient(135deg, #4ade80 0%, #16a34a 100%);
+    --danger-gradient: linear-gradient(135deg, #f87171 0%, #dc2626 100%);
     --secondary-gradient: linear-gradient(135deg, #475569 0%, #334155 100%);
 }
 
@@ -832,12 +832,12 @@ tr.af-sep td {
 
 .progress-bar-glow-green {
     background: var(--success-gradient);
-    box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+    box-shadow: 0 0 10px rgba(74, 222, 128, 0.4);
 }
 
 .progress-bar-glow-red {
     background: var(--danger-gradient);
-    box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+    box-shadow: 0 0 10px rgba(248, 113, 113, 0.4);
 }
 
 .progress-bar-glow-primary {
