@@ -154,6 +154,16 @@ function fmtUptimeShort(str) {
     return h + 'h ' + min + 'm';
 }
 
+// Seconds from the same "5h 12m" uptime string; null when unparseable
+function uptimeSecondsFromStr(str) {
+    if (!str || str === 'Unknown') return null;
+    const m = String(str).match(/(\d+)h\s*(\d+)m/);
+    if (!m) return null;
+    const h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+    if (!isFinite(h) || !isFinite(min)) return null;
+    return h * 3600 + min * 60;
+}
+
 // GPU health mini-cards (System Diagnostics row 3): exact Fans-tab live chips
 // (thermometer + fan mk-chips, hsl speed color) compacted for the stat row
 function renderGpuMiniCards(gpus) {
@@ -3450,6 +3460,7 @@ function buildClusterRigStatBlock(rig) {
     const xf = (isOnline && stats) ? stats.extra_fans : null;
 
     // Uptimes: rig from system.uptime ("5h 12m"), miner from miner_uptime_s (null = stopped)
+    const rigUpSec = isOnline ? uptimeSecondsFromStr(system.uptime) : null;
     const rigUp = isOnline ? fmtUptimeShort(system.uptime) : null;
     const minerUp = (isOnline && stats) ? stats.miner_uptime_s : null;
 
@@ -3475,11 +3486,19 @@ function buildClusterRigStatBlock(rig) {
         ? chip('bi-wind', xf.avg_duty + '%', xf.avg_duty > 0 ? speedChipColor(xf.avg_duty) : '', xf.avg_duty > 0 ? '' : 'mk-off',
                'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (8MK_NET controller)' : ''))
         : chip('bi-wind', dash, '', 'mk-off', 'No controllable (PWM) extra fans detected');
+    // Fresh (<24h) uptime highlight: amber chip + soft pulse — a reboot / miner
+    // restart under a day ago should catch the eye (v1.12.56)
+    const FRESH_DAY = 86400;
+    const freshStyle = 'color:#fbbf24;border-color:rgba(251,191,36,0.5);background:rgba(251,191,36,0.1);';
+    const rigUpFresh = rigUp !== null && rigUpSec !== null && rigUpSec < FRESH_DAY;
     const rigUpChip = rigUp
-        ? chip('bi-clock-history', rigUp, '', '', 'System uptime of the rig')
+        ? chip('bi-clock-history', rigUp, rigUpFresh ? freshStyle : '', rigUpFresh ? 'chip-fresh' : '',
+               rigUpFresh ? 'Rig uptime — rebooted less than 24h ago' : 'System uptime of the rig')
         : chip('bi-clock-history', dash, '', 'mk-off', 'No uptime data');
+    const minerUpFresh = minerUp != null && minerUp < FRESH_DAY;
     const minerUpChip = (minerUp != null)
-        ? chip('bi-hourglass-split', fmtDurationShort(minerUp), '', '', 'Time since the miner started')
+        ? chip('bi-hourglass-split', fmtDurationShort(minerUp), minerUpFresh ? freshStyle : '', minerUpFresh ? 'chip-fresh' : '',
+               minerUpFresh ? 'Miner started less than 24h ago' : 'Time since the miner started')
         : chip('bi-hourglass-split', (isOnline && stats) ? 'Stopped' : dash, '', 'mk-off',
                (isOnline && stats) ? 'Miner screen session is not running' : 'No miner data');
 
