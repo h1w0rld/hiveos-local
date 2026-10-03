@@ -651,6 +651,14 @@ tr.af-sep td {
     height: 100%;
 }
 
+/* Divider between stat-box rows (System Diagnostics) — total vertical footprint
+   (margins + 1px border) equals the grid gutter (g-3 = 1rem), so the row gap
+   matches the column gap exactly */
+.hr-row-gap {
+    margin-top: calc((1rem - 1px) / 2);
+    margin-bottom: calc((1rem - 1px) / 2);
+}
+
 /* GPU mini-cards row (System Diagnostics, row 3) — reuses Fans-tab chips
    (.af-live-col / .mk-chip), compacted to match stat-box row height */
 .gpu-mini-cards {
