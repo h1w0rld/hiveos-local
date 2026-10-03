@@ -1597,7 +1597,11 @@ async function fetchStats() {
                 xfEl.removeAttribute('style');
                 xfEl.title = 'No controllable (PWM) extra fans detected';
             } else {
-                setFanStatValue(xfEl, xf.avg_duty + ' %', xf.avg_duty);
+                // Fixed algo-family green-teal (#00b091) per customer review —
+                // the dynamic fan hue scale read as too light/yellow at high duty
+                xfEl.textContent = xf.avg_duty + ' %';
+                xfEl.removeAttribute('style');
+                xfEl.className = 'stat-value text-algo-gradient';
                 xfEl.title = 'Average speed of ' + xf.count + ' extra fan(s)' +
                     (xf.source === 'mknet' ? ' (8MK_NET controller)' : '');
             }
