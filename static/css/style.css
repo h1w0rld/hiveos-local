@@ -716,6 +716,12 @@ tr.af-sep td {
 .gpu-mini-cards .af-live-col .mk-chip { min-width: 60px; padding: 1px 6px; font-size: 0.78rem; }
 .gpu-mini-cards .af-live-col .mk-chip .bi { font-size: 0.72rem; }
 
+/* Farm Cluster Overview: one chip column per rig (v1.12.55) — same compact
+   chip sizing as the GPU mini-cards, wider gaps between rigs, bolder rig name */
+.rig-mini-cols { gap: 8px 26px; }
+.rig-mini-cols .af-live-col .af-live-gpu { font-size: 0.72rem; font-weight: 700; }
+.rig-mini-cols .af-live-col { gap: 3px; }
+
 .stat-label {
     color: var(--text-muted);
     font-size: 0.75rem;

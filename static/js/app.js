@@ -3427,19 +3427,10 @@ function buildRouteDots(rig, isSelf) {
     }).join('') + '</div>';
 }
 
-// ---- Farm Cluster Overview: per-rig dashboard-icon rows (v1.12.54) ----
-// One compact block per rig in the top overview card: row 1 = GPUs / Avg Temp /
-// Avg Fan (rig-dashboard icons), row 2 = Extra Fans / Rig Uptime / Miner Uptime.
-// Values come from the cached rig.stats (same source as the rig dashboard).
-function clusterStatCell(icon, iconCls, iconStyle, label, value, valueCls, valueStyle, title) {
-    return '<div class="col-4"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
-        '<div class="small text-muted text-truncate"><i class="bi ' + icon + (iconCls ? ' ' + iconCls : '') + '"' +
-        (iconStyle ? ' style="' + iconStyle + '"' : '') + '></i>' + label + '</div>' +
-        '<div class="fw-semibold small' + (valueCls ? ' ' + valueCls : '') + '"' +
-        (valueStyle ? ' style="' + valueStyle + '"' : '') + '>' + value + '</div>' +
-        '</div>';
-}
-
+// ---- Farm Cluster Overview: per-rig chip columns (v1.12.55) ----
+// Clone of the rig dashboard GPU mini-cards (renderGpuMiniCards): one vertical
+// chip column per rig — name / avg temp / avg fan / extra fans / rig uptime /
+// miner uptime. Values come from the cached rig.stats.
 function buildClusterRigStatBlock(rig) {
     const stats = rig.stats;
     const system = stats && stats.system ? stats.system : {};
@@ -3454,49 +3445,50 @@ function buildClusterRigStatBlock(rig) {
         avgTemp = tempSum / gpus.length;
         avgFan = fanSum / gpus.length;
     }
-    const avgTempVal = avgTemp === null ? (isOnline ? 'n/a' : '—') : avgTemp.toFixed(1) + ' °C';
-    const avgTempCls = avgTemp === null ? 'text-secondary-gradient' : tempGradientClass(avgTemp);
-    const avgFanOn = avgFan !== null && avgFan > 0;
-    const avgFanVal = avgFan === null ? (isOnline ? 'n/a' : '—') : avgFan.toFixed(1) + ' %';
-    const avgFanStyle = avgFanOn ? fanSpeedGradientStyle(avgFan) : '';
 
     // Extra (case) fans — same source as the dashboard Extra Fans stat (average duty %)
     const xf = (isOnline && stats) ? stats.extra_fans : null;
-    const xfOn = !!xf && xf.avg_duty > 0;
-    const xfVal = !stats ? 'n/a' : (!isOnline ? '—' : (xf ? xf.avg_duty + ' %' : '—'));
-    const xfStyle = xfOn ? fanSpeedGradientStyle(xf.avg_duty) : '';
-    const xfTitle = !stats || !isOnline ? '' : (xf
-        ? 'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (8MK_NET controller)' : '')
-        : 'No controllable (PWM) extra fans detected');
 
     // Uptimes: rig from system.uptime ("5h 12m"), miner from miner_uptime_s (null = stopped)
     const rigUp = isOnline ? fmtUptimeShort(system.uptime) : null;
-    const rigUpVal = !stats ? 'n/a' : (!isOnline ? '—' : (rigUp || '—'));
-    const minerUp = !stats ? 'n/a'
-        : (!isOnline ? '—'
-            : (stats.miner_uptime_s == null ? 'Stopped' : fmtDurationShort(stats.miner_uptime_s)));
-    const minerUpCls = (!stats || !isOnline) ? 'text-secondary-gradient'
-        : (stats.miner_uptime_s == null ? 'text-danger-gradient' : 'text-success-gradient');
-    const minerUpTitle = !stats || !isOnline ? '' : (stats.miner_uptime_s == null
-        ? 'Miner screen session is not running' : 'Time since the miner started');
+    const minerUp = (isOnline && stats) ? stats.miner_uptime_s : null;
 
-    const gpuVal = isOnline ? (stats ? gpus.length : 'n/a') : '—';
+    // Chip color for fan-ish values — the exact GPU mini-card formula (hsl 130-v*1.3)
+    const speedChipColor = v => {
+        const h = Math.round(130 - v * 1.3);
+        return 'color:hsl(' + h + ',85%,70%);border-color:hsla(' + h + ',85%,60%,0.45);background:hsla(' + h + ',85%,60%,0.08);';
+    };
+    const chip = (icon, text, style, cls, title) =>
+        '<span class="mk-chip' + (cls ? ' ' + cls : '') + '"' +
+        (title ? ' title="' + escapeHtml(title) + '"' : '') +
+        (style ? ' style="' + style + '"' : '') +
+        '><i class="bi ' + icon + '"></i> ' + text + '</span>';
+
+    const dash = '&mdash;';
+    const tempChip = (avgTemp !== null)
+        ? chip('bi-thermometer-half', avgTemp.toFixed(1) + '&deg;C', '', 'mk-temp', 'Average temperature across all GPUs of the rig')
+        : chip('bi-thermometer-half', dash, '', 'mk-temp mk-off', 'No GPU temperature data');
+    const fanChip = (avgFan !== null && avgFan > 0)
+        ? chip('bi-fan', avgFan.toFixed(1) + '%', speedChipColor(avgFan), '', 'Average fan speed across all GPUs of the rig')
+        : chip('bi-fan', dash, '', 'mk-off', 'No GPU fan data');
+    const xfChip = xf
+        ? chip('bi-wind', xf.avg_duty + '%', xf.avg_duty > 0 ? speedChipColor(xf.avg_duty) : '', xf.avg_duty > 0 ? '' : 'mk-off',
+               'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (8MK_NET controller)' : ''))
+        : chip('bi-wind', dash, '', 'mk-off', 'No controllable (PWM) extra fans detected');
+    const rigUpChip = rigUp
+        ? chip('bi-clock-history', rigUp, '', '', 'System uptime of the rig')
+        : chip('bi-clock-history', dash, '', 'mk-off', 'No uptime data');
+    const minerUpChip = (minerUp != null)
+        ? chip('bi-hourglass-split', fmtDurationShort(minerUp), '', '', 'Time since the miner started')
+        : chip('bi-hourglass-split', (isOnline && stats) ? 'Stopped' : dash, '', 'mk-off',
+               (isOnline && stats) ? 'Miner screen session is not running' : 'No miner data');
+
+    const colTitle = escapeHtml(((rig.name || rig.id) + (rig.host_label ? ' \u00b7 ' + rig.host_label : '') + (isOnline ? '' : ' \u00b7 OFFLINE')));
     const name = escapeHtml(rig.name || rig.id);
-    const selfBadge = rig.is_self
-        ? ' <span class="badge bg-success-glow border border-success text-success" style="font-size:0.6em;vertical-align:middle">THIS RIG</span>'
-        : '';
-
-    return '<div class="col-12 col-sm-6 col-lg-4 col-xxl-3">' +
-        '<div class="small fw-bold text-truncate mb-1" title="' + name + '">' +
-        '<i class="bi bi-hdd-network me-1 text-secondary"></i>' + name + selfBadge + '</div>' +
-        '<div class="row g-2 text-center">' +
-        clusterStatCell('bi-gpu-card', 'text-success-gradient', '', 'GPUs', gpuVal, 'text-success-gradient', '', 'GPUs detected on this rig') +
-        clusterStatCell('bi-thermometer-half', avgTempCls, '', 'Avg Temp', avgTempVal, avgTempCls, '', 'Average temperature across all GPUs of the rig') +
-        clusterStatCell('bi-fan', '', avgFanStyle, 'Avg Fan', avgFanVal, avgFanOn ? '' : 'text-secondary-gradient', avgFanOn ? avgFanStyle : '', 'Average fan speed across all GPUs of the rig') +
-        clusterStatCell('bi-wind', '', xfStyle, 'Extra Fans', xfVal, xfOn ? '' : 'text-secondary-gradient', xfOn ? xfStyle : '', xfTitle) +
-        clusterStatCell('bi-clock-history', 'text-cyan-gradient', '', 'Rig Uptime', rigUpVal, 'text-cyan-gradient', '', 'System uptime of the rig') +
-        clusterStatCell('bi-hourglass-split', minerUpCls, '', 'Miner Uptime', minerUp, minerUpCls, '', minerUpTitle) +
-        '</div></div>';
+    return '<div class="af-live-col" title="' + colTitle + '">' +
+        '<span class="af-live-gpu' + (isOnline ? '' : ' mk-off') + '">' + name + '</span>' +
+        tempChip + fanChip + xfChip + rigUpChip + minerUpChip +
+        '</div>';
 }
 
 // Build a rig card column (used inside cluster sections and the unassigned group)
