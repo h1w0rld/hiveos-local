@@ -2071,10 +2071,13 @@ hr {
     opacity: 0.5;
 }
 
-/* Updates tab: one line per rig — checkbox, current and latest version inline */
+/* Updates tab: one line per rig — checkbox, current and latest version inline.
+   Fixed layout + colgroup widths: column geometry is constant from the first
+   paint, so version text loading in never shifts the checkboxes. */
 .cu-table {
-    table-layout: auto;
+    table-layout: fixed;
     width: 100%;
+    min-width: 1240px;
 }
 .cu-table td, .cu-table th {
     vertical-align: middle;
@@ -2083,11 +2086,12 @@ hr {
     padding-bottom: .15rem;
 }
 .cu-table .cu-check-col {
-    width: 1%;
     padding-left: .5rem;
     padding-right: .5rem;
 }
 .cu-table td:not(.cu-check-col), .cu-table th:not(.cu-check-col) {
     padding-left: .75rem;
     padding-right: .75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }

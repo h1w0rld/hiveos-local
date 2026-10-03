@@ -2369,7 +2369,9 @@ function cuCompInfoHtml(rig, comp) {
         cls = 'text-danger';
         var failTitle = ' title="' + escapeHtml(job.err) + '"';
     } else if (outdated) {
-        tail = '<span title="Latest available version">update available \u2192 v' + escapeHtml(latest) + '</span>';
+        // short "→ vX" tail (details in the tooltip + Updates column) so the
+        // fixed-width version columns hold it without clipping at any state
+        tail = '<span title="Latest available version">\u2192 v' + escapeHtml(latest) + '</span>';
         cls = 'text-warning fw-semibold';
     } else if (v && !latest) {
         tail = '<span title="Latest available version could not be detected">latest version unknown</span>';
@@ -2414,11 +2416,12 @@ function cuRowStatusHtml(rig) {
             '"><i class="bi bi-dash-circle me-1"></i>Versions unknown</span>';
     }
     if (outdated.length) {
+        // count only — which components is shown by the per-column "→ vX" tails
+        // and kept in the tooltip (fixed-width Updates column must not clip)
         return '<span class="text-warning" title="' +
             escapeHtml(outdated.map(c => CU_COMPONENT_LABELS[c]).join(', ')) +
             '"><i class="bi bi-arrow-down-circle-fill me-1"></i>' + outdated.length + ' update' +
-            (outdated.length > 1 ? 's' : '') + ' ready — ' +
-            escapeHtml(outdated.map(c => CU_COMPONENT_LABELS[c]).join(', ')) + '</span>';
+            (outdated.length > 1 ? 's' : '') + ' ready</span>';
     }
     return '<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>All components up to date</span>';
 }

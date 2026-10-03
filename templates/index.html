@@ -1076,6 +1076,18 @@
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2 cu-table" style="font-size: 0.95rem;">
+                                <!-- Fixed column geometry (table-layout: fixed): version text appearing must never reflow the checkboxes -->
+                                <colgroup>
+                                    <col style="width: 7.5%;"><!-- Rig -->
+                                    <col style="width: 8%;"><!-- Status -->
+                                    <col style="width: 3.5%;"><!-- [ ] Panel -->
+                                    <col style="width: 17%;"><!-- Panel version -->
+                                    <col style="width: 3.5%;"><!-- [ ] Drivers -->
+                                    <col style="width: 17%;"><!-- Drivers version -->
+                                    <col style="width: 3.5%;"><!-- [ ] Hive OS -->
+                                    <col style="width: 17%;"><!-- Hive OS version -->
+                                    <col style="width: 23%;"><!-- Updates summary -->
+                                </colgroup>
                                 <thead>
                                     <tr class="text-muted border-bottom border-secondary-subtle">
                                         <th>Rig</th>
@@ -1096,7 +1108,7 @@
                                     </tr>
                                 </thead>
                                 <tbody id="cuTbody">
-                                    <tr><td colspan="5" class="text-center text-muted py-3">Loading versions...</td></tr>
+                                    <tr><td colspan="9" class="text-center text-muted py-3">Loading versions...</td></tr>
                                 </tbody>
                             </table>
                         </div>
