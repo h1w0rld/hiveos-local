@@ -1578,9 +1578,9 @@ async function fetchStats() {
                 const accPct = 100 - rejPct;
                 const pctCls = rejPct > 3 ? 'text-danger-gradient' : (rejPct > 1 ? 'text-amber-gradient' : 'text-success-gradient');
                 sharesEl.innerHTML =
-                    '<span class="text-success-gradient">' + acc.toLocaleString() + ' ✓</span>' +
+                    '<span class="text-success-gradient">' + acc.toLocaleString() + '</span>' +
                     ' <span class="text-secondary-gradient">/</span> ' +
-                    '<span class="' + (rej > 0 ? 'text-danger-gradient' : 'text-secondary-gradient') + '">' + rej.toLocaleString() + ' ✗</span>' +
+                    '<span class="' + (rej > 0 ? 'text-danger-gradient' : 'text-secondary-gradient') + '">' + rej.toLocaleString() + '</span>' +
                     ' <span class="' + pctCls + '" style="font-size:0.72em">(' + accPct.toFixed(1) + '%)</span>';
                 sharesEl.className = 'stat-value';
                 sharesEl.removeAttribute('style');

@@ -90,6 +90,21 @@ body {
     -webkit-text-fill-color: transparent;
 }
 
+/* Power (Hive Stats-tab power blue) and OS version (bright teal) accents */
+.text-blue-gradient {
+    background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.text-teal-gradient {
+    background: linear-gradient(135deg, #2dd4bf 0%, #0d9488 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
 /* Connection status dots on the SSH accesses tab */
 .conn-dot {
     display: inline-block;
