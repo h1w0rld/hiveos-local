@@ -142,6 +142,18 @@ function fmtDurationShort(sec) {
     return m + 'm';
 }
 
+// Rig uptime arrives from /api/stats as "5h 12m" (hours are cumulative, may exceed 24):
+// compact long uptimes to "3d 4h"; null/Unknown → null
+function fmtUptimeShort(str) {
+    if (!str || str === 'Unknown') return null;
+    const m = String(str).match(/(\d+)h\s*(\d+)m/);
+    if (!m) return null;
+    const h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+    if (!isFinite(h) || !isFinite(min)) return null;
+    if (h >= 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+    return h + 'h ' + min + 'm';
+}
+
 // GPU health mini-cards (System Diagnostics row 3): exact Fans-tab live chips
 // (thermometer + fan mk-chips, hsl speed color) compacted for the stat row
 function renderGpuMiniCards(gpus) {
@@ -3413,16 +3425,51 @@ function buildRigCard(rig) {
     const system = stats && stats.system ? stats.system : {};
     const isOnline = !!rig.online;
     const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
+    const gpus = (stats && stats.gpus) || [];
     const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)) : 0;
     const totalHash = !stats ? 'n/a' : (isOnline ? fmtSpeed(totalHashMh) : '—');
-    const power = stats ? (isOnline ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
-    const temps = stats && stats.gpus && stats.gpus.length
-        ? (isOnline ? (stats.gpus.reduce((s, g) => s + (g.temp || 0), 0) / stats.gpus.length).toFixed(0) + ' °C' : '—') : 'n/a';
+    const power = stats ? (isOnline ? gpus.reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
     const isSelf = !!rig.is_self;
+
+    // Rig-wide averages for the dashboard-icon cells: temp + fan speed across all GPUs
+    let avgTemp = null, avgFan = null;
+    if (isOnline && gpus.length) {
+        let tempSum = 0, fanSum = 0;
+        gpus.forEach(g => { tempSum += parseFloat(g.temp) || 0; fanSum += parseFloat(g.fan) || 0; });
+        avgTemp = tempSum / gpus.length;
+        avgFan = fanSum / gpus.length;
+    }
+    const avgTempVal = avgTemp === null ? (isOnline ? 'n/a' : '—') : avgTemp.toFixed(1) + ' °C';
+    const avgTempCls = avgTemp === null ? 'text-secondary-gradient' : tempGradientClass(avgTemp);
+    const avgFanOn = avgFan !== null && avgFan > 0;
+    const avgFanVal = avgFan === null ? (isOnline ? 'n/a' : '—') : avgFan.toFixed(1) + ' %';
+    const avgFanStyle = avgFanOn ? fanSpeedGradientStyle(avgFan) : '';
+
+    // Extra (case) fans — same source as the dashboard Extra Fans stat (average duty %)
+    const xf = (isOnline && stats) ? stats.extra_fans : null;
+    const xfOn = !!xf && xf.avg_duty > 0;
+    const xfVal = !stats ? 'n/a' : (!isOnline ? '—' : (xf ? xf.avg_duty + ' %' : '—'));
+    const xfStyle = xfOn ? fanSpeedGradientStyle(xf.avg_duty) : '';
+    const xfTitle = !stats || !isOnline ? '' : (xf
+        ? 'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (8MK_NET controller)' : '')
+        : 'No controllable (PWM) extra fans detected');
+
+    // Uptimes: rig uptime from system.uptime ("5h 12m"), miner uptime from miner_uptime_s (null = stopped)
+    const rigUp = isOnline ? fmtUptimeShort(system.uptime) : null;
+    const rigUpVal = !stats ? 'n/a' : (!isOnline ? '—' : (rigUp || '—'));
+    const minerUp = !stats ? 'n/a'
+        : (!isOnline ? '—'
+            : (stats.miner_uptime_s == null ? 'Stopped' : fmtDurationShort(stats.miner_uptime_s)));
+    const minerUpCls = (!stats || !isOnline) ? 'text-secondary-gradient'
+        : (stats.miner_uptime_s == null ? 'text-danger-gradient' : 'text-success-gradient');
+    const minerUpTitle = !stats || !isOnline ? '' : (stats.miner_uptime_s == null
+        ? 'Miner screen session is not running' : 'Time since the miner started');
+
     // Coin with the mining algorithm in parentheses
     const coinAlgo = isOnline
         ? escapeHtml((system.coin || 'None') + (stats && stats.miner_algo ? ' (' + stats.miner_algo + ')' : ''))
         : '—';
+    const minerVal = isOnline ? escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)')) : '—';
 
     const statusBadge = isSelf
         ? '<span class="badge bg-success-glow border border-success text-success">THIS RIG</span>'
@@ -3450,30 +3497,48 @@ function buildRigCard(rig) {
                     <i class="bi bi-hdd-network me-1"></i>${escapeHtml(rig.host_label || '')}
                 </p>
                 ${buildRouteDots(rig, isSelf)}
+                <!-- Icon metric rows: same icon set as the rig dashboard
+                     (gpu-card / thermometer / fan), rig-wide averages + uptimes -->
                 <div class="row g-2 mt-0 pt-2 border-top border-secondary-subtle text-center">
-                    <div class="col-4">
-                        <div class="small text-muted">GPUs</div>
-                        <div class="fw-semibold small">${isOnline ? (gpuCount === null ? 'n/a' : gpuCount) : '—'}</div>
+                    <div class="col-3" title="GPUs detected on this rig">
+                        <div class="small text-muted"><i class="bi bi-gpu-card me-1 text-success-gradient"></i>GPUs</div>
+                        <div class="fw-semibold small text-success-gradient">${isOnline ? (gpuCount === null ? 'n/a' : gpuCount) : '—'}</div>
                     </div>
-                    <div class="col-4">
-                        <div class="small text-muted">Speed</div>
+                    <div class="col-3" title="Total hashrate">
+                        <div class="small text-muted"><i class="bi bi-lightning-charge-fill me-1 text-primary-gradient"></i>Speed</div>
                         <div class="fw-semibold small text-primary-gradient fw-bold">${totalHash}</div>
                     </div>
-                    <div class="col-4">
-                        <div class="small text-muted">Temp</div>
-                        <div class="fw-semibold small">${temps}</div>
+                    <div class="col-3" title="Average temperature across all GPUs of the rig">
+                        <div class="small text-muted"><i class="bi bi-thermometer-half me-1 ${avgTempCls}"></i>Avg Temp</div>
+                        <div class="fw-semibold small ${avgTempCls}">${avgTempVal}</div>
                     </div>
-                    <div class="col-4">
-                        <div class="small text-muted">Miner</div>
-                        <div class="fw-semibold small">${isOnline ? escapeHtml((system.active_miner || 'None') + (system.miner_running ? '' : ' (stopped)')) : '—'}</div>
+                    <div class="col-3" title="Average fan speed across all GPUs of the rig">
+                        <div class="small text-muted"><i class="bi bi-fan me-1"${avgFanOn ? ' style="' + avgFanStyle + '"' : ''}></i>Avg Fan</div>
+                        <div class="fw-semibold small${avgFanOn ? '' : ' text-secondary-gradient'}"${avgFanOn ? ' style="' + avgFanStyle + '"' : ''}>${avgFanVal}</div>
                     </div>
-                    <div class="col-4">
-                        <div class="small text-muted">Coin</div>
+                    <div class="col-3" title="Active miner">
+                        <div class="small text-muted text-truncate"><i class="bi bi-cpu-fill me-1 text-cyan-gradient"></i>Miner</div>
+                        <div class="fw-semibold small text-cyan-gradient text-truncate">${minerVal}</div>
+                    </div>
+                    <div class="col-3" title="Mined coin (algorithm)">
+                        <div class="small text-muted"><i class="bi bi-coin me-1 text-amber-gradient"></i>Coin</div>
                         <div class="fw-semibold small text-amber-gradient text-truncate" title="${coinAlgo}">${coinAlgo}</div>
                     </div>
-                    <div class="col-4">
-                        <div class="small text-muted">Power</div>
-                        <div class="fw-semibold small text-danger-emphasis">${power}</div>
+                    <div class="col-3" title="Total GPU power draw">
+                        <div class="small text-muted"><i class="bi bi-plug-fill me-1 text-blue-gradient"></i>Power</div>
+                        <div class="fw-semibold small text-blue-gradient">${power}</div>
+                    </div>
+                    <div class="col-3" title="${xfTitle}">
+                        <div class="small text-muted text-truncate"><i class="bi bi-wind me-1"${xfOn ? ' style="' + xfStyle + '"' : ''}></i>Extra Fans</div>
+                        <div class="fw-semibold small${xfOn ? '' : ' text-secondary-gradient'}"${xfOn ? ' style="' + xfStyle + '"' : ''}>${xfVal}</div>
+                    </div>
+                    <div class="col-6" title="System uptime of the rig">
+                        <div class="small text-muted"><i class="bi bi-clock-history me-1 text-cyan-gradient"></i>Rig Uptime</div>
+                        <div class="fw-semibold small text-cyan-gradient">${rigUpVal}</div>
+                    </div>
+                    <div class="col-6" title="${minerUpTitle}">
+                        <div class="small text-muted"><i class="bi bi-hourglass-split me-1 ${minerUpCls}"></i>Miner Uptime</div>
+                        <div class="fw-semibold small ${minerUpCls}">${minerUp}</div>
                     </div>
                 </div>
             </div>
