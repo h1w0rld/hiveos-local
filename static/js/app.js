@@ -1581,7 +1581,7 @@ async function fetchStats() {
                     '<span class="text-success-gradient">' + acc.toLocaleString() + '</span>' +
                     ' <span class="text-secondary-gradient">/</span> ' +
                     '<span class="' + (rej > 0 ? 'text-danger-gradient' : 'text-secondary-gradient') + '">' + rej.toLocaleString() + '</span>' +
-                    ' <span class="' + pctCls + '" style="font-size:0.72em">(' + accPct.toFixed(1) + '%)</span>';
+                    '<span class="' + pctCls + '" style="font-size:0.72em;margin-left:0.45em">(' + accPct.toFixed(1) + '%)</span>';
                 sharesEl.className = 'stat-value';
                 sharesEl.removeAttribute('style');
                 sharesEl.title = 'Accepted ' + accPct.toFixed(1) + '% · Rejected ' + rejPct.toFixed(1) + '%' +
