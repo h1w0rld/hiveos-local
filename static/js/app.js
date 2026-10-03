@@ -186,9 +186,10 @@ function tempGradientClass(t) {
 
 function fanSpeedGradientStyle(v) {
     v = Math.max(0, Math.min(100, Number(v) || 0));
-    const h = Math.round(130 - v * 1.3);
-    // lightness 64%/50% (was 68%/55%): keeps the yellow end rich instead of
-    // washing out toward near-white at high fan speeds (customer review)
+    // Hue floor (customer review): the pleasant orange-leaning yellow (h=52) is the
+    // MINIMUM — below 40% it stays there; above 40% it deepens orange -> red,
+    // reaching h=0 at 100% (the old 130-v*1.3 scale read too light/green at 40%)
+    const h = v <= 40 ? 52 : Math.round(52 * (1 - (v - 40) / 60));
     return 'background:linear-gradient(135deg,hsl(' + h + ',85%,64%) 0%,hsl(' + Math.max(0, h - 25) + ',85%,50%) 100%);' +
         '-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;';
 }
