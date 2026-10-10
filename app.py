@@ -2278,6 +2278,398 @@ def api_guard():
         guard_capture_snapshot()
     return jsonify({"success": True, "guard": _guard_public(_guard_load())})
 
+# ---------------- Self-heal worker ----------------
+# Auto-repair for the failure modes observed on the farm (11 Oct 2026, RIG6):
+#   (a) custom miner package missing after a fsheet version bump: hive's
+#       custom-get wipes the old install when the install URL changes and
+#       re-downloads from GitHub, which can crawl or stall forever - the miner
+#       never starts. Heal: pull the tarball from a peer that already has it
+#       (1 MB base64 chunks over the cluster's SSH routes), then run custom-get
+#       and start the miner.
+#   (b) broken HIVE_HOST_URL (e.g. plain http://): the hive agent logs
+#       "No connection with API server. Stop the miner" and kills every new
+#       miner start a few seconds in. Heal: adopt the https host used by the
+#       peer majority and restart the hive agent.
+#   (c) dead miner screen left by a failed start ("screen session is already
+#       running" blocks every retry). Heal: miner stop + start.
+# Every action is rate-limited and reported to the Activity feed (Stats tab).
+
+HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "heal_state.json")
+HEAL_CHECK_INTERVAL = 600      # periodic heal pass (10 min)
+HEAL_BOOT_DELAY = 300          # first pass: give the hive agent time to boot the miner
+HEAL_MINER_GAP = 1800          # min seconds between miner start/restart heal actions
+HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
+HEAL_CHUNK = 1024 * 1024       # peer transfer chunk size (bytes)
+HEAL_CHUNK_TIMEOUT = 240       # ssh timeout for one chunk
+HEAL_CHUNK_RETRIES = 2
+AGENT_LOG_PATH = "/var/log/hive-agent.log"
+MINER_STOP_FLAG = "/run/hive/MINER_STOP"
+MINER_RUN_FLAG = "/run/hive/MINER_RUN"
+HEAL_DOWNLOADS_DIR = "/hive/miners/custom/downloads"
+HEAL_CUSTOM_DIR = "/hive/miners/custom"
+
+_heal_state_lock = threading.Lock()
+_heal_state_cache = {"loaded": False, "data": None}
+
+def _heal_state_load():
+    with _heal_state_lock:
+        if _heal_state_cache["loaded"]:
+            return _heal_state_cache["data"]
+        st = {"last_check": 0, "last_action": "", "last_host_fix": 0, "last_miner_heal": 0,
+              "last_transfer": ""}
+        try:
+            with open(HEAL_STATE_PATH, 'r') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                for k in st:
+                    if k in disk:
+                        st[k] = disk[k]
+        except Exception:
+            pass
+        _heal_state_cache["data"] = st
+        _heal_state_cache["loaded"] = True
+        return st
+
+def _heal_state_save(st):
+    with _heal_state_lock:
+        _heal_state_cache["data"] = st
+        _heal_state_cache["loaded"] = True
+        try:
+            _atomic_write_file(HEAL_STATE_PATH, json.dumps(st, indent=2))
+        except Exception as e:
+            logging.error(f"Failed to save heal state: {e}")
+
+def _conf_value(path, key):
+    """Read a KEY="value" entry from a hive shell config file."""
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                m = re.match(r'^%s="(.*)"\s*$' % re.escape(key), line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return None
+
+def _agent_log_no_connection():
+    """True when the hive agent recently logged 'No connection with API server.
+    Stop the miner' (its built-in policy that kills miner starts)."""
+    try:
+        with open(AGENT_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 200000))
+            return "No connection with API server. Stop the miner" in f.read()
+    except Exception:
+        return False
+
+def _heal_parse_url_basename(url):
+    """'https://host/path/srbminer_custom-3.7.4.tar.gz' -> (name, version, basename)."""
+    base = os.path.basename(str(url or "").strip())
+    m = re.match(r'^([A-Za-z0-9._-]+?)-([0-9][A-Za-z0-9._-]*)\.tar\.gz$', base)
+    if not m:
+        return None, None, base
+    return m.group(1), m.group(2), base
+
+def _majority_peers_value(values):
+    """Most common non-empty value."""
+    counts = {}
+    for v in values:
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+def _heal_check_api_host(st, report):
+    """rig.conf API host sanity: if the agent suffered 'No connection ... Stop the
+    miner' and our host is plain http or differs from the peer majority, adopt the
+    peers' host and restart the hive agent."""
+    our_host = _conf_value(RIG_CONF_PATH, "HIVE_HOST_URL")
+    if not our_host:
+        return
+    agent_hurt = _agent_log_no_connection()
+    if not agent_hurt and not our_host.startswith("http://"):
+        return
+    now = int(time.time())
+    if now - int(st.get("last_host_fix") or 0) < HEAL_HOST_GAP:
+        report["notes"].append("host fix skipped (rate limit)")
+        return
+    peers_hosts = []
+    try:
+        state = load_cluster_state()
+        for rig in state.get("rigs", []):
+            if rig.get("is_self") or rig.get("id") == state.get("self_id"):
+                continue
+            ok, data, _code, _err, _acc = cluster_remote_api(rig, "GET", "api/heal/info", timeout=20)
+            if ok and isinstance(data, dict):
+                peers_hosts.append(str(data.get("hive_host") or ""))
+    except Exception as e:
+        report["notes"].append("peer host query failed: %s" % e)
+    majority = _majority_peers_value(peers_hosts)
+    if not majority or not majority.startswith("https://") or majority == our_host:
+        return
+    # backup + rewrite HIVE_HOST_URL only
+    try:
+        with open(RIG_CONF_PATH, 'r') as f:
+            content = f.read()
+        backup = RIG_CONF_PATH + ".bak-heal-%d" % now
+        with open(backup, 'w') as f:
+            f.write(content)
+        new_content, n = re.subn(r'^HIVE_HOST_URL=".*"$', 'HIVE_HOST_URL="%s"' % majority,
+                                 content, count=1, flags=re.M)
+        if n != 1:
+            report["notes"].append("HIVE_HOST_URL not found in rig.conf")
+            return
+        _atomic_write_file(RIG_CONF_PATH, new_content, mode=0o644)
+        guard_note_config_change()
+        run_command("sudo systemctl restart hive")
+        st["last_host_fix"] = now
+        st["last_action"] = "api host fixed to %s (was %s)" % (majority, our_host)
+        st["last_transfer"] = ""
+        _heal_state_save(st)
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: rig API host was '%s' (agent kept stopping the miner) - switched to '%s'" % (our_host, majority))
+    except Exception as e:
+        logging.error("Self-heal: host fix failed: %s", e)
+        report["notes"].append("host fix failed: %s" % e)
+
+def _heal_archive_path(name, ver, basename):
+    if name and ver:
+        return os.path.join(HEAL_DOWNLOADS_DIR, "%s-%s.tar.gz" % (name, ver))
+    return os.path.join(HEAL_DOWNLOADS_DIR, basename) if basename else None
+
+def _archive_valid(path):
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) < 1024:
+            return False
+        code = subprocess.run(["gunzip", "-t", path], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode
+        return code == 0
+    except Exception:
+        return False
+
+def _heal_fetch_chunk(peer_rig, remote_path, chunk_index, out_path, expected_len):
+    """Fetch one 1 MB chunk of a peer file as base64 over the SSH routes."""
+    cmd = ("dd if=%s bs=%d skip=%d count=1 2>/dev/null | base64 -w0"
+           % (remote_path, HEAL_CHUNK, chunk_index))
+    for access in _ordered_rig_accesses(peer_rig):
+        ok, out, err = run_ssh_command(access, cmd, timeout=HEAL_CHUNK_TIMEOUT)
+        if not ok:
+            logging.info("Self-heal: chunk %d via %s failed: %s", chunk_index,
+                         access.get("name") or access.get("id"), err)
+            continue
+        try:
+            data = base64.b64decode(out.strip().encode("ascii"), validate=True)
+        except Exception:
+            continue
+        if expected_len and len(data) != expected_len:
+            continue
+        return data
+    return None
+
+def _heal_restore_package(name, ver, basename, url, peer_rig, peer_name, st, report):
+    """Copy the tarball from the peer chunk by chunk, then let custom-get install."""
+    remote_path = _heal_archive_path(name, ver, basename)
+    if not remote_path:
+        return False
+    ok, data, _code, err, _acc = cluster_remote_api(
+        peer_rig, "GET", "api/heal/pkg?name=%s&ver=%s" % (name, ver), timeout=20)
+    if not ok or not isinstance(data, dict) or not data.get("valid"):
+        report["notes"].append("peer %s reports no valid archive" % peer_name)
+        return False
+    total = int(data.get("size") or 0)
+    if total <= 0:
+        return False
+    nchunks = (total + HEAL_CHUNK - 1) // HEAL_CHUNK
+    local_path = remote_path
+    try:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        cur = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+        if cur > total:
+            os.remove(local_path)
+            cur = 0
+        if cur % HEAL_CHUNK:
+            with open(local_path, "r+b") as f:  # drop a torn tail chunk
+                f.truncate((cur // HEAL_CHUNK) * HEAL_CHUNK)
+            cur = (cur // HEAL_CHUNK) * HEAL_CHUNK
+        start_chunk = cur // HEAL_CHUNK
+        for i in range(start_chunk, nchunks):
+            expected = HEAL_CHUNK if i < nchunks - 1 else total - i * HEAL_CHUNK
+            got = None
+            for _r in range(HEAL_CHUNK_RETRIES + 1):
+                got = _heal_fetch_chunk(peer_rig, remote_path, i, local_path, expected)
+                if got is not None:
+                    break
+            if got is None:
+                st["last_transfer"] = "chunk %d/%d failed" % (i + 1, nchunks)
+                _heal_state_save(st)
+                report["notes"].append(st["last_transfer"])
+                return False
+            with open(local_path, "ab") as f:
+                f.write(got)
+        if not _archive_valid(local_path):
+            os.remove(local_path)
+            report["notes"].append("assembled archive failed gunzip -t")
+            return False
+    except Exception as e:
+        logging.error("Self-heal: transfer from %s failed: %s", peer_name, e)
+        report["notes"].append("transfer failed: %s" % e)
+        return False
+    # Install with hive's own tooling and start the miner if it is still down
+    out, err, code = run_command("sudo %s/custom-get %s" % (HEAL_CUSTOM_DIR, shlex.quote(url)))
+    installed = os.path.isdir(os.path.join(HEAL_CUSTOM_DIR, name))
+    now = int(time.time())
+    st["last_miner_heal"] = now
+    st["last_transfer"] = "restored %s-%s from %s" % (name, ver, peer_name)
+    st["last_action"] = "custom miner package restored" if installed else "custom-get failed (code %s)" % code
+    _heal_state_save(st)
+    if not installed:
+        report["notes"].append("custom-get failed: %s" % (err or out or code))
+        return False
+    report["fixed"].append("miner package %s-%s restored from peer %s" % (name, ver, peer_name))
+    logging.warning("Self-heal: miner package %s-%s restored from peer %s", name, ver, peer_name)
+    record_metrics_event("warning", "Self-heal: miner package '%s' (%s) was missing - restored from rig '%s' and miner restarted" % (name, ver, peer_name))
+    if not os.path.exists(MINER_RUN_FLAG):
+        run_command(MINER_START_CMD)
+    return True
+
+def _heal_check_miner(st, report):
+    """Miner down + not intentionally stopped: fix the package / clear a dead
+    screen / start the miner."""
+    miner = _conf_value(RIG_CONF_PATH, "MINER")
+    if not miner or miner == "none":
+        return
+    maintenance = _conf_value(RIG_CONF_PATH, "MAINTENANCE")
+    if maintenance and maintenance.strip() not in ("", "0"):
+        return
+    if os.path.exists(MINER_STOP_FLAG):
+        return  # intentional stop (panel/cloud/autofan critical) - do not fight it
+    running = os.path.exists(MINER_RUN_FLAG)
+    if running:
+        return
+    now = int(time.time())
+    if now - int(st.get("last_miner_heal") or 0) < HEAL_MINER_GAP:
+        report["notes"].append("miner heal skipped (rate limit)")
+        return
+    out, _err, code = run_command("sudo screen -ls")
+    screen_alive = code == 0 and ".miner" in (out or "")
+    download_active = False
+    pkg_missing = False
+    if miner == "custom":
+        custom_miner = _conf_value(WALLET_CONF_PATH, "CUSTOM_MINER")
+        out2, _e2, _c2 = run_command("pgrep -af custom-get")
+        download_active = bool((out2 or "").strip())
+        pkg_missing = bool(custom_miner) and not os.path.isdir(os.path.join(HEAL_CUSTOM_DIR, custom_miner))
+        if pkg_missing and download_active:
+            return  # hive's own custom-get/wget is working on the download
+        if pkg_missing and not download_active:
+            url = _conf_value(WALLET_CONF_PATH, "CUSTOM_INSTALL_URL")
+            name, ver, basename = _heal_parse_url_basename(url)
+            if url and name:
+                # a peer that already runs this version ships the tarball
+                try:
+                    state = load_cluster_state()
+                except Exception as e:
+                    state = None
+                    report["notes"].append("cluster state unavailable: %s" % e)
+                peers = []
+                if state:
+                    peers = [r for r in state.get("rigs", [])
+                             if not r.get("is_self") and r.get("id") != state.get("self_id")]
+                for peer in peers:
+                    peer_name = peer.get("name") or peer.get("id")
+                    if _heal_restore_package(custom_miner, ver, basename, url, peer, peer_name, st, report):
+                        return
+                # no peer had a usable archive: fall through - a dead screen is
+                # cleared below so hive's own downloader can retry GitHub
+    if not download_active and screen_alive:
+        # dead screen left by a failed start blocks every "miner start" with
+        # "screen session is already running" - clear it and start over
+        run_command("sudo /hive/bin/miner stop")
+        time.sleep(3)
+        run_command(MINER_START_CMD)
+        st["last_miner_heal"] = now
+        st["last_action"] = "stale miner screen cleared - miner restarted"
+        _heal_state_save(st)
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: dead miner screen cleared, miner restarted")
+        return
+    if pkg_missing:
+        return  # package still missing, nothing usable to transfer this cycle
+    # Package present (or non-custom miner): agent may have died or crashed
+    if _agent_log_no_connection() and st.get("last_host_fix", 0) < now - HEAL_HOST_GAP:
+        # the agent stops miners when it cannot reach the API server; the host
+        # fix above handles the known root cause - do not fight the agent here
+        report["notes"].append("agent reports no API connection; miner start skipped")
+        return
+    run_command(MINER_START_CMD)
+    st["last_miner_heal"] = now
+    st["last_action"] = "miner was down (no MINER_RUN, no MINER_STOP) - started"
+    _heal_state_save(st)
+    report["fixed"].append(st["last_action"])
+    logging.warning("Self-heal: %s", st["last_action"])
+    record_metrics_event("warning", "Self-heal: miner was not running - started it (flight sheet is active)")
+
+def heal_run_check():
+    """One self-heal pass: API host sanity + miner/package repair."""
+    st = _heal_state_load()
+    report = {"checked": int(time.time()), "fixed": [], "notes": []}
+    try:
+        _heal_check_api_host(st, report)
+    except Exception as e:
+        logging.error("Self-heal: api host check failed: %s", e)
+        report["notes"].append("api host check failed: %s" % e)
+    try:
+        _heal_check_miner(st, report)
+    except Exception as e:
+        logging.error("Self-heal: miner check failed: %s", e)
+        report["notes"].append("miner check failed: %s" % e)
+    st["last_check"] = report["checked"]
+    if report["fixed"]:
+        st["last_action"] = "; ".join(report["fixed"])
+    _heal_state_save(st)
+    return report
+
+def _heal_worker():
+    time.sleep(HEAL_BOOT_DELAY)
+    while True:
+        try:
+            heal_run_check()
+        except Exception as e:
+            logging.error(f"Self-heal check failed: {e}")
+        time.sleep(HEAL_CHECK_INTERVAL)
+
+def start_heal_worker():
+    t = threading.Thread(target=_heal_worker, daemon=True, name="self-heal")
+    t.start()
+    logging.info("Self-heal worker started (package repair, API host fix, stale screen)")
+
+@app.route('/api/heal/info')
+def api_heal_info():
+    """Peer info used by the self-heal API-host consensus check."""
+    return jsonify({"success": True, "hive_host": _conf_value(RIG_CONF_PATH, "HIVE_HOST_URL") or ""})
+
+@app.route('/api/heal/pkg')
+def api_heal_pkg():
+    """Peer check for a custom miner tarball (used by the self-heal transfer)."""
+    name = request.args.get("name", "")
+    ver = request.args.get("ver", "")
+    if not re.match(r'^[A-Za-z0-9._-]+$', name or "") or not re.match(r'^[A-Za-z0-9._-]+$', ver or ""):
+        return jsonify({"success": False, "message": "Bad package name"}), 400
+    path = _heal_archive_path(name, ver, None)
+    if not path:
+        return jsonify({"success": False, "message": "Bad package name"}), 400
+    exists = os.path.exists(path)
+    return jsonify({"success": True, "exists": exists, "size": os.path.getsize(path) if exists else 0,
+                    "valid": _archive_valid(path) if exists else False})
+
+@app.route('/api/heal/status')
+def api_heal_status():
+    return jsonify({"success": True, "heal": _heal_state_load()})
+
 _cluster_sync_lock = threading.Lock()
 _cluster_last_sync = {"ts": 0, "ok": True, "message": "Not synced yet"}
 
@@ -7218,6 +7610,9 @@ if __name__ == '__main__':
 
     # Start the local config guard worker (Local mode enforcement: boot + every 10 min)
     start_guard_worker()
+
+    # Start the self-heal worker (miner package repair, API host fix, stale screen)
+    start_heal_worker()
 
     local_ip = get_local_ip()
     port = 1337
