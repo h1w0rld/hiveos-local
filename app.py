@@ -4941,6 +4941,19 @@ def get_diagnostics():
         "gpu_logs": gpu_logs
     })
 
+def _resolve_worker_name():
+    """%WORKER_NAME% source: rig.conf RIG_ID (HiveOS semantics — the cloud
+    agent substitutes the same value), sanitized; fallback to hostname."""
+    try:
+        rid = (parse_shell_config(RIG_CONF_PATH).get("RIG_ID") or "").strip()
+    except Exception:
+        rid = ""
+    rid = rid.upper().replace(" ", "_")
+    if rid:
+        return rid
+    return socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+
+
 def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
     """Write COIN/WAL/POOL_URL into wallet.conf and MINER into rig.conf, restart miner.
     For custom miners (miner == 'custom') the HiveOS-style CUSTOM_* block is written
@@ -4995,7 +5008,7 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
         if not wallet:
             return False, "Wallet address is required for a custom miner flight sheet."
 
-        worker_name = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+        worker_name = _resolve_worker_name()
         # HiveOS resolves %WAL%/%WORKER_NAME% server-side; our local apply must do it
         # itself or the miner would literally mine to "%WAL%.%WORKER_NAME%"
         custom_template = template or (wallet + "." + worker_name)
@@ -5552,7 +5565,7 @@ def _live_config_matches_item(item, wallet_address):
         return False
     wc = lambda k: (wallet_conf.get(k) or "").strip()
     if miner == "custom":
-        hostname = socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
+        hostname = _resolve_worker_name()
         user_config = str(item.get("user_config", "")).strip()
         user_config = user_config.replace("%WAL%", wallet_address).replace("%worker_name%", hostname).replace("%WORKER_NAME%", hostname)
         try:
