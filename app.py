@@ -21,6 +21,7 @@ import logging
 import threading
 import random
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import urllib.request
@@ -2363,6 +2364,34 @@ def _agent_log_no_connection():
     except Exception:
         return False
 
+_HIVE_DATE_FORMATS = ("%a %d %b %Y %I:%M:%S %p %z", "%a %d %b %Y %H:%M:%S %z")
+
+def _agent_log_last_noconn_ts():
+    """Epoch of the most recent 'No connection with API server. Stop the miner'
+    line in the hive agent log (0 when absent or unparsable)."""
+    try:
+        with open(AGENT_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 200000))
+            text = f.read()
+        idx = text.rfind("No connection with API server. Stop the miner")
+        if idx < 0:
+            return 0
+        line_start = text.rfind("\n", 0, idx) + 1
+        m = re.match(r'^\[([^\]]+)\]', text[line_start:])
+        if not m:
+            return 0
+        stamp = m.group(1).strip()
+        for fmt in _HIVE_DATE_FORMATS:
+            try:
+                return int(datetime.strptime(stamp, fmt).timestamp())
+            except ValueError:
+                continue
+        return 0
+    except Exception:
+        return 0
+
 def _heal_parse_url_basename(url):
     """'https://host/path/srbminer_custom-3.7.4.tar.gz' -> (name, version, basename)."""
     base = os.path.basename(str(url or "").strip())
@@ -2599,11 +2628,14 @@ def _heal_check_miner(st, report):
         return
     if pkg_missing:
         return  # package still missing, nothing usable to transfer this cycle
-    # Package present (or non-custom miner): agent may have died or crashed
-    if _agent_log_no_connection() and st.get("last_host_fix", 0) < now - HEAL_HOST_GAP:
-        # the agent stops miners when it cannot reach the API server; the host
-        # fix above handles the known root cause - do not fight the agent here
-        report["notes"].append("agent reports no API connection; miner start skipped")
+    # Package present (or non-custom miner): agent may have died or crashed.
+    # The agent stops miners when it loses the API dialog and only restarts them
+    # on a cloud command - do not fight it while its complaint is fresh (<1h);
+    # an old line in a rotated log must not block healing forever.
+    noconn_ts = _agent_log_last_noconn_ts()
+    if noconn_ts and time.time() - noconn_ts < 3600:
+        report["notes"].append("agent reported API connection loss recently (%d min ago); miner start skipped"
+                               % (int(time.time() - noconn_ts) // 60))
         return
     run_command(MINER_START_CMD)
     st["last_miner_heal"] = now
