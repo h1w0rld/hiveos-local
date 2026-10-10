@@ -5366,15 +5366,21 @@ def get_diagnostics():
     })
 
 def _resolve_worker_name():
-    """%WORKER_NAME% source: rig.conf RIG_ID (HiveOS semantics — the cloud
-    agent substitutes the same value), sanitized; fallback to hostname."""
+    """%WORKER_NAME% source: rig.conf WORKER_NAME first (it is the cloud worker
+    name), then RIG_ID (legacy rigs where WORKER_NAME is absent), then hostname.
+    RIG_ID itself must stay the NUMERIC cloud worker id - the hive agent
+    authenticates its stats pushes with it (id_rig=RIG_ID), so it can never be
+    used as the pool worker name on properly registered rigs."""
     try:
-        rid = (parse_shell_config(RIG_CONF_PATH).get("RIG_ID") or "").strip()
+        conf = parse_shell_config(RIG_CONF_PATH)
     except Exception:
-        rid = ""
-    rid = rid.upper().replace(" ", "_")
-    if rid:
-        return rid
+        conf = {}
+    name = (conf.get("WORKER_NAME") or "").strip()
+    if not name:
+        name = (conf.get("RIG_ID") or "").strip()
+    name = name.upper().replace(" ", "_")
+    if name:
+        return name
     return socket.gethostname().strip().upper().replace(" ", "_") or "WORKER"
 
 
