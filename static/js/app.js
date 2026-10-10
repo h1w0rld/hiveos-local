@@ -1330,6 +1330,9 @@ window.selectClusterGlobal = function(cid) {
 // Cloud mode (default): stock behavior, nothing is applied automatically.
 let guardStates = {};        // rig_id -> {enabled, since, last_action, ...}
 let guardStatesLoaded = false;
+const guardToggleWin = {};   // rig_id -> completion time of the last toggle POST;
+                             // GET responses fetched before it are stale and must not
+                             // overwrite the toggle result (slow SSH-proxy round trips)
 
 function guardModePath(rigId) {
     const rig = (clusterData && clusterData.rigs || []).find(r => r.id === rigId);
@@ -1442,12 +1445,16 @@ async function loadGuardStates(selfOnly = false) {
     if (!rigs.length) { renderGuardMenu(); return; }
     const targets = selfOnly ? rigs.filter(r => r.is_self) : rigs;
     if (!selfOnly && !guardStatesLoaded) renderGuardMenu(); // spinner on first open
+    const issuedAt = Date.now();
     await Promise.allSettled(targets.map(async r => {
         try {
             const res = await fetch(guardModePath(r.id), { signal: AbortSignal.timeout(15000) });
             if (!res.ok) return;
             const data = await res.json();
-            if (data && data.success && data.guard) guardStates[r.id] = data.guard;
+            if (data && data.success && data.guard) {
+                if ((guardToggleWin[r.id] || 0) > issuedAt) return; // toggle finished while this GET was in flight
+                guardStates[r.id] = data.guard;
+            }
         } catch (e) { /* unreachable rig: keep the previous state */ }
     }));
     if (selfOnly) {
@@ -1462,6 +1469,7 @@ async function toggleGuardMode(rigId, checkbox) {
     const enable = checkbox.checked;
     const rig = (clusterData && clusterData.rigs || []).find(r => r.id === rigId);
     const name = rig ? (rig.name || rig.id) : rigId;
+    guardToggleWin[rigId] = Number.MAX_SAFE_INTEGER; // block stale GETs until this POST resolves
     checkbox.disabled = true;
     try {
         const res = await fetch(guardModePath(rigId), {
@@ -1483,6 +1491,7 @@ async function toggleGuardMode(rigId, checkbox) {
         checkbox.checked = !enable;
         showToast('Network error switching mode on ' + name + '.', false);
     } finally {
+        guardToggleWin[rigId] = Date.now();
         checkbox.disabled = false;
         renderGuardMenu();
     }
