@@ -3257,18 +3257,22 @@ def run_nvidia_oc():
     every panel apply logged success while no setting reached the driver
     (observed on RIG2 12 Oct: LMEM=810 and PL writes never landed). Pass
     both variables explicitly, the same way HIVE_MINER_ENV fixes PATH for
-    the miner wrapper. GPU_DETECT_JSON may legally be missing - the script
-    falls back to `gpu-detect listjson`."""
+    the miner wrapper. PATH must include /hive/bin too: the script's first
+    statement is `n=$(gpu-detect NVIDIA)` and without it the script exits 0
+    silently before applying anything. GPU_DETECT_JSON may legally be
+    missing - the script falls back to `gpu-detect listjson`."""
     with nvidia_oc_lock:
         return run_command(
-            "sudo env NVIDIA_OC_CONF=/hive-config/nvidia-oc.conf "
+            "sudo env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/hive/bin:/hive/sbin "
+            "NVIDIA_OC_CONF=/hive-config/nvidia-oc.conf "
             "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/nvidia-oc")
 
 def run_amd_oc():
     """Run /hive/sbin/amd-oc with the environment variables the hive script
     reads from its caller (same systemd env rationale as run_nvidia_oc)."""
     return run_command(
-        "sudo env AMD_OC_CONF=/hive-config/amd-oc.conf "
+        "sudo env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/hive/bin:/hive/sbin "
+        "AMD_OC_CONF=/hive-config/amd-oc.conf "
         "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/amd-oc")
 
 def _nvtool_lock_confirmed(gpu_index, expected):
@@ -3286,7 +3290,7 @@ def _nvtool_lock_confirmed(gpu_index, expected):
     same lock reads exactly 1350)."""
     for _ in range(2):
         stdout, _, code = run_command(
-            f"sudo timeout 10 nvtool -q --nodev -i {gpu_index} --setclocks {int(expected)}")
+            f"sudo timeout 10 /hive/sbin/nvtool -q --nodev -i {gpu_index} --setclocks {int(expected)}")
         if code != 0:
             return False
         if "was already set" in stdout:
@@ -3352,7 +3356,7 @@ def _verify_locked_mem(expected):
         confirmed = False
         for _ in range(2):
             stdout2, _, code = run_command(
-                f"sudo timeout 10 nvtool -q --nodev -i {i} --setmem {int(v)}")
+                f"sudo timeout 10 /hive/sbin/nvtool -q --nodev -i {i} --setmem {int(v)}")
             if code != 0:
                 break
             if "was already set" in stdout2:
