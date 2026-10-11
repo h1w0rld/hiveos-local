@@ -4247,6 +4247,7 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
     n_real = n if apply_all else (gpu_index + 1)
     expected_locks = {i: v for i, v in expected_locks.items() if i < n_real}
     if expected_locks:
+        mismatch = verify_locked_clocks(expected_locks)
         for _ in range(2):
             if not mismatch:
                 break
