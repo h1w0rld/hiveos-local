@@ -3309,6 +3309,40 @@ def verify_locked_clocks(expected):
         mismatch[i] = (v, act)
     return mismatch
 
+def _verify_locked_mem(expected):
+    """Check actual memory clocks against {gpu_index: locked_mhz} — LMEM
+    counterpart of verify_locked_clocks. Same contract: {} when nvidia-smi
+    gives nothing; a value within 32 MHz of the lock counts as confirmed;
+    anything further is re-checked via nvtool idempotence (`nvtool --setmem`
+    reports 'was already set' when the lock is registered in the driver) —
+    mobile drivers legitimately float/refuse memory locks while idle, and the
+    re-assert doubles as a self-heal for a silently failed lock."""
+    stdout, _, _ = run_command("nvidia-smi --query-gpu=index,clocks.mem --format=csv,noheader,nounits")
+    actual = {}
+    for line in stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit():
+            actual[int(parts[0])] = safe_int(parts[1])
+    if not actual:
+        return {}
+    mismatch = {}
+    for i, v in expected.items():
+        act = actual.get(i)
+        if act is not None and abs(act - v) <= 32:
+            continue
+        confirmed = False
+        for _ in range(2):
+            stdout2, _, code = run_command(
+                f"sudo timeout 10 nvtool -q --nodev -i {i} --setmem {int(v)}")
+            if code != 0:
+                break
+            if "was already set" in stdout2:
+                confirmed = True
+                break
+        if not confirmed:
+            mismatch[i] = (v, act)
+    return mismatch
+
 # Safe numeric parsers for nvidia-smi output ([N/A] or empty values are treated as 0)
 def safe_int(value, default=0):
     try:
@@ -4198,6 +4232,54 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
             bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
             logging.warning(f"NVIDIA locked clock verification failed: {bad}")
             return True, f"Saved, but locked clock not confirmed on: {bad}. Try applying again or check nvidia-smi."
+
+    # Same verification for locked memory clocks (LMEM): hive applies them with
+    # `nvtool --setmem`, which fails just as silently as the core-lock path
+    # (observed on RIG2: an all-GPU apply wrote LMEM=810, nvidia-oc exited 0,
+    # and memory stayed at 5801 MHz — no retries, no warning, miner on unlocked
+    # clocks). MEM == -3000 is hive's LOWMEM marker: the script downlocks
+    # memory to a hardcoded 810 MHz for such GPUs.
+    expected_mems = {}
+    for i, v in enumerate(lmem):
+        try:
+            if int(str(v).strip()) > 0:
+                expected_mems[i] = int(str(v).strip())
+        except ValueError:
+            continue
+    for i, v in enumerate(mem):
+        try:
+            if int(str(v).strip()) == -3000:
+                expected_mems.setdefault(i, 810)
+        except ValueError:
+            continue
+    if expected_mems:
+        mismatch = _verify_locked_mem(expected_mems)
+        for _ in range(2):
+            if not mismatch:
+                break
+            logging.warning(f"Locked memory clocks not confirmed {mismatch}, retrying nvidia-oc")
+            time.sleep(3)
+            run_nvidia_oc()
+            mismatch = _verify_locked_mem(expected_mems)
+        if mismatch:
+            def _smi_mem_fallback(bad):
+                for i, (exp, _act) in sorted(bad.items()):
+                    run_command(f"sudo nvidia-smi -i {i} -lmc {exp}")
+
+            logging.warning(f"Locked memory clocks still unconfirmed {mismatch}, falling back to nvidia-smi -lmc")
+            _smi_mem_fallback(mismatch)
+            time.sleep(2)
+            mismatch = _verify_locked_mem(expected_mems)
+            for _ in range(2):
+                if not mismatch:
+                    break
+                time.sleep(3)
+                _smi_mem_fallback(mismatch)
+                mismatch = _verify_locked_mem(expected_mems)
+        if mismatch:
+            bad = ", ".join(f"GPU {i} ({exp} vs {act})" for i, (exp, act) in sorted(mismatch.items()))
+            logging.warning(f"NVIDIA locked memory clock verification failed: {bad}")
+            return True, f"Saved, but locked memory clock not confirmed on: {bad}. Try applying again or check nvidia-smi."
 
     return True, ""
 
