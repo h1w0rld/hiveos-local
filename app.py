@@ -7601,6 +7601,11 @@ def api_remote_proxy(rig_id, subpath):
         return jsonify({"success": False, "message": "Rig not found in cluster."}), 404
 
     body = request.get_data(cache=True) if request.method == "POST" else None
+    # Flask's <path:subpath> does not include the query string - forward it
+    # explicitly so GET filters (?name=&ver=, ?date=&days=) reach the peer API
+    qs = request.query_string.decode("utf-8", "replace")
+    if qs:
+        subpath = "%s?%s" % (subpath, qs)
     ok, data, http_code, err, access_name = cluster_remote_api(rig, request.method, subpath, body=body)
     if not ok:
         logging.warning(f"Remote proxy to rig '{rig.get('name')}' failed: {err}")
