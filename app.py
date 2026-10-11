@@ -4240,8 +4240,13 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
                 expected_locks[i] = int(str(v).strip())
         except ValueError:
             continue
+    # Verify only real GPUs: the conf lists are padded to at least 4 tokens
+    # for hive word-splitting parity, but indices beyond the actual GPU count
+    # must not be expected in verification - a 2-GPU rig reported phantom
+    # "GPU 2/3 locked clock not confirmed" (observed on RIG3, 2x RTX 3060)
+    n_real = n if apply_all else (gpu_index + 1)
+    expected_locks = {i: v for i, v in expected_locks.items() if i < n_real}
     if expected_locks:
-        mismatch = verify_locked_clocks(expected_locks)
         for _ in range(2):
             if not mismatch:
                 break
@@ -4291,6 +4296,7 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
                 expected_mems.setdefault(i, 810)
         except ValueError:
             continue
+    expected_mems = {i: v for i, v in expected_mems.items() if i < n_real}
     if expected_mems:
         mismatch = _verify_locked_mem(expected_mems)
         for _ in range(2):
