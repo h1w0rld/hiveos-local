@@ -2205,7 +2205,7 @@ def guard_run_check(apply=True):
             run_nvidia_oc()
             actions.append("nvidia-oc applied")
         if run_amd:
-            run_command("sudo /hive/sbin/amd-oc")
+            run_amd_oc()
             actions.append("amd-oc applied")
         if restart_miner:
             run_command(MINER_RESTART_CMD)
@@ -3248,9 +3248,28 @@ def run_command(cmd):
 nvidia_oc_lock = threading.Lock()
 
 def run_nvidia_oc():
-    """Run /hive/sbin/nvidia-oc exclusively; returns (stdout, stderr, returncode)."""
+    """Run /hive/sbin/nvidia-oc exclusively; returns (stdout, stderr, returncode).
+
+    hive's sbin scripts read NVIDIA_OC_CONF/GPU_DETECT_JSON from their
+    environment (normally delivered via /etc/environment + sudoers env_keep).
+    The panel's systemd service has neither, and nvidia-oc then silently
+    exits 0 with '... does not exist, exiting' BEFORE applying anything -
+    every panel apply logged success while no setting reached the driver
+    (observed on RIG2 12 Oct: LMEM=810 and PL writes never landed). Pass
+    both variables explicitly, the same way HIVE_MINER_ENV fixes PATH for
+    the miner wrapper. GPU_DETECT_JSON may legally be missing - the script
+    falls back to `gpu-detect listjson`."""
     with nvidia_oc_lock:
-        return run_command("sudo /hive/sbin/nvidia-oc")
+        return run_command(
+            "sudo env NVIDIA_OC_CONF=/hive-config/nvidia-oc.conf "
+            "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/nvidia-oc")
+
+def run_amd_oc():
+    """Run /hive/sbin/amd-oc with the environment variables the hive script
+    reads from its caller (same systemd env rationale as run_nvidia_oc)."""
+    return run_command(
+        "sudo env AMD_OC_CONF=/hive-config/amd-oc.conf "
+        "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/amd-oc")
 
 def _nvtool_lock_confirmed(gpu_index, expected):
     """True when the driver's locked-clock registration equals `expected`.
@@ -4184,9 +4203,20 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
     logging.info(f"NVIDIA {target_label} parameters updated: Clock={data.get('core')}, Mem={data.get('mem')}, PL={data.get('pl')}, Fan={data.get('fan')}, LCLOCK={data.get('lcore')}, LMEM={data.get('lmem')}, Delay={data.get('delay')}, LED={data.get('led')}, P0={data.get('p0')}, Idle={data.get('idle')}, Pill={data.get('pill')}")
 
     stdout, stderr, code = run_nvidia_oc()
-    if code != 0:
-        logging.error(f"NVIDIA OC script failed: {stderr}")
+    # hive's nvidia-oc exits with the count of failed per-GPU operations, so
+    # mixed desktop+mobile rigs are permanently nonzero (RIG2: exit 3 - the
+    # laptop GPUs report power limits as [Not Supported]). The lock
+    # verification below is the real judge of success; a wholesale failure
+    # (nothing applied at all) is what must be caught here.
+    flat = re.sub(r"\x1b\[[0-9;]*m", "", stdout or "")
+    tail = " | ".join(line.strip() for line in flat.strip().splitlines()[-8:] if line.strip())
+    if "does not exist, exiting" in flat or "No cards available" in flat:
+        logging.error(f"NVIDIA OC script applied nothing: {tail or stderr}")
         return False, "NVIDIA overclock script failed to apply settings."
+    if code != 0:
+        logging.warning(f"NVIDIA OC script exit code {code}: {tail or stderr}")
+    else:
+        logging.info(f"NVIDIA OC script output: {tail or '(empty)'}")
 
     # Route/manual overclock edit: no preset can claim these values anymore
     # (the OC preset appliers re-set their own marker right after this call)
@@ -4367,7 +4397,7 @@ def save_overclock():
     write_shell_config(filepath, config)
     logging.info(f"AMD GPU {gpu_index} parameters updated: {config}")
 
-    stdout, stderr, code = run_command("sudo /hive/sbin/amd-oc")
+    stdout, stderr, code = run_amd_oc()
     if code != 0:
         logging.error(f"AMD OC script failed: {stderr}")
         return jsonify({"success": False, "message": "AMD overclock script failed to apply settings."})
@@ -4393,7 +4423,7 @@ def revert_overclock():
         if os.path.exists(nv_bak):
             run_nvidia_oc()
         if os.path.exists(amd_bak):
-            run_command("sudo /hive/sbin/amd-oc")
+            run_amd_oc()
         # Reverted state becomes the locally protected state (guard hook)
         guard_note_config_change()
 
@@ -6207,7 +6237,7 @@ def reset_overclock():
         logging.info(f"Emergency overclock reset to stock by request from {request.remote_addr}")
         # Apply clean stock settings immediately on hardware
         run_nvidia_oc()
-        run_command("sudo /hive/sbin/amd-oc")
+        run_amd_oc()
         _set_oc_applied("")
         return jsonify({"success": True, "message": "Emergency reset completed! All overclock profiles reset to safe factory stock limits."})
     else:
