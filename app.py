@@ -4130,15 +4130,24 @@ def _apply_nvidia_oc(data, apply_all, gpu_index):
         max_idx = max(3, n - 1)
     else:
         max_idx = max(3, gpu_index)
-    clock += ["0"] * (max_idx + 1 - len(clock))
-    mem += ["0"] * (max_idx + 1 - len(mem))
-    plimit += ["0"] * (max_idx + 1 - len(plimit))
-    fan += ["0"] * (max_idx + 1 - len(fan))
+    # Pad short lists with their LAST token - hive semantics: a scalar applies
+    # to every GPU (hive's own ref_arr padding extends the last element).
+    # Padding with "0" instead silently turned scalar configs into GPU0-only
+    # lists and wiped the OC on all other cards on the next all-GPU apply
+    # (observed 12 Oct: RIG3/5/6/7/8 lost core offset/lock/PL after an
+    # lmem-only apply).
+    def _pad(lst):
+        lst += [lst[-1]] * (max_idx + 1 - len(lst)) if lst else ["0"] * (max_idx + 1 - len(lst))
+
+    _pad(clock)
+    _pad(mem)
+    _pad(plimit)
+    _pad(fan)
     # Locked clocks keep explicit "0" for unlocked GPUs (cloud parity):
     # empty entries would vanish in hive's word-splitting of the conf list
     # and shift every following per-GPU value one position left
-    lclock += ["0"] * (max_idx + 1 - len(lclock))
-    lmem += ["0"] * (max_idx + 1 - len(lmem))
+    _pad(lclock)
+    _pad(lmem)
 
     def _apply_values(field_key, lst, transform=None):
         """Single-GPU mode: set one index (empty offset = no change; locked
