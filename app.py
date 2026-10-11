@@ -3260,12 +3260,17 @@ def run_nvidia_oc():
     the miner wrapper. PATH must include /hive/bin too: the script's first
     statement is `n=$(gpu-detect NVIDIA)` and without it the script exits 0
     silently before applying anything. GPU_DETECT_JSON may legally be
-    missing - the script falls back to `gpu-detect listjson`."""
+    missing - the script falls back to `gpu-detect listjson`. The `quiet`
+    argument suppresses the script's own 'NVIDIA OC failed' message to the
+    cloud on nonzero exits - mixed desktop+mobile rigs exit with the count
+    of failed per-GPU ops (laptop power limits report [Not Supported]),
+    which would spam farm notifications on every panel apply; the panel
+    reports outcomes itself via lock verification."""
     with nvidia_oc_lock:
         return run_command(
             "sudo env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/hive/bin:/hive/sbin "
             "NVIDIA_OC_CONF=/hive-config/nvidia-oc.conf "
-            "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/nvidia-oc")
+            "GPU_DETECT_JSON=/run/hive/gpu-detect.json /hive/sbin/nvidia-oc quiet")
 
 def run_amd_oc():
     """Run /hive/sbin/amd-oc with the environment variables the hive script
