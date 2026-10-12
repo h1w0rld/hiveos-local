@@ -2293,6 +2293,14 @@ def api_guard():
 #       peer majority and restart the hive agent.
 #   (c) dead miner screen left by a failed start ("screen session is already
 #       running" blocks every retry). Heal: miner stop + start.
+#   (d) string RIG_ID in rig.conf (e.g. 'RIG_1' instead of the numeric cloud
+#       worker id): the hive agent authenticates its stats pushes with
+#       id_rig=RIG_ID, the cloud answers -32602 'invalid request' to every
+#       push and the agent's built-in policy stops the miner and refuses to
+#       start it again. Heal: restore the numeric id (heal record -> agent
+#       log pushes -> guard snapshot -> newest backup), refresh the guard
+#       snapshot and escalate to a hive agent restart if the pushes stay
+#       invalid.
 # Every action is rate-limited and reported to the Activity feed (Stats tab).
 
 HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "heal_state.json")
@@ -2300,6 +2308,8 @@ HEAL_CHECK_INTERVAL = 600      # periodic heal pass (10 min)
 HEAL_BOOT_DELAY = 300          # first pass: give the hive agent time to boot the miner
 HEAL_MINER_GAP = 1800          # min seconds between miner start/restart heal actions
 HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
+HEAL_RIGID_ESCALATE = 180      # wait this long after an id fix before restarting the agent
+HEAL_RIGID_RESTART_GAP = 3600  # min seconds between hive agent restarts after an id fix
 HEAL_CHUNK = 1024 * 1024       # peer transfer chunk size (bytes)
 HEAL_CHUNK_TIMEOUT = 240       # ssh timeout for one chunk
 HEAL_CHUNK_RETRIES = 2
@@ -2317,7 +2327,8 @@ def _heal_state_load():
         if _heal_state_cache["loaded"]:
             return _heal_state_cache["data"]
         st = {"last_check": 0, "last_action": "", "last_host_fix": 0, "last_miner_heal": 0,
-              "last_transfer": ""}
+              "last_transfer": "", "last_rigid_fix": 0, "last_rigid_restart": 0,
+              "rig_id_ok": None}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -2463,6 +2474,157 @@ def _heal_check_api_host(st, report):
     except Exception as e:
         logging.error("Self-heal: host fix failed: %s", e)
         report["notes"].append("host fix failed: %s" % e)
+
+def _conf_content_value(content, key):
+    """Read a KEY="value" entry from an already-loaded hive shell config."""
+    m = re.search(r'^%s="(.*)"\s*$' % re.escape(key), content or "", flags=re.M)
+    return m.group(1) if m else None
+
+def _agent_log_numeric_rig_ids():
+    """Numeric rig ids seen in hive agent stats pushes ('"rig_id":"12345"')."""
+    try:
+        with open(AGENT_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 500000))
+            vals = re.findall(r'"rig_id":"(\d+)"', f.read())
+        if vals:
+            return vals[-1]
+    except Exception:
+        pass
+    return None
+
+def _rigid_candidates(st):
+    """(rig_id, worker_name) candidates to restore a poisoned rig.conf RIG_ID,
+    most trustworthy first: heal record, agent log, guard snapshot, newest
+    numeric backup. Non-numeric sources are skipped - a backup written while
+    the config was already broken must never be restored."""
+    out = []
+    rec = st.get("rig_id_ok") or {}
+    if str(rec.get("rig_id") or "").isdigit():
+        out.append((str(rec["rig_id"]), str(rec.get("worker_name") or "")))
+    log_id = _agent_log_numeric_rig_ids()
+    if log_id:
+        out.append((log_id, ""))
+    try:
+        snap = ((_guard_load().get("snapshot") or {}).get("rig.conf")) or ""
+        rid = _conf_content_value(snap, "RIG_ID")
+        if rid and rid.isdigit():
+            out.append((rid, _conf_content_value(snap, "WORKER_NAME") or ""))
+    except Exception:
+        pass
+    try:
+        baks = sorted((p for p in glob.glob(RIG_CONF_PATH + ".bak*") if os.path.isfile(p)),
+                      key=os.path.getmtime, reverse=True)
+        for p in baks:
+            try:
+                with open(p, 'r', errors='ignore') as f:
+                    c = f.read()
+                rid = _conf_content_value(c, "RIG_ID")
+                if rid and rid.isdigit():
+                    out.append((rid, _conf_content_value(c, "WORKER_NAME") or ""))
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+def _agent_log_last_push_state(after_ts):
+    """'invalid' when the newest agent push response logged after after_ts is an
+    'invalid request' error, 'ok' when it carries a result, '' when unknown."""
+    try:
+        with open(AGENT_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 200000))
+            text = f.read()
+        best_ts, best_state = 0, ""
+        for line in text.splitlines():
+            if '"result"' not in line and 'invalid request' not in line:
+                continue
+            m = re.match(r'^\[([^\]]+)\]', line)
+            if not m:
+                continue
+            ts = 0
+            for fmt in _HIVE_DATE_FORMATS:
+                try:
+                    ts = int(datetime.strptime(m.group(1).strip(), fmt).timestamp())
+                    break
+                except ValueError:
+                    continue
+            if ts > best_ts:
+                best_ts = ts
+                best_state = "invalid" if "invalid request" in line else "ok"
+        if best_ts and best_ts >= after_ts:
+            return best_state
+    except Exception:
+        pass
+    return ""
+
+def _heal_check_rig_id(st, report):
+    """rig.conf RIG_ID must stay the NUMERIC cloud worker id: the hive agent
+    authenticates its stats pushes with it and its policy stops the miner once
+    the cloud keeps rejecting them (-32602 'invalid request'). Restore the
+    numeric id when a string one (rename leftovers, stale snapshot) shows up,
+    refresh the guard snapshot so it enforces the fixed file, and escalate to a
+    hive agent restart when the agent keeps logging invalid pushes."""
+    rid = _conf_value(RIG_CONF_PATH, "RIG_ID")
+    now = int(time.time())
+    wname = _conf_value(RIG_CONF_PATH, "WORKER_NAME") or ""
+    if rid and rid.isdigit():
+        rec = st.get("rig_id_ok") or {}
+        if rec.get("rig_id") != rid or rec.get("worker_name") != wname:
+            st["rig_id_ok"] = {"rig_id": rid, "worker_name": wname, "ts": now}
+        # escalation: fixed earlier but the agent still logs invalid pushes
+        fix_ts = int(st.get("last_rigid_fix") or 0)
+        if fix_ts and now - fix_ts >= HEAL_RIGID_ESCALATE and \
+                now - int(st.get("last_rigid_restart") or 0) >= HEAL_RIGID_RESTART_GAP and \
+                _agent_log_last_push_state(fix_ts) == "invalid":
+            try:
+                run_command("sudo systemctl restart hive")
+                st["last_rigid_restart"] = now
+                _heal_state_save(st)
+                report["fixed"].append("hive agent restarted (rig id fixed but pushes still invalid)")
+                record_metrics_event("warning", "Self-heal: RIG_ID was fixed but the agent kept logging invalid pushes - restarted the hive agent")
+            except Exception as e:
+                report["notes"].append("agent restart failed: %s" % e)
+        return
+    if not rid:
+        report["notes"].append("rig id: RIG_ID missing from rig.conf")
+        return
+    candidate = _rigid_candidates(st)
+    if not candidate:
+        report["notes"].append("rig id: no numeric candidate found (record/log/snapshot/backups)")
+        return
+    new_id, new_worker = candidate[0]
+    try:
+        with open(RIG_CONF_PATH, 'r') as f:
+            content = f.read()
+        with open(RIG_CONF_PATH + ".bak-healrigid-%d" % now, 'w') as f:
+            f.write(content)
+        new_content, n = re.subn(r'^RIG_ID=".*"$', 'RIG_ID="%s"' % new_id, content, count=1, flags=re.M)
+        if n != 1:
+            report["notes"].append("rig id: RIG_ID line not found in rig.conf")
+            return
+        worker = new_worker or wname
+        if worker:
+            new_content, nw = re.subn(r'^WORKER_NAME=".*"$', 'WORKER_NAME="%s"' % worker,
+                                      new_content, count=1, flags=re.M)
+            if nw != 1:
+                worker = ""  # WORKER_NAME line absent - leave the file as parsed
+        _atomic_write_file(RIG_CONF_PATH, new_content, mode=0o644)
+        guard_note_config_change()
+        st["last_rigid_fix"] = now
+        st["rig_id_ok"] = {"rig_id": new_id, "worker_name": worker, "ts": now}
+        st["last_action"] = "RIG_ID restored to %s (was '%s')" % (new_id, rid)
+        _heal_state_save(st)
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: rig.conf RIG_ID was '%s' (the agent stops the miner when the cloud rejects its pushes) - restored numeric worker id '%s'" % (rid, new_id))
+    except Exception as e:
+        logging.error("Self-heal: rig id fix failed: %s", e)
+        report["notes"].append("rig id fix failed: %s" % e)
 
 def _heal_archive_path(name, ver, basename):
     if name and ver:
@@ -2646,9 +2808,14 @@ def _heal_check_miner(st, report):
     record_metrics_event("warning", "Self-heal: miner was not running - started it (flight sheet is active)")
 
 def heal_run_check():
-    """One self-heal pass: API host sanity + miner/package repair."""
+    """One self-heal pass: rig id sanity + API host sanity + miner/package repair."""
     st = _heal_state_load()
     report = {"checked": int(time.time()), "fixed": [], "notes": []}
+    try:
+        _heal_check_rig_id(st, report)
+    except Exception as e:
+        logging.error("Self-heal: rig id check failed: %s", e)
+        report["notes"].append("rig id check failed: %s" % e)
     try:
         _heal_check_api_host(st, report)
     except Exception as e:
@@ -2677,7 +2844,7 @@ def _heal_worker():
 def start_heal_worker():
     t = threading.Thread(target=_heal_worker, daemon=True, name="self-heal")
     t.start()
-    logging.info("Self-heal worker started (package repair, API host fix, stale screen)")
+    logging.info("Self-heal worker started (rig id guard, package repair, API host fix, stale screen)")
 
 @app.route('/api/heal/info')
 def api_heal_info():
