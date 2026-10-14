@@ -2168,6 +2168,35 @@ def guard_note_config_change():
     except Exception as e:
         logging.error(f"Local guard: snapshot refresh failed: {e}")
 
+def _shell_conf_semantic(content):
+    """Parse KEY="value" shell-conf lines into a normalized dict (quotes and
+    inner whitespace differences ignored). None = unparseable content."""
+    vals = {}
+    try:
+        for line in (content or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            vals[k.strip()] = " ".join(v.split())
+    except Exception:
+        return None
+    return vals
+
+def _conf_semantically_equal(a, b):
+    """True when two conf-file contents carry the same settings (hive rewrites
+    the files with its own quoting/formatting - byte comparison then sees a
+    'drift' that is not one; restoring + re-applying on such a rewrite
+    re-asserts clocks under load and can fault a marginal GPU, which is how
+    the RIG6 14 Oct death loop was driven)."""
+    sa, sb = _shell_conf_semantic(a), _shell_conf_semantic(b)
+    if sa is None or sb is None:
+        return False
+    return sa == sb
+
 def guard_run_check(apply=True):
     """One enforcement pass: compare config files against the snapshot, restore
     drifted files and re-apply them to the hardware. Returns a report dict."""
@@ -2176,12 +2205,31 @@ def guard_run_check(apply=True):
     report = {"enabled": bool(st.get("enabled")), "checked": now, "drifted": [], "fixed": False, "action": ""}
     if not report["enabled"]:
         return report
+    if st.get("suspended"):
+        # OC recovery owns the hardware right now - do not fight its applies
+        report["action"] = "suspended (oc recovery in progress)"
+        return report
     st["last_check"] = now
     snapshot = st.get("snapshot", {})
-    drifted = [name for name in snapshot if name in GUARD_FILES and _guard_read_file(name) != snapshot[name]]
+    drifted = []
+    adopted = []
+    for name in snapshot:
+        if name not in GUARD_FILES:
+            continue
+        cur = _guard_read_file(name)
+        if cur == snapshot[name]:
+            continue
+        if _conf_semantically_equal(cur, snapshot[name]):
+            # Same settings, different formatting: adopt the new bytes so the
+            # snapshot stops flapping, but never re-apply (no drift of values)
+            if apply:
+                st["snapshot"][name] = cur
+                adopted.append(name)
+            continue
+        drifted.append(name)
     report["drifted"] = drifted
     if not drifted:
-        _guard_merge_save(st, ["last_check"])
+        _guard_merge_save(st, ["last_check"] + (["snapshot"] if adopted else []))
         return report
 
     st["last_drift"] = now
@@ -2244,6 +2292,7 @@ def start_guard_worker():
 
 def _guard_public(st):
     return {"enabled": bool(st.get("enabled")),
+            "suspended": bool(st.get("suspended")),
             "since": int(st.get("since") or 0),
             "files": sorted(st.get("snapshot", {}).keys()),
             "last_check": int(st.get("last_check") or 0),
@@ -2867,7 +2916,554 @@ def api_heal_pkg():
 
 @app.route('/api/heal/status')
 def api_heal_status():
-    return jsonify({"success": True, "heal": _heal_state_load()})
+    return jsonify({"success": True, "heal": _heal_state_load(),
+                    "oc_recovery": _oc_state_load()})
+
+# ---------------- OC recovery: Xid death-loop self-healing ----------------
+# A GPU that starts throwing fatal driver faults (Xid 13/31) under mining load
+# kills the whole miner run: SRBMiner stops every worker ("Pearl backend error
+# E1027"), the miner exits and hive restarts it every few minutes with a
+# permanently zero hashrate (RIG6 14 Oct: GPU7 faulted on every core-lock
+# re-assert after a live OC apply; a reboot did not help). This worker walks
+# the faulting GPU's locked clocks DOWN step by step until the rig mines
+# cleanly, then walks back UP toward the original frequency to find the
+# failure point - never exceeding the frequency that was set before the
+# trouble - and settles one step below it. Core first, then memory; if the
+# memory floor still fails, the GPU is disabled from the miner config so the
+# remaining cards keep mining.
+
+OC_RECOVERY_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "oc_recovery.json")
+OC_REC_CHECK_INTERVAL = 90          # idle: detection poll
+OC_REC_CHECK_INTERVAL_ACTIVE = 15   # recovery engaged: state machine tick
+OC_REC_BOOT_DELAY = 420             # let boot/guard/miner settle first
+OC_REC_RESTARTS_REQUIRED = 3        # miner restarts before recovery engages
+OC_REC_RESTART_WINDOW = 3600        # ...counted within this window
+OC_REC_STEP_CORE = 15               # core lock step (MHz)
+OC_REC_STEP_MEM = 15                # memory lock step (MHz)
+OC_REC_FLOOR_CORE = 1000            # never lower the core lock below this
+OC_REC_FLOOR_MEM = 810              # never lower the memory lock below this
+OC_REC_WARMUP = 240                 # miner init + pool reconnect before judging
+OC_REC_OBSERVE = 120                # clean window that confirms a step works
+OC_REC_COOLDOWN = 1800              # min seconds between finished recoveries
+OC_REC_XID_CODES = ("13", "31")     # fatal compute / MMU faults
+OC_REC_KHS_PATH = "/run/hive/khs"
+OC_REC_TEST_SECONDS = OC_REC_WARMUP + OC_REC_OBSERVE
+
+_oc_state_lock = threading.Lock()
+_oc_state_cache = {"loaded": False, "data": None}
+
+def _oc_state_default():
+    return {"active": False, "phase": "idle", "updated_at": 0, "last_run": 0,
+            "last_result": "", "gpu": None, "pci": "", "kind": "core",
+            "ceiling": 0, "current": 0, "working": 0, "floor": 0,
+            "step": OC_REC_STEP_CORE, "test": None, "history": [],
+            "orig_core": {}, "orig_mem": {}, "known_core": {}, "known_mem": {},
+            "failed_up": {},
+            "restart_times": [], "last_run_mtime": 0, "xid_counts": {}}
+
+def _oc_state_load():
+    with _oc_state_lock:
+        if _oc_state_cache["loaded"]:
+            return _oc_state_cache["data"]
+        st = _oc_state_default()
+        try:
+            with open(OC_RECOVERY_STATE_PATH, 'r') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                for k in st:
+                    if k in disk:
+                        st[k] = disk[k]
+        except Exception:
+            pass
+        _oc_state_cache["data"] = st
+        _oc_state_cache["loaded"] = True
+        return st
+
+def _oc_state_save(st):
+    st["updated_at"] = int(time.time())
+    with _oc_state_lock:
+        _oc_state_cache["data"] = st
+        _oc_state_cache["loaded"] = True
+        try:
+            _atomic_write_file(OC_RECOVERY_STATE_PATH, json.dumps(st, indent=2))
+        except Exception as e:
+            logging.error("Failed to save oc recovery state: %s", e)
+
+def _oc_read_khs():
+    """Current rig hashrate (kH/s) as reported by the hive agent."""
+    try:
+        with open(OC_REC_KHS_PATH, 'r') as f:
+            return float((f.read() or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+def _oc_xid_counts():
+    """{pci_norm: count} of fatal Xid faults (13/31) per GPU from dmesg."""
+    counts = {}
+    out, _err, _code = run_command("dmesg")
+    for m in re.finditer(r"Xid \(PCI:([0-9A-Fa-f:]+)\): (\d+)", out or ""):
+        if m.group(2) not in OC_REC_XID_CODES:
+            continue
+        pci = _oc_norm_pci(m.group(1))
+        if pci:
+            counts[pci] = counts.get(pci, 0) + 1
+    return counts
+
+def _oc_norm_pci(pci):
+    """0000:09:00 (dmesg) / 00000000:0000:09:00.0 (nvidia-smi) -> '09:00'."""
+    parts = [p for p in str(pci).split(":") if p]
+    if len(parts) < 2:
+        return ""
+    tail = parts[-1].split(".")[0]
+    return f"{parts[-2]}:{tail}" if tail else ""
+
+def _oc_gpu_for_pci(pci):
+    """Map a dmesg PCI address to the nvidia GPU index. None = unknown."""
+    out, _err, code = run_command(
+        "nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader")
+    if code != 0:
+        return None
+    want = _oc_norm_pci(pci)
+    for line in (out or "").splitlines():
+        bits = [b.strip() for b in line.split(",")]
+        if len(bits) >= 2 and _oc_norm_pci(bits[1]) == want:
+            try:
+                return int(bits[0])
+            except ValueError:
+                return None
+    return None
+
+def _oc_conf_token(kind, gpu):
+    """Current locked-clock token of one GPU from nvidia-oc.conf (hive
+    semantics: a short/scalar list applies its last token to all GPUs)."""
+    try:
+        cfg = parse_shell_config(NVIDIA_OC_CONF)
+    except Exception:
+        cfg = {}
+    tokens = (cfg.get("LCLOCK" if kind == "core" else "LMEM") or "").split()
+    if not tokens:
+        return 0
+    return tokens[gpu] if gpu < len(tokens) else tokens[-1]
+
+def _oc_apply_single(kind, gpu, value):
+    """Write one locked-clock value for one GPU into nvidia-oc.conf and apply
+    it to the driver (same code path as the panel's per-GPU OC form)."""
+    key = "lcore" if kind == "core" else "lmem"
+    ok, msg = _apply_nvidia_oc({key: str(value)}, False, gpu)
+    if not ok:
+        logging.error("OC recovery: apply failed (GPU %s %s=%s): %s", gpu, kind, value, msg)
+    return ok
+
+def _oc_miner_log_clean():
+    """True when the current miner log has no worker-death lines (a fresh run
+    per start: the log is rotated by the hive wrapper on every start)."""
+    miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
+    path = ""
+    if miner == "custom":
+        pkg = _conf_value(WALLET_CONF_PATH, "CUSTOM_MINER") or ""
+        path = os.path.join("/var/log/miner/custom", f"{pkg}.log")
+    elif miner:
+        path = os.path.join("/var/log/miner", f"{miner}.log")
+    if not path:
+        return True
+    try:
+        with open(path, 'r', errors='ignore') as f:
+            data = f.read()
+    except Exception:
+        return True
+    return "stopped after repeated solve errors" not in data and " DEAD [" not in data
+
+def _oc_suspended_guard(suspend):
+    try:
+        g = _guard_load()
+        g["suspended"] = bool(suspend)
+        _guard_save(g)
+    except Exception as e:
+        logging.error("OC recovery: guard suspend failed: %s", e)
+
+def _oc_begin_test(st, kind, value):
+    """Stop the miner, apply the candidate value to the target GPU, start the
+    miner and record the test; a later pass judges the outcome."""
+    st["kind"] = kind
+    st["current"] = int(value)
+    counts = _oc_xid_counts()
+    base = counts.get(st["pci"], 0)
+    run_command("sudo /hive/bin/miner stop")
+    time.sleep(5)
+    ok = _oc_apply_single(kind, st["gpu"], value)
+    st["test"] = {"kind": kind, "value": int(value), "started_at": int(time.time()),
+                  "xid_base": base, "applied": bool(ok)}
+    run_command(MINER_RESTART_CMD)
+    _oc_state_save(st)
+    gpu = st["gpu"]
+    logging.warning("OC recovery: GPU %s testing %s=%s (baseline Xid %s)", gpu, kind, value, base)
+    record_metrics_event("info", f"OC recovery: GPU {gpu} testing {kind} lock {value} MHz")
+
+def _oc_evaluate_test(st):
+    """Judge the in-flight test: pass = hashrate back, no new fatal Xid on the
+    target PCI, no worker-death lines in the current miner log."""
+    test = st.get("test") or {}
+    khs = _oc_read_khs()
+    counts = _oc_xid_counts()
+    new_xid = counts.get(st["pci"], 0) - int(test.get("xid_base") or 0)
+    log_bad = not _oc_miner_log_clean()
+    passed = khs > 0 and new_xid <= 0 and not log_bad
+    return passed, {"khs": khs, "new_xid": max(0, new_xid), "log_bad": log_bad}
+
+def _oc_history(st, line):
+    st["history"] = (st.get("history") or [])[-29:] + [f"{time.strftime('%m-%d %H:%M')} {line}"]
+
+def _oc_finish(st, level, result):
+    st["active"] = False
+    st["phase"] = "done"
+    st["test"] = None
+    st["last_run"] = int(time.time())
+    st["last_result"] = result
+    gpu = str(st.get("gpu"))
+    if st.get("kind") == "core" and st.get("working"):
+        st.setdefault("known_core", {})[gpu] = int(st["working"])
+    elif st.get("kind") == "mem" and st.get("working"):
+        st.setdefault("known_mem", {})[gpu] = int(st["working"])
+    _oc_suspended_guard(False)
+    _oc_state_save(st)
+    logging.warning("OC recovery finished: %s", result)
+    record_metrics_event(level, f"OC recovery: {result}")
+
+def _oc_next_medium(st):
+    """Core floor reached without a working point: switch to memory, or (no
+    mem lock to lower) straight to disabling the GPU."""
+    gpu = str(st.get("gpu"))
+    mem_ceiling = max(int(_oc_conf_token("mem", st["gpu"]) or 0),
+                      int((st.get("orig_mem") or {}).get(gpu) or 0))
+    if mem_ceiling <= OC_REC_FLOOR_MEM:
+        return "disable"
+    st["kind"] = "mem"
+    st["ceiling"] = mem_ceiling
+    st["floor"] = OC_REC_FLOOR_MEM
+    st["step"] = OC_REC_STEP_MEM
+    st.setdefault("orig_mem", {})[gpu] = mem_ceiling
+    known_m = int((st.get("known_mem") or {}).get(gpu) or 0)
+    if known_m and known_m <= mem_ceiling:
+        st["current"] = known_m
+    else:
+        st["current"] = max(mem_ceiling - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
+    st["working"] = 0
+    return "down"
+
+def _oc_settle_or_descend(st):
+    """Re-apply the last working value (up-phase failure = step back down);
+    if even that stops working, keep descending from it."""
+    st["phase"] = "down_" + st["kind"]
+    st["current"] = int(st.get("working") or st.get("ceiling"))
+    st["working"] = 0
+
+def _oc_step_down_value(st):
+    val = int(st.get("current") or 0) - int(st.get("step") or OC_REC_STEP_CORE)
+    return max(val, int(st.get("floor") or 0))
+
+def _oc_recovery_pass():
+    """One state-machine transition (at most one clock test) per call."""
+    st = _oc_state_load()
+    now = int(time.time())
+
+    # Bookkeeping in every pass: miner starts (MINER_RUN mtime changes) and
+    # fatal Xid counts power the idle-phase detection.
+    try:
+        mtime = int(os.path.getmtime(MINER_RUN_FLAG)) if os.path.exists(MINER_RUN_FLAG) else 0
+        prev = int(st.get("last_run_mtime") or 0)
+        if mtime and prev and mtime != prev:
+            st["restart_times"] = [t for t in (st.get("restart_times") or [])
+                                   if now - t < OC_REC_RESTART_WINDOW]
+            st["restart_times"] = st["restart_times"] + [now]
+        if mtime:
+            st["last_run_mtime"] = mtime
+    except Exception as e:
+        logging.error("OC recovery: restart tracking failed: %s", e)
+    try:
+        st["xid_counts"] = _oc_xid_counts()
+    except Exception as e:
+        logging.error("OC recovery: xid sampling failed: %s", e)
+        st["xid_counts"] = {}
+
+    if not st.get("active"):
+        _oc_detect(st, now)
+        _oc_state_save(st)
+        return
+
+    gpu = st.get("gpu")
+    test = st.get("test")
+    if test:
+        if now - int(test.get("started_at") or 0) < OC_REC_TEST_SECONDS:
+            return  # still inside the warmup/observe window
+        if not test.get("applied"):
+            # the apply itself failed (conf write): treat as a failed step
+            passed, detail = False, {"khs": _oc_read_khs(), "new_xid": 0, "log_bad": False, "apply": False}
+        else:
+            passed, detail = _oc_evaluate_test(st)
+        st["test"] = None
+        kind = st.get("kind")
+        value = int(test.get("value") or 0)
+        verdict = "OK" if passed else f"FAIL ({detail})"
+        _oc_history(st, f"GPU {gpu} {test.get('kind') or kind}={value}: {verdict}")
+        if test.get("kind") != "disable":
+            logging.warning("OC recovery: GPU %s %s=%s -> %s", gpu, kind, value, verdict)
+
+        if st.get("phase", "").startswith("down"):
+            if passed:
+                st["working"] = value
+                st.setdefault("known_core" if kind == "core" else "known_mem", {})[str(gpu)] = value
+                st["phase"] = "up_" + kind
+                record_metrics_event("warning",
+                                     f"OC recovery: GPU {gpu} mines at {kind} lock {value} MHz - probing upward")
+            else:
+                nxt = _oc_step_down_value(st)
+                if value <= int(st.get("floor") or 0) or nxt >= value:
+                    # floor reached without success
+                    medium = "disable" if st.get("kind") == "mem" else _oc_next_medium(st)
+                    if medium == "disable":
+                        st["phase"] = "disable"
+                        st["working"] = 0
+                        record_metrics_event("warning",
+                                             f"OC recovery: GPU {gpu} unstable at minimum clocks - disabling it from the miner")
+                    else:
+                        st["phase"] = "down_" + st["kind"]
+                    _oc_state_save(st)
+                    return
+                st["current"] = nxt
+        elif st.get("phase", "").startswith("up"):
+            if passed:
+                st["working"] = value
+                st.setdefault("known_core" if kind == "core" else "known_mem", {})[str(gpu)] = value
+                fu = (st.get("failed_up") or {}).get(f"{gpu}_{kind}")
+                if value + int(st.get("step") or 0) > int(st.get("ceiling") or 0):
+                    _oc_finish(st, "success",
+                               f"GPU {gpu} stable at {kind} lock {value} MHz (original ceiling)")
+                    return
+                if fu and value + int(st.get("step") or 0) >= int(fu):
+                    # a previous recovery already saw this step fail - settle here
+                    _oc_finish(st, "success",
+                               f"GPU {gpu} settled at {kind} lock {value} MHz (failure point {fu} MHz known)")
+                    return
+                st["current"] = value + int(st.get("step") or 0)
+                st["phase"] = "up_" + kind
+            else:
+                # failure point found: remember it and settle on the last working value
+                st.setdefault("failed_up", {})[f"{gpu}_{kind}"] = value
+                if st.get("working"):
+                    _oc_settle_or_descend(st)
+                else:
+                    _oc_finish(st, "warning",
+                               f"GPU {gpu} failed the settle-back test at {kind} {value} MHz; will re-descend")
+                    return
+        elif st.get("phase") == "disable":
+            _oc_finish(st, "danger" if detail.get("khs", 0) and detail.get("khs", 0) > 0 else "warning",
+                       f"GPU {gpu} disabled from the miner ({kind} recovery exhausted); khs={int(detail.get('khs') or 0)}")
+            return
+        _oc_state_save(st)
+        return
+
+    phase = st.get("phase")
+    if phase in ("down_core", "down_mem", "up_core", "up_mem"):
+        kind = st["kind"]
+        if phase.startswith("up"):
+            candidate = int(st.get("working") or 0) + int(st.get("step") or 0)
+            fu = (st.get("failed_up") or {}).get(f"{gpu}_{kind}")
+            if candidate > int(st.get("ceiling") or 0):
+                _oc_finish(st, "success",
+                           f"GPU {gpu} settled at {kind} lock {st.get('working')} MHz (original ceiling)")
+                return
+            if fu and candidate >= int(fu):
+                # a previous recovery already saw this step fail - settle here
+                _oc_finish(st, "success",
+                           f"GPU {gpu} settled at {kind} lock {st.get('working')} MHz (failure point {fu} MHz known)")
+                return
+        else:
+            candidate = int(st.get("current") or 0)
+            if candidate <= int(st.get("floor") or 0) and candidate < int(st.get("ceiling") or 0):
+                medium = "disable" if st.get("kind") == "mem" else _oc_next_medium(st)
+                if medium == "disable":
+                    st["phase"] = "disable"
+                    _oc_state_save(st)
+                    return
+                st["phase"] = "down_" + st["kind"]
+                _oc_state_save(st)
+                return
+        _oc_begin_test(st, kind, candidate)
+        return
+    if phase == "disable":
+        _oc_disable_gpu(st)
+        return
+    # unknown phase: reset
+    st["active"] = False
+    st["phase"] = "idle"
+    _oc_state_save(st)
+
+def _oc_disable_gpu(st):
+    """Remove a hopelessly unstable GPU from the miner config (SRBMiner:
+    --disable-gpu <ids> in CUSTOM_USER_CONFIG) and restart the miner."""
+    gpu = int(st.get("gpu") or 0)
+    miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
+    if miner != "custom":
+        _oc_finish(st, "warning", f"GPU {gpu} unstable at minimum clocks; miner '{miner}' has no per-GPU disable support - manual action needed")
+        return
+    cur = _conf_value(RIG_CONF_PATH, "CUSTOM_USER_CONFIG") or ""
+    flags = cur.split()
+    ids = []
+    out_flags = []
+    skip_next = False
+    for fl in flags:
+        if skip_next:
+            ids += [x for x in fl.split(",") if x]
+            skip_next = False
+            continue
+        if fl == "--disable-gpu":
+            skip_next = True
+            continue
+        out_flags.append(fl)
+    if str(gpu) not in ids:
+        ids.append(str(gpu))
+    new_cfg = " ".join(out_flags + ["--disable-gpu", ",".join(ids)]).strip()
+    _set_conf_value(RIG_CONF_PATH, "CUSTOM_USER_CONFIG", new_cfg)
+    _oc_history(st, f"GPU {gpu} disabled (CUSTOM_USER_CONFIG: --disable-gpu {','.join(ids)})")
+    run_command(MINER_RESTART_CMD)
+    record_metrics_event("danger", f"OC recovery: GPU {gpu} disabled from the miner (clock recovery exhausted)")
+    # leave the phase as disable: the next pass evaluates and finishes
+    st["test"] = {"kind": "disable", "value": gpu, "started_at": int(time.time()), "xid_base": 0, "applied": True}
+
+def _oc_detect(st, now):
+    """Idle-phase detection: a restart loop with a zero hashrate and fresh
+    fatal Xids on one GPU engages the recovery for that GPU."""
+    miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
+    if not miner or miner == "none":
+        return
+    maintenance = _conf_value(RIG_CONF_PATH, "MAINTENANCE")
+    if maintenance and maintenance.strip() not in ("", "0"):
+        return
+    if os.path.exists(MINER_STOP_FLAG):
+        return
+    if now - int(st.get("last_run") or 0) < OC_REC_COOLDOWN:
+        return
+    if _oc_read_khs() > 0:
+        return
+    if len(st.get("restart_times") or []) < OC_REC_RESTARTS_REQUIRED:
+        return
+    prev_counts = st.get("prev_xid_counts") or {}
+    fresh = {pci: cnt for pci, cnt in (st.get("xid_counts") or {}).items()
+             if cnt > int(prev_counts.get(pci) or 0)}
+    if not fresh:
+        st["prev_xid_counts"] = st.get("xid_counts") or {}
+        return
+    st["prev_xid_counts"] = st.get("xid_counts") or {}
+    pci = max(fresh, key=lambda p: fresh[p])
+    gpu = _oc_gpu_for_pci(pci)
+    if gpu is None:
+        logging.warning("OC recovery: Xid loop on PCI %s but no matching GPU index", pci)
+        return
+    # engage
+    g = str(gpu)
+    cur_core = int(_oc_conf_token("core", gpu) or 0)
+    cur_mem = int(_oc_conf_token("mem", gpu) or 0)
+    orig_core = max(cur_core, int((st.get("orig_core") or {}).get(g) or 0))
+    orig_mem = max(cur_mem, int((st.get("orig_mem") or {}).get(g) or 0))
+    # a ceiling raised above a known failure point makes that point obsolete
+    fu = st.get("failed_up") or {}
+    if fu.get(g + "_core") is not None and int(fu[g + "_core"]) < orig_core:
+        fu.pop(g + "_core", None)
+    if fu.get(g + "_mem") is not None and int(fu[g + "_mem"]) < orig_mem:
+        fu.pop(g + "_mem", None)
+    st["failed_up"] = fu
+    st["active"] = True
+    st["gpu"] = gpu
+    st["pci"] = pci
+    st["orig_core"] = {**(st.get("orig_core") or {}), g: orig_core}
+    st["orig_mem"] = {**(st.get("orig_mem") or {}), g: orig_mem}
+    st["test"] = None
+    st["working"] = 0
+    st["kind"] = "core"
+    known_c = int((st.get("known_core") or {}).get(g) or 0)
+    if orig_core > OC_REC_FLOOR_CORE:
+        st["ceiling"] = orig_core
+        st["floor"] = OC_REC_FLOOR_CORE
+        st["step"] = OC_REC_STEP_CORE
+        st["phase"] = "down_core"
+        if known_c and known_c <= orig_core:
+            st["current"] = known_c  # repeat recovery: re-test the last good value
+        else:
+            # detection already proved the current value fails - start below it
+            st["current"] = max(orig_core - OC_REC_STEP_CORE, OC_REC_FLOOR_CORE)
+    elif orig_mem > OC_REC_FLOOR_MEM:
+        st["kind"] = "mem"
+        st["ceiling"] = orig_mem
+        st["floor"] = OC_REC_FLOOR_MEM
+        st["step"] = OC_REC_STEP_MEM
+        st["phase"] = "down_mem"
+        known_m = int((st.get("known_mem") or {}).get(g) or 0)
+        if known_m and known_m <= orig_mem:
+            st["current"] = known_m
+        else:
+            st["current"] = max(orig_mem - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
+    else:
+        st["phase"] = "disable"
+        st["ceiling"] = 0
+    st["restart_times"] = []
+    _oc_suspended_guard(True)
+    _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), restarts {OC_REC_RESTARTS_REQUIRED}+, khs=0")
+    logging.warning("OC recovery: engaged for GPU %s (PCI %s), phase %s, ceiling %s",
+                    gpu, pci, st["phase"], st.get("ceiling"))
+    record_metrics_event("warning",
+                         f"OC recovery: GPU {gpu} Xid fault loop detected - walking {st['kind']} clock down from {st.get('current', st.get('ceiling'))} MHz")
+
+_oc_recovery_boot_done = {"flag": False}
+
+def _oc_recovery_worker():
+    time.sleep(OC_REC_BOOT_DELAY)
+    _oc_recovery_boot_done["flag"] = True
+    while True:
+        try:
+            _oc_recovery_pass()
+        except Exception as e:
+            logging.error("OC recovery pass failed: %s", e)
+        try:
+            active = _oc_state_load().get("active")
+        except Exception:
+            active = False
+        time.sleep(OC_REC_CHECK_INTERVAL_ACTIVE if active else OC_REC_CHECK_INTERVAL)
+
+def start_oc_recovery_worker():
+    t = threading.Thread(target=_oc_recovery_worker, daemon=True, name="oc-recovery")
+    t.start()
+    logging.info("OC recovery worker started (Xid death-loop self-healing)")
+
+def _set_conf_value(path, key, value):
+    """Set one KEY="value" line in a hive shell config (replace or append),
+    preserving every other line and the file mode."""
+    try:
+        with open(path, 'r') as f:
+            lines = f.readlines()
+        mode = os.stat(path).st_mode & 0o777
+    except Exception:
+        lines = []
+        mode = 0o644
+    pat = re.compile(r'^%s=".*"\s*$' % re.escape(key))
+    newline = '%s="%s"\n' % (key, value)
+    replaced = False
+    out = []
+    for line in lines:
+        if pat.match(line.rstrip("\n")):
+            out.append(newline)
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        if out and not out[-1].endswith("\n"):
+            out[-1] = out[-1] + "\n"
+        out.append(newline)
+    try:
+        _atomic_write_file(path, "".join(out), mode=mode)
+        return True
+    except Exception as e:
+        logging.error("Failed to set %s in %s: %s", key, path, e)
+        return False
 
 _cluster_sync_lock = threading.Lock()
 _cluster_last_sync = {"ts": 0, "ok": True, "message": "Not synced yet"}
@@ -7960,6 +8556,9 @@ if __name__ == '__main__':
 
     # Start the self-heal worker (miner package repair, API host fix, stale screen)
     start_heal_worker()
+
+    # Start the OC recovery worker (Xid death-loop self-healing)
+    start_oc_recovery_worker()
 
     local_ip = get_local_ip()
     port = 1337
