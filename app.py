@@ -2365,6 +2365,7 @@ HEAL_CHUNK_RETRIES = 2
 AGENT_LOG_PATH = "/var/log/hive-agent.log"
 MINER_STOP_FLAG = "/run/hive/MINER_STOP"
 MINER_RUN_FLAG = "/run/hive/MINER_RUN"
+MINER_LOG_DIR = "/var/log/miner"
 HEAL_DOWNLOADS_DIR = "/hive/miners/custom/downloads"
 HEAL_CUSTOM_DIR = "/hive/miners/custom"
 
@@ -2959,7 +2960,8 @@ def _oc_state_default():
             "step": OC_REC_STEP_CORE, "test": None, "history": [],
             "orig_core": {}, "orig_mem": {}, "known_core": {}, "known_mem": {},
             "failed_up": {},
-            "restart_times": [], "last_run_mtime": 0, "xid_counts": {}}
+            "restart_times": [], "last_run_mtime": 0, "last_log_ino": 0,
+            "xid_counts": {}}
 
 def _oc_state_load():
     with _oc_state_lock:
@@ -2990,8 +2992,13 @@ def _oc_state_save(st):
             logging.error("Failed to save oc recovery state: %s", e)
 
 def _oc_read_khs():
-    """Current rig hashrate (kH/s) as reported by the hive agent."""
+    """Current rig hashrate (kH/s) as reported by the hive agent. A stale
+    file (>120s without an update, hive-watchdog semantics) reads as 0 -
+    a dead miner leaves the last value behind otherwise."""
     try:
+        age = time.time() - os.path.getmtime(OC_REC_KHS_PATH)
+        if age > 120:
+            return 0.0
         with open(OC_REC_KHS_PATH, 'r') as f:
             return float((f.read() or "0").strip() or 0)
     except Exception:
@@ -3054,16 +3061,25 @@ def _oc_apply_single(kind, gpu, value):
         logging.error("OC recovery: apply failed (GPU %s %s=%s): %s", gpu, kind, value, msg)
     return ok
 
+def _oc_miner_log_path():
+    """Path of the current miner log ('' = unknown); the hive wrapper
+    recreates/rotates this file on EVERY miner (re)start, so its inode is a
+    reliable restart signal even for the in-screen miner-run restart loop
+    (which never touches MINER_RUN)."""
+    miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
+    if not miner:
+        return ""
+    if miner == "custom":
+        pkg = _conf_value(WALLET_CONF_PATH, "CUSTOM_MINER") or ""
+        if not pkg:
+            return ""
+        return os.path.join(MINER_LOG_DIR, "custom", f"{pkg}.log")
+    return os.path.join(MINER_LOG_DIR, f"{miner}.log")
+
 def _oc_miner_log_clean():
     """True when the current miner log has no worker-death lines (a fresh run
     per start: the log is rotated by the hive wrapper on every start)."""
-    miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
-    path = ""
-    if miner == "custom":
-        pkg = _conf_value(WALLET_CONF_PATH, "CUSTOM_MINER") or ""
-        path = os.path.join("/var/log/miner/custom", f"{pkg}.log")
-    elif miner:
-        path = os.path.join("/var/log/miner", f"{miner}.log")
+    path = _oc_miner_log_path()
     if not path:
         return True
     try:
@@ -3166,8 +3182,10 @@ def _oc_recovery_pass():
     st = _oc_state_load()
     now = int(time.time())
 
-    # Bookkeeping in every pass: miner starts (MINER_RUN mtime changes) and
-    # fatal Xid counts power the idle-phase detection.
+    # Bookkeeping in every pass: miner starts (MINER_RUN mtime changes at a
+    # hive-level start; the active miner log inode changes at EVERY restart,
+    # including the in-screen miner-run supervision loop) and fatal Xid
+    # counts power the idle-phase detection.
     try:
         mtime = int(os.path.getmtime(MINER_RUN_FLAG)) if os.path.exists(MINER_RUN_FLAG) else 0
         prev = int(st.get("last_run_mtime") or 0)
@@ -3179,6 +3197,18 @@ def _oc_recovery_pass():
             st["last_run_mtime"] = mtime
     except Exception as e:
         logging.error("OC recovery: restart tracking failed: %s", e)
+    try:
+        log_path = _oc_miner_log_path()
+        ino = os.stat(log_path).st_ino if log_path and os.path.exists(log_path) else 0
+        prev_ino = int(st.get("last_log_ino") or 0)
+        if ino and prev_ino and ino != prev_ino:
+            st["restart_times"] = [t for t in (st.get("restart_times") or [])
+                                   if now - t < OC_REC_RESTART_WINDOW]
+            st["restart_times"] = st["restart_times"] + [now]
+        if ino:
+            st["last_log_ino"] = ino
+    except Exception as e:
+        logging.error("OC recovery: log-inode tracking failed: %s", e)
     try:
         st["xid_counts"] = _oc_xid_counts()
     except Exception as e:
