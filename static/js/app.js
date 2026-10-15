@@ -1635,7 +1635,7 @@ async function fetchStats() {
                 // per customer review v1.12.50 (the fixed algo teal was reverted)
                 setFanStatValue(xfEl, xf.avg_duty + ' %', xf.avg_duty);
                 xfEl.title = 'Average speed of ' + xf.count + ' extra fan(s)' +
-                    (xf.source === 'mknet' ? ' (8MK_NET controller)' : '');
+                    (xf.source === 'mknet' ? ' (' + (xf.label || 'USB fan controller') + ')' : '');
             }
         }
         const minerUpEl = document.getElementById('statMinerUptime');
@@ -3493,7 +3493,7 @@ function buildClusterRigStatBlock(rig) {
         : chip('bi-fan', dash, '', 'mk-off', 'No GPU fan data');
     const xfChip = xf
         ? chip('bi-wind', xf.avg_duty + '%', xf.avg_duty > 0 ? speedChipColor(xf.avg_duty) : '', xf.avg_duty > 0 ? '' : 'mk-off',
-               'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (8MK_NET controller)' : ''))
+               'Average speed of ' + xf.count + ' extra fan(s)' + (xf.source === 'mknet' ? ' (' + (xf.label || 'USB fan controller') + ')' : ''))
         : chip('bi-wind', dash, '', 'mk-off', 'No controllable (PWM) extra fans detected');
     // Fresh (<24h) uptime highlight: amber chip + soft pulse — a reboot / miner
     // restart under a day ago should catch the eye (v1.12.56)
@@ -6057,7 +6057,7 @@ function renderMknet(mk) {
         '<input type="number" class="form-control form-control-sm bg-dark-input" style="width: 88px;" id="' + id + '" value="' + num(v, def) + '"' + (extra || '') + '></div>';
     return '<div class="border border-secondary-subtle rounded p-3 mb-2" id="mknetBlock" data-mode="' + mode + '">' +
         '<div class="d-flex justify-content-between align-items-center mb-3">' +
-            '<span class="fw-semibold small"><i class="bi bi-usb-plug text-info"></i> 8MK_NET USB controller</span>' +
+            '<span class="fw-semibold small"><i class="bi bi-usb-plug text-info"></i> ' + escapeHtml(mk.label || '8MK_NET USB controller') + '</span>' +
         '</div>' +
         (chips
             ? '<div class="d-flex flex-wrap gap-2 mb-3">' + chips + '</div>'
@@ -6149,7 +6149,7 @@ function bindMknet() {
                 loadFans();
             }
         } catch (e) {
-            showToast('Network error applying 8MK_NET settings.', false);
+            showToast('Network error applying fan controller settings.', false);
         } finally {
             btn.disabled = false;
             btn.innerHTML = orig;
@@ -6982,7 +6982,7 @@ async function sharePushRig(rig, entities, onStep) {
 
     // 8MK_NET controller settings
     for (const e of byKind('mknet')) {
-        onStep('applying 8MK_NET settings');
+        onStep('applying USB fan controller settings');
         await shareApi(rig, 'api/fans/mknet', 'POST', shareBuildMknetPayload(e.config));
         labels.push(e.label);
     }
@@ -7067,7 +7067,7 @@ async function openShareDialog(source) {
                     const c = d.mknet.config || {};
                     entities.push({
                         kind: 'mknet', id: 'current',
-                        label: '8MK_NET controller settings',
+                        label: (d.mknet.label || 'USB fan controller') + ' settings',
                         sub: (c.auto ? 'auto' : 'static ' + c.static_speed + '%') +
                              ', target ' + c.target_temp + '°C / mem ' + c.target_mem_temp + '°C' +
                              ', min ' + c.min_fan + '%, max ' + c.max_fan + '%',

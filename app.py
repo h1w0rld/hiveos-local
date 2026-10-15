@@ -4632,7 +4632,9 @@ def get_extra_fans_summary():
             if n is not None:
                 vals.append(n)
         if vals:
-            return {"count": len(vals), "avg_duty": round(sum(vals) / len(vals)), "source": "mknet"}
+            kind = _mknet_kind()
+            lbl = MKNET_CONTROLLERS[kind]["label"] if kind else "USB fan controller"
+            return {"count": len(vals), "avg_duty": round(sum(vals) / len(vals)), "source": "mknet", "label": lbl}
     except Exception:
         pass
     return None
@@ -7150,24 +7152,64 @@ def list_fans():
     fans = [_read_fan_entry(hw, chip, idx) for hw, chip, idx in _iter_hwmon_pwm()]
     return jsonify({"success": True, "fans": fans, "mknet": _mknet_status()})
 
-# ---------------- 8MK_NET USB fan controller (CP210x serial, hive 8mknet_autofan) ----------------
+# ---------------- USB fan controllers (CP210x serial, hive 8mknet/ykeda autofan) ----------------
 # The controller firmware implements the regulation itself: fan_mode 2 = auto
 # (keeps the minimal speed within min..max to reach target_temp), 1 = static
-# (manual_fan_speed). Parameters are passed via 8mknet_autofan.conf and applied
+# (manual_fan_speed). Parameters are passed via <kind>_autofan.conf and applied
 # by invoking the hive script (sources /etc/environment itself).
+# Two hive controller models share the JSON protocol: 8mknet (iSerial
+# Autofan8MK_NET) and ykeda (iSerial ykeda_autofan, e.g. RIG3).
 
-MKNET_SCRIPT = "/hive/opt/8mknet/8mknet_autofan"
-MKNET_CONF = os.path.join(HIVE_CONFIG_DIR, "8mknet_autofan.conf")
-MKNET_SERIAL = "/dev/serial/by-id/usb-Silicon_Labs_Device_for_hiveos_Autofan8MK_NET-if00-port0"
-MKNET_STATS_OK = "/run/hive/8mknet_latest_ok"
-MKNET_OUTPUT = "/run/hive/8mknet_autofan"
+MKNET_CONTROLLERS = {
+    "8mknet": {
+        "label": "8MK_NET USB controller",
+        "script": "/hive/opt/8mknet/8mknet_autofan",
+        "conf": os.path.join(HIVE_CONFIG_DIR, "8mknet_autofan.conf"),
+        "serial": "/dev/serial/by-id/usb-Silicon_Labs_Device_for_hiveos_Autofan8MK_NET-if00-port0",
+        "stats_ok": "/run/hive/8mknet_latest_ok",
+        "output": "/run/hive/8mknet_autofan",
+        "min_fan": 5,
+        "static_speed": 70,
+    },
+    "ykeda": {
+        "label": "Ykeda USB controller",
+        "script": "/hive/opt/ykeda/ykeda_autofan",
+        "conf": os.path.join(HIVE_CONFIG_DIR, "ykeda_autofan.conf"),
+        "serial": "/dev/serial/by-id/usb-Silicon_Labs_Donnager_ykeda_autofan-if00-port0",
+        "stats_ok": "/run/hive/ykeda_latest_ok",
+        "output": "/run/hive/ykeda_autofan",
+        "min_fan": 30,
+        "static_speed": 50,
+    },
+}
+# hive writes this marker at boot when a ykeda controller is detected
+# (YKEDA_AVAILABLE_FILE in /etc/environment); the by-id name of the ykeda
+# unit (ID_MODEL=Donnager) is less stable than this marker.
+MKNET_YKEDA_AVAILABLE = "/run/hive/ykeda_available"
+
+def _mknet_kind():
+    """Active USB fan controller kind: '8mknet' | 'ykeda' | None."""
+    for kind in ("8mknet", "ykeda"):
+        c = MKNET_CONTROLLERS[kind]
+        if not os.path.exists(c["script"]):
+            continue
+        if os.path.exists(c["serial"]):
+            return kind
+        if kind == "ykeda" and os.path.exists(MKNET_YKEDA_AVAILABLE):
+            return kind
+    return None
 
 def _mknet_present():
-    return os.path.exists(MKNET_SCRIPT) and os.path.exists(MKNET_SERIAL)
+    return _mknet_kind() is not None
 
-def _mknet_stats():
-    """Latest controller report: {"casefan":[...8...], "thermosensors":[...]}."""
-    for path in (MKNET_STATS_OK, MKNET_OUTPUT):
+def _mknet_stats(kind=None):
+    """Latest controller report: {"casefan":[...N...], "thermosensors":[...]}."""
+    if kind is None:
+        kind = _mknet_kind()
+    if not kind:
+        return None
+    c = MKNET_CONTROLLERS[kind]
+    for path in (c["stats_ok"], c["output"]):
         try:
             with open(path, 'r') as f:
                 lines = [l.strip() for l in f.read().splitlines() if l.strip().startswith('{')]
@@ -7183,10 +7225,11 @@ def _mknet_stats():
     return None
 
 def _mknet_status():
-    present = _mknet_present()
-    if not present:
+    kind = _mknet_kind()
+    if not kind:
         return {"present": False}
-    conf = parse_shell_config(MKNET_CONF)
+    c = MKNET_CONTROLLERS[kind]
+    conf = parse_shell_config(c["conf"])
     def _num(key, default):
         try:
             return int(str(conf.get(key, "")).strip())
@@ -7194,21 +7237,25 @@ def _mknet_status():
             return default
     return {
         "present": True,
-        "stats": _mknet_stats(),
+        "kind": kind,
+        "label": c["label"],
+        "stats": _mknet_stats(kind),
         "config": {
             "auto": str(conf.get("AUTO_ENABLED", "1")).strip() == "1",
             "target_temp": _num("TARGET_TEMP", 60),
             "target_mem_temp": _num("TARGET_MEM_TEMP", 90),
-            "min_fan": _num("MIN_FAN", 5),
+            "min_fan": _num("MIN_FAN", c["min_fan"]),
             "max_fan": _num("MAX_FAN", 100),
-            "static_speed": _num("MANUAL_FAN", 70),
+            "static_speed": _num("MANUAL_FAN", c["static_speed"]),
         },
     }
 
 @app.route('/api/fans/mknet', methods=['POST'])
 def set_mknet_fans():
-    if not _mknet_present():
-        return jsonify({"success": False, "message": "8MK_NET controller not found on this rig."}), 404
+    kind = _mknet_kind()
+    if not kind:
+        return jsonify({"success": False, "message": "USB fan controller not found on this rig."}), 404
+    paths = MKNET_CONTROLLERS[kind]
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "Invalid payload"}), 400
@@ -7241,7 +7288,7 @@ def set_mknet_fans():
     if mode == "static" and static_speed is None:
         return jsonify({"success": False, "message": "Static fan speed must be 0-100%."}), 400
 
-    conf = parse_shell_config(MKNET_CONF)
+    conf = parse_shell_config(paths["conf"])
     conf["AUTO_ENABLED"] = "1" if mode == "auto" else "0"
     conf["TARGET_TEMP"] = str(target_temp)
     conf["TARGET_MEM_TEMP"] = str(target_mem)
@@ -7249,17 +7296,17 @@ def set_mknet_fans():
     conf["MAX_FAN"] = str(max_fan)
     if mode == "static" and static_speed is not None:
         conf["MANUAL_FAN"] = str(static_speed)
-    if not write_shell_config(MKNET_CONF, conf):
-        return jsonify({"success": False, "message": "Failed to write 8mknet_autofan.conf"}), 500
-    out, err, code = run_command(f"sudo {MKNET_SCRIPT} --get_json")
+    if not write_shell_config(paths["conf"], conf):
+        return jsonify({"success": False, "message": f"Failed to write {os.path.basename(paths['conf'])}"}), 500
+    out, err, code = run_command(f"sudo {paths['script']} --get_json")
     applied = '"casefan"' in (out or "")
-    logging.info(f"8MK_NET fans set to {mode}"
+    logging.info(f"{paths['label']} fans set to {mode}"
                  + (f", static {static_speed}%" if mode == "static" else
                     f", target {target_temp}°C, min {min_fan}%, max {max_fan}%")
                  + f" by IP: {request.remote_addr}")
     if not applied:
         return jsonify({"success": True, "message": "Settings saved, but the controller did not respond - check the USB connection."})
-    return jsonify({"success": True, "message": "8MK_NET fan settings applied."})
+    return jsonify({"success": True, "message": f"{paths['label']} fan settings applied."})
 
 
 @app.route('/api/fans', methods=['POST'])
