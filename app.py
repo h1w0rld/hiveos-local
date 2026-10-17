@@ -3078,12 +3078,17 @@ def _oc_xid_counts():
     return counts
 
 def _oc_norm_pci(pci):
-    """0000:09:00 (dmesg) / 00000000:0000:09:00.0 (nvidia-smi) -> '09:00'."""
+    """0000:09:00 (dmesg) / 00000000:0000:09:00.0 (nvidia-smi) -> '09:00'.
+    Lowercased: dmesg prints hex bus numbers in lower case ('0c:00') while
+    nvidia-smi uses upper case ('0C:00.0') - the case mismatch made the
+    pci->gpu mapping fail on every rig with a letter in the bus id (RIG1
+    GPUs 6/7 on 0A/0C: 'Xid loop on PCI 0c:00 but no matching GPU index',
+    silently killing every engage since 15 Oct)."""
     parts = [p for p in str(pci).split(":") if p]
     if len(parts) < 2:
         return ""
     tail = parts[-1].split(".")[0]
-    return f"{parts[-2]}:{tail}" if tail else ""
+    return (f"{parts[-2]}:{tail}" if tail else "").lower()
 
 def _oc_gpu_for_pci(pci):
     """Map a dmesg PCI address to the nvidia GPU index. None = unknown."""
