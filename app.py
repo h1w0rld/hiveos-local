@@ -2993,18 +2993,23 @@ OC_REC_CHECK_INTERVAL_ACTIVE = 15   # recovery engaged: state machine tick
 OC_REC_BOOT_DELAY = 420             # let boot/guard/miner settle first
 OC_REC_RESTARTS_REQUIRED = 3        # miner restarts before recovery engages
 OC_REC_RESTART_WINDOW = 3600        # ...counted within this window
-OC_REC_STEP_CORE = 15               # core lock step (MHz)
+OC_REC_STEP_CORE = 15               # core lock step for the upward refine (MHz)
+OC_REC_STEP_DOWN_CORE = 45          # coarse first-descent step (3 fine steps per test)
 OC_REC_STEP_MEM = 15                # memory lock step (MHz)
 OC_REC_FLOOR_CORE = 1000            # never lower the core lock below this
 OC_REC_FLOOR_MEM = 810              # never lower the memory lock below this
 OC_REC_WARMUP = 240                 # miner init + pool reconnect before judging
 OC_REC_OBSERVE = 120                # clean window that confirms a step works
-OC_REC_COOLDOWN = 1800              # min seconds between finished recoveries
+OC_REC_COOLDOWN = 900               # min seconds between finished recoveries
 OC_REC_XID_CODES = ("13", "31")     # fatal compute / MMU faults
 OC_REC_ZOMBIE_SECONDS = 180         # khs==0 this long with a fresh Xid burst engages even without a restart loop
 OC_REC_BURST_TTL = 900              # a fresh Xid burst stays actionable this long
+OC_REC_BURST_SEED = 3               # fatal Xids in one burst that prove the CURRENT clock fails
 OC_REC_KHS_PATH = "/run/hive/khs"
 OC_REC_TEST_SECONDS = OC_REC_WARMUP + OC_REC_OBSERVE
+OC_REC_HOT_TEST_SECONDS = 150       # hot probe window: the miner never stopped, no warmup needed
+OC_REC_FAILFAST_GRACE = 25          # min seconds into a test before early-fail checks
+OC_REC_HOT_RECENT_XID = 300         # target card must be fault-free this long before a hot probe
 
 _oc_state_lock = threading.Lock()
 _oc_state_cache = {"loaded": False, "data": None}
@@ -3013,9 +3018,9 @@ def _oc_state_default():
     return {"active": False, "phase": "idle", "updated_at": 0, "last_run": 0,
             "last_result": "", "gpu": None, "pci": "", "kind": "core",
             "ceiling": 0, "current": 0, "working": 0, "floor": 0,
-            "step": OC_REC_STEP_CORE, "test": None, "history": [],
+            "step": OC_REC_STEP_CORE, "down_step": 0, "test": None, "history": [],
             "orig_core": {}, "orig_mem": {}, "known_core": {}, "known_mem": {},
-            "failed_up": {},
+            "failed_up": {}, "force_cold": False, "last_fail_ts": 0,
             "restart_times": [], "last_run_mtime": 0, "last_log_ino": 0,
             "xid_counts": {}, "xid_burst": {}, "zero_since": 0, "zombie": False}
 
@@ -3132,18 +3137,36 @@ def _oc_miner_log_path():
         return os.path.join(MINER_LOG_DIR, "custom", f"{pkg}.log")
     return os.path.join(MINER_LOG_DIR, f"{miner}.log")
 
-def _oc_miner_log_clean():
-    """True when the current miner log has no worker-death lines (a fresh run
-    per start: the log is rotated by the hive wrapper on every start)."""
+def _oc_log_bad_lines():
+    """Number of worker-death markers in the current miner log (0 = clean).
+    The hive wrapper recreates the log on every miner start, so within one
+    run any marker means a worker died - possibly only one of several."""
     path = _oc_miner_log_path()
     if not path:
-        return True
+        return 0
     try:
         with open(path, 'r', errors='ignore') as f:
             data = f.read()
     except Exception:
-        return True
-    return "stopped after repeated solve errors" not in data and " DEAD [" not in data
+        return 0
+    return data.count("stopped after repeated solve errors") + data.count(" DEAD [")
+
+def _oc_miner_log_clean():
+    """True when the current miner log has no worker-death lines (a fresh run
+    per start: the log is rotated by the hive wrapper on every start)."""
+    return _oc_log_bad_lines() == 0
+
+def _oc_hot_ok(st):
+    """Hot probes need a provably healthy miner: hashrate flowing, no stop
+    flag, run flag present, clean miner log and no fault on the target card
+    for the last OC_REC_HOT_RECENT_XID seconds (khs stays readable for up to
+    120s after a miner death, so the recent-fault guard is what really
+    protects against hot-applying onto a rig that just crashed)."""
+    if os.path.exists(MINER_STOP_FLAG) or not os.path.exists(MINER_RUN_FLAG):
+        return False
+    if _oc_read_khs() <= 0 or not _oc_miner_log_clean():
+        return False
+    return int(time.time()) - int(st.get("last_fail_ts") or 0) >= OC_REC_HOT_RECENT_XID
 
 def _oc_suspended_guard(suspend):
     try:
@@ -3154,31 +3177,50 @@ def _oc_suspended_guard(suspend):
         logging.error("OC recovery: guard suspend failed: %s", e)
 
 def _oc_begin_test(st, kind, value):
-    """Stop the miner, apply the candidate value to the target GPU, start the
-    miner and record the test; a later pass judges the outcome."""
+    """Apply the candidate value to the target GPU and record the test.
+    A provably healthy miner is probed HOT: only the target card's clock
+    changes while the rig keeps mining (a miner restart costs every card a
+    warmup and drops the rig to zero for minutes). A dead/zombie miner gets
+    the classic stop -> apply -> restart. A later pass judges the outcome."""
     st["kind"] = kind
     st["current"] = int(value)
     counts = _oc_xid_counts()
     base = counts.get(st["pci"], 0)
-    run_command("sudo /hive/bin/miner stop")
-    time.sleep(5)
-    ok = _oc_apply_single(kind, st["gpu"], value)
-    st["test"] = {"kind": kind, "value": int(value), "started_at": int(time.time()),
-                  "xid_base": base, "applied": bool(ok)}
-    run_command(MINER_RESTART_CMD)
-    _oc_state_save(st)
+    force_cold = bool(st.get("force_cold"))
+    st["force_cold"] = False
     gpu = st["gpu"]
-    logging.warning("OC recovery: GPU %s testing %s=%s (baseline Xid %s)", gpu, kind, value, base)
-    record_metrics_event("info", f"OC recovery: GPU {gpu} testing {kind} lock {value} MHz")
+    hot = kind == "core" and not force_cold and _oc_hot_ok(st)
+    if hot:
+        ok = _oc_apply_single(kind, gpu, value)
+        st["test"] = {"kind": kind, "value": int(value), "started_at": int(time.time()),
+                      "xid_base": base, "applied": bool(ok),
+                      "hot": True, "log_base": _oc_log_bad_lines()}
+        logging.warning("OC recovery: GPU %s hot-probing %s=%s (baseline Xid %s, miner keeps running)",
+                        gpu, kind, value, base)
+        record_metrics_event("info", f"OC recovery: GPU {gpu} hot-probing {kind} lock {value} MHz (miner keeps running)")
+    else:
+        run_command("sudo /hive/bin/miner stop")
+        time.sleep(5)
+        ok = _oc_apply_single(kind, gpu, value)
+        st["test"] = {"kind": kind, "value": int(value), "started_at": int(time.time()),
+                      "xid_base": base, "applied": bool(ok),
+                      "hot": False, "log_base": 0}
+        run_command(MINER_RESTART_CMD)
+        logging.warning("OC recovery: GPU %s testing %s=%s (baseline Xid %s, miner restarted)",
+                        gpu, kind, value, base)
+        record_metrics_event("info", f"OC recovery: GPU {gpu} testing {kind} lock {value} MHz")
+    _oc_state_save(st)
 
 def _oc_evaluate_test(st):
     """Judge the in-flight test: pass = hashrate back, no new fatal Xid on the
-    target PCI, no worker-death lines in the current miner log."""
+    target PCI, no NEW worker-death lines in the miner log (the baseline is
+    snapshotted at test start - a hot probe shares the log with the ongoing
+    run)."""
     test = st.get("test") or {}
     khs = _oc_read_khs()
     counts = _oc_xid_counts()
     new_xid = counts.get(st["pci"], 0) - int(test.get("xid_base") or 0)
-    log_bad = not _oc_miner_log_clean()
+    log_bad = _oc_log_bad_lines() > int(test.get("log_base") or 0)
     passed = khs > 0 and new_xid <= 0 and not log_bad
     return passed, {"khs": khs, "new_xid": max(0, new_xid), "log_bad": log_bad}
 
@@ -3216,6 +3258,7 @@ def _oc_next_medium(st):
     st["ceiling"] = mem_ceiling
     st["floor"] = OC_REC_FLOOR_MEM
     st["step"] = OC_REC_STEP_MEM
+    st["down_step"] = OC_REC_STEP_MEM
     st.setdefault("orig_mem", {})[gpu] = mem_ceiling
     known_m = int((st.get("known_mem") or {}).get(gpu) or 0)
     if known_m and known_m <= mem_ceiling:
@@ -3233,7 +3276,10 @@ def _oc_settle_or_descend(st):
     st["working"] = 0
 
 def _oc_step_down_value(st):
-    val = int(st.get("current") or 0) - int(st.get("step") or OC_REC_STEP_CORE)
+    """First descent uses the coarse step (fewer tests to reach the failure
+    band); the fine step is for the upward refine."""
+    step = int(st.get("down_step") or st.get("step") or OC_REC_STEP_CORE)
+    val = int(st.get("current") or 0) - step
     return max(val, int(st.get("floor") or 0))
 
 def _oc_recovery_pass():
@@ -3301,11 +3347,29 @@ def _oc_recovery_pass():
     gpu = st.get("gpu")
     test = st.get("test")
     if test:
-        if now - int(test.get("started_at") or 0) < OC_REC_TEST_SECONDS:
-            return  # still inside the warmup/observe window
-        if not test.get("applied"):
+        started = int(test.get("started_at") or 0)
+        total = OC_REC_HOT_TEST_SECONDS if test.get("hot") else OC_REC_TEST_SECONDS
+        age = now - started
+        if age < total:
+            if age < OC_REC_FAILFAST_GRACE:
+                return  # let the apply/miner settle before judging anything
+            # fail fast: a fault on the target card (or fresh worker-death
+            # lines) has already decided this test - waiting out the full
+            # window would only keep the rig down longer (observed 17 Oct:
+            # failing steps stayed in their window for minutes with the miner
+            # already dead, khs=0)
+            bad_now = _oc_log_bad_lines()
+            log_bad_now = bad_now > int(test.get("log_base") or 0)
+            new_xid_now = _oc_xid_counts().get(st["pci"], 0) - int(test.get("xid_base") or 0)
+            if new_xid_now <= 0 and not log_bad_now:
+                return  # nothing decisive yet - keep waiting out the window
+            passed = False
+            detail = {"khs": _oc_read_khs(), "new_xid": max(0, new_xid_now),
+                      "log_bad": log_bad_now, "early": True}
+        elif not test.get("applied"):
             # the apply itself failed (conf write): treat as a failed step
-            passed, detail = False, {"khs": _oc_read_khs(), "new_xid": 0, "log_bad": False, "apply": False}
+            passed = False
+            detail = {"khs": _oc_read_khs(), "new_xid": 0, "log_bad": False, "apply": False}
         else:
             passed, detail = _oc_evaluate_test(st)
         st["test"] = None
@@ -3315,6 +3379,8 @@ def _oc_recovery_pass():
         _oc_history(st, f"GPU {gpu} {test.get('kind') or kind}={value}: {verdict}")
         if test.get("kind") != "disable":
             logging.warning("OC recovery: GPU %s %s=%s -> %s", gpu, kind, value, verdict)
+        if not passed:
+            st["last_fail_ts"] = now
 
         if st.get("phase", "").startswith("down"):
             if passed:
@@ -3324,6 +3390,18 @@ def _oc_recovery_pass():
                 record_metrics_event("warning",
                                      f"OC recovery: GPU {gpu} mines at {kind} lock {value} MHz - probing upward")
             else:
+                if (test.get("hot") and not detail.get("new_xid")
+                        and not detail.get("log_bad") and not (detail.get("khs") or 0) > 0):
+                    # a hot probe that ends with zero hashrate but NO fault
+                    # evidence smells like the apply hung the miner (a known
+                    # srbminer quirk under load) rather than the clock being
+                    # bad - retry the same value with a proper restart before
+                    # stepping down
+                    st["current"] = value
+                    st["force_cold"] = True
+                    _oc_history(st, f"GPU {gpu} {kind}={value}: hot probe inconclusive (khs=0, no Xid) - cold retry")
+                    _oc_state_save(st)
+                    return
                 nxt = _oc_step_down_value(st)
                 if value <= int(st.get("floor") or 0) or nxt >= value:
                     # floor reached without success
@@ -3458,10 +3536,18 @@ def _oc_disable_gpu(st):
     st["test"] = {"kind": "disable", "value": gpu, "started_at": int(time.time()), "xid_base": 0, "applied": True}
 
 def _oc_detect(st, now):
-    """Idle-phase detection: a restart loop with a zero hashrate and fresh
-    fatal Xids on one GPU engages the recovery for that GPU. A zombie miner
-    (process alive, workers dead, zero hashrate, NO restarts) engages too -
-    sustained zero + a recent Xid burst on one PCI is enough."""
+    """Idle-phase detection. Three ways in, all requiring a fresh fatal-Xid
+    burst on ONE pci (that is what distinguishes a bad clock from a pool or
+    network outage):
+    - restart loop: OC_REC_RESTARTS_REQUIRED+ miner restarts within the hour
+      AND a fresh burst - the fast crash-restart cycle (miner dies on Xid,
+      the hive supervision loop brings it back in seconds, hashrate returns
+      for minutes until the next fault) engages IMMEDIATELY, a sustained
+      khs==0 is NOT required (observed 17 Oct on RIG1: GPU7 faulted every
+      ~10 min for hours while the old khs==0 gate kept recovery idle);
+    - zombie miner: khs==0 for OC_REC_ZOMBIE_SECONDS with NO restart loop;
+    - classic death loop: the restart path with a persistent zero hashrate.
+    """
     miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
     if not miner or miner == "none":
         return
@@ -3472,25 +3558,29 @@ def _oc_detect(st, now):
         return
     if now - int(st.get("last_run") or 0) < OC_REC_COOLDOWN:
         return
-    if _oc_read_khs() > 0:
+    khs = _oc_read_khs()
+    if khs > 0:
+        # hashrate alive: no zombie. The burst is deliberately KEPT - a card
+        # that faults every few minutes produces hashrate between crashes,
+        # clearing the burst here made engagement impossible for exactly that
+        # case; the burst expires through its own TTL instead
         st["zero_since"] = 0
-        st["xid_burst"] = {}
-        return
     burst = st.get("xid_burst") or {}
     pcis = {p: int(v) for p, v in burst.items() if p != "ts"}
+    loop = len(st.get("restart_times") or []) >= OC_REC_RESTARTS_REQUIRED
     if not pcis:
         st["zero_since"] = 0
         return
-    loop = len(st.get("restart_times") or []) >= OC_REC_RESTARTS_REQUIRED
+    if now - int(burst.get("ts") or 0) > OC_REC_BURST_TTL:
+        return
     zs = int(st.get("zero_since") or 0)
-    if not zs:
+    if not zs and khs <= 0:
         zs = now
         st["zero_since"] = zs
     if not loop:
-        # zombie path: wait for the zero-hash state to prove persistent
-        if now - zs < OC_REC_ZOMBIE_SECONDS:
-            return
-        if now - int(burst.get("ts") or 0) > OC_REC_BURST_TTL:
+        # zombie path: a zero-hash state must be persistent (with khs>0 there
+        # is no zombie - the miner is mining between faults)
+        if khs > 0 or now - zs < OC_REC_ZOMBIE_SECONDS:
             return
     pci = max(pcis, key=lambda p: pcis[p])
     gpu = _oc_gpu_for_pci(pci)
@@ -3509,7 +3599,6 @@ def _oc_detect(st, now):
         fu.pop(g + "_core", None)
     if fu.get(g + "_mem") is not None and int(fu[g + "_mem"]) < orig_mem:
         fu.pop(g + "_mem", None)
-    st["failed_up"] = fu
     st["active"] = True
     st["gpu"] = gpu
     st["pci"] = pci
@@ -3519,14 +3608,37 @@ def _oc_detect(st, now):
     st["orig_mem"] = {**(st.get("orig_mem") or {}), g: orig_mem}
     st["test"] = None
     st["working"] = 0
+    st["force_cold"] = False
     st["kind"] = "core"
+    burst_n = int(pcis.get(pci) or 0)
+    # a restart loop proves the CURRENT clock fails: keep the walk from
+    # re-testing it (seed the failure point with that level), and when the
+    # previously settled clock is faulting again the boundary moved down to
+    # it (a short hot-probe window can pass a level that only faults after
+    # minutes - recurring engagements then converge level by level)
+    if loop:
+        if fu.get(g + "_core") is not None and int(fu[g + "_core"]) >= cur_core > OC_REC_FLOOR_CORE:
+            fu[g + "_core"] = cur_core
+            st["known_core"] = {k: v for k, v in (st.get("known_core") or {}).items() if k != g}
+        elif fu.get(g + "_core") is None and burst_n >= OC_REC_BURST_SEED and cur_core > OC_REC_FLOOR_CORE:
+            fu[g + "_core"] = cur_core
+        if fu.get(g + "_mem") is not None and int(fu[g + "_mem"]) >= cur_mem > OC_REC_FLOOR_MEM:
+            fu[g + "_mem"] = cur_mem
+            st["known_mem"] = {k: v for k, v in (st.get("known_mem") or {}).items() if k != g}
+        elif fu.get(g + "_mem") is None and burst_n >= OC_REC_BURST_SEED and cur_mem > OC_REC_FLOOR_MEM:
+            fu[g + "_mem"] = cur_mem
+    st["failed_up"] = fu
     known_c = int((st.get("known_core") or {}).get(g) or 0)
+    proven_c = int(fu.get(g + "_core") or 0)
     if orig_core > OC_REC_FLOOR_CORE:
         st["ceiling"] = orig_core
         st["floor"] = OC_REC_FLOOR_CORE
         st["step"] = OC_REC_STEP_CORE
+        st["down_step"] = OC_REC_STEP_DOWN_CORE
         st["phase"] = "down_core"
-        if known_c and known_c <= orig_core:
+        if proven_c:
+            st["current"] = max(proven_c - OC_REC_STEP_DOWN_CORE, OC_REC_FLOOR_CORE)
+        elif known_c and known_c <= orig_core:
             st["current"] = known_c  # repeat recovery: re-test the last good value
         elif not loop:
             # zombie: detection did not prove this clock fails (the burst may
@@ -3535,30 +3647,37 @@ def _oc_detect(st, now):
             st["current"] = orig_core
         else:
             # detection already proved the current value fails - start below it
-            st["current"] = max(orig_core - OC_REC_STEP_CORE, OC_REC_FLOOR_CORE)
+            st["current"] = max(orig_core - OC_REC_STEP_DOWN_CORE, OC_REC_FLOOR_CORE)
     elif orig_mem > OC_REC_FLOOR_MEM:
         st["kind"] = "mem"
         st["ceiling"] = orig_mem
         st["floor"] = OC_REC_FLOOR_MEM
         st["step"] = OC_REC_STEP_MEM
+        st["down_step"] = OC_REC_STEP_MEM
         st["phase"] = "down_mem"
-        known_m = int((st.get("known_mem") or {}).get(g) or 0)
-        if known_m and known_m <= orig_mem:
-            st["current"] = known_m
-        elif not loop:
-            st["current"] = orig_mem  # zombie: re-test the current value first
+        proven_m = int(fu.get(g + "_mem") or 0)
+        if proven_m:
+            st["current"] = max(proven_m - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
         else:
-            st["current"] = max(orig_mem - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
+            known_m = int((st.get("known_mem") or {}).get(g) or 0)
+            if known_m and known_m <= orig_mem:
+                st["current"] = known_m
+            elif not loop:
+                st["current"] = orig_mem  # zombie: re-test the current value first
+            else:
+                st["current"] = max(orig_mem - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
     else:
         st["phase"] = "disable"
         st["ceiling"] = 0
     st["restart_times"] = []
     _oc_suspended_guard(True)
     if loop:
-        _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), restarts {OC_REC_RESTARTS_REQUIRED}+, khs=0")
+        _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), restarts {OC_REC_RESTARTS_REQUIRED}+, "
+                        f"Xid burst +{burst_n}"
+                        + (f", failure point {proven_c} MHz seeded" if proven_c else ""))
     else:
         _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), zombie miner (khs=0 for {now - zs}s, "
-                        f"Xid burst +{pcis[pci]} on {pci})")
+                        f"Xid burst +{burst_n} on {pci})")
     logging.warning("OC recovery: engaged for GPU %s (PCI %s), phase %s, ceiling %s (zombie=%s)",
                     gpu, pci, st["phase"], st.get("ceiling"), not loop)
     record_metrics_event("warning",
