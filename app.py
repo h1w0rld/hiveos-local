@@ -2356,6 +2356,8 @@ HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "heal_state.json")
 HEAL_CHECK_INTERVAL = 600      # periodic heal pass (10 min)
 HEAL_BOOT_DELAY = 300          # first pass: give the hive agent time to boot the miner
 HEAL_MINER_GAP = 1800          # min seconds between miner start/restart heal actions
+HEAL_ZOMBIE_ZERO_SECONDS = 900 # miner alive but zero hashrate for this long = zombie -> restart
+HEAL_ZOMBIE_GAP = 3600         # min seconds between zombie restarts
 HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
 HEAL_RIGID_ESCALATE = 180      # wait this long after an id fix before restarting the agent
 HEAL_RIGID_RESTART_GAP = 3600  # min seconds between hive agent restarts after an id fix
@@ -2857,6 +2859,53 @@ def _heal_check_miner(st, report):
     logging.warning("Self-heal: %s", st["last_action"])
     record_metrics_event("warning", "Self-heal: miner was not running - started it (flight sheet is active)")
 
+def _heal_check_zombie(st, report):
+    """Miner process alive but zero hashrate for a long time (zombie workers:
+    seen after Xid faults or live OC changes - SRBMiner keeps the process and
+    screen, every worker sits at 0.00 H/s): restart it. Nothing else in the
+    stack reacts to this state: oc_recovery needs a restart loop or a fresh
+    Xid burst, hive wd is disabled on most rigs."""
+    miner = _conf_value(RIG_CONF_PATH, "MINER")
+    if not miner or miner == "none":
+        return
+    if not os.path.exists(MINER_RUN_FLAG):
+        return  # miner down: _heal_check_miner owns that case
+    if os.path.exists(MINER_STOP_FLAG):
+        return
+    maintenance = _conf_value(RIG_CONF_PATH, "MAINTENANCE")
+    if maintenance and maintenance.strip() not in ("", "0"):
+        return
+    try:
+        if (_oc_state_load() or {}).get("active"):
+            return  # oc_recovery is walking clocks - do not fight its tests
+    except Exception:
+        pass
+    now = int(time.time())
+    if _oc_read_khs() > 0:
+        st["zombie_zero_since"] = 0
+        return
+    zs = int(st.get("zombie_zero_since") or 0)
+    if not zs:
+        st["zombie_zero_since"] = now
+        return
+    if now - zs < HEAL_ZOMBIE_ZERO_SECONDS:
+        return
+    if now - int(st.get("last_zombie_heal") or 0) < HEAL_ZOMBIE_GAP:
+        report["notes"].append("zombie restart skipped (rate limit)")
+        return
+    noconn_ts = _agent_log_last_noconn_ts()
+    if noconn_ts and time.time() - noconn_ts < 3600:
+        report["notes"].append("agent reported API connection loss recently; zombie restart skipped")
+        return
+    run_command(MINER_RESTART_CMD)
+    st["last_zombie_heal"] = now
+    st["zombie_zero_since"] = 0
+    st["last_action"] = "zombie miner restarted (alive but zero hashrate for %d min)" % ((now - zs) // 60)
+    report["fixed"].append(st["last_action"])
+    logging.warning("Self-heal: %s", st["last_action"])
+    record_metrics_event("warning", "Self-heal: " + st["last_action"])
+
+
 def heal_run_check():
     """One self-heal pass: rig id sanity + API host sanity + miner/package repair."""
     st = _heal_state_load()
@@ -2876,6 +2925,11 @@ def heal_run_check():
     except Exception as e:
         logging.error("Self-heal: miner check failed: %s", e)
         report["notes"].append("miner check failed: %s" % e)
+    try:
+        _heal_check_zombie(st, report)
+    except Exception as e:
+        logging.error("Self-heal: zombie check failed: %s", e)
+        report["notes"].append("zombie check failed: %s" % e)
     st["last_check"] = report["checked"]
     if report["fixed"]:
         st["last_action"] = "; ".join(report["fixed"])
@@ -2947,6 +3001,8 @@ OC_REC_WARMUP = 240                 # miner init + pool reconnect before judging
 OC_REC_OBSERVE = 120                # clean window that confirms a step works
 OC_REC_COOLDOWN = 1800              # min seconds between finished recoveries
 OC_REC_XID_CODES = ("13", "31")     # fatal compute / MMU faults
+OC_REC_ZOMBIE_SECONDS = 180         # khs==0 this long with a fresh Xid burst engages even without a restart loop
+OC_REC_BURST_TTL = 900              # a fresh Xid burst stays actionable this long
 OC_REC_KHS_PATH = "/run/hive/khs"
 OC_REC_TEST_SECONDS = OC_REC_WARMUP + OC_REC_OBSERVE
 
@@ -2961,7 +3017,7 @@ def _oc_state_default():
             "orig_core": {}, "orig_mem": {}, "known_core": {}, "known_mem": {},
             "failed_up": {},
             "restart_times": [], "last_run_mtime": 0, "last_log_ino": 0,
-            "xid_counts": {}}
+            "xid_counts": {}, "xid_burst": {}, "zero_since": 0, "zombie": False}
 
 def _oc_state_load():
     with _oc_state_lock:
@@ -3133,6 +3189,9 @@ def _oc_finish(st, level, result):
     st["active"] = False
     st["phase"] = "done"
     st["test"] = None
+    st["zombie"] = False
+    st["zero_since"] = 0
+    st["xid_burst"] = {}
     st["last_run"] = int(time.time())
     st["last_result"] = result
     gpu = str(st.get("gpu"))
@@ -3211,6 +3270,25 @@ def _oc_recovery_pass():
         logging.error("OC recovery: log-inode tracking failed: %s", e)
     try:
         st["xid_counts"] = _oc_xid_counts()
+        # accumulate fresh faults into a burst that survives a few idle polls:
+        # a dying card often bursts once and then sits idle (no load = no new
+        # faults), so "growth since the previous poll" is gone by the next one
+        counts = st.get("xid_counts") or {}
+        prev = st.get("prev_xid_counts") or {}
+        fresh = {p: counts[p] - int(prev.get(p) or 0)
+                 for p in counts if counts[p] > int(prev.get(p) or 0)}
+        burst = st.get("xid_burst") or {}
+        if fresh:
+            if now - int(burst.get("ts") or 0) < OC_REC_BURST_TTL:
+                merged = {p: int(burst.get(p) or 0) for p in burst if p != "ts"}
+                for p, c in fresh.items():
+                    merged[p] = merged.get(p, 0) + c
+            else:
+                merged = dict(fresh)
+            merged["ts"] = now
+            burst = merged
+        st["xid_burst"] = burst
+        st["prev_xid_counts"] = counts
     except Exception as e:
         logging.error("OC recovery: xid sampling failed: %s", e)
         st["xid_counts"] = {}
@@ -3332,6 +3410,25 @@ def _oc_disable_gpu(st):
     """Remove a hopelessly unstable GPU from the miner config (SRBMiner:
     --disable-gpu <ids> in CUSTOM_USER_CONFIG) and restart the miner."""
     gpu = int(st.get("gpu") or 0)
+    # the whole walk ran on zero hashrate and the Xid activity is long gone:
+    # this smells like a pool/network outage, not a bad card - disabling a
+    # healthy GPU would be wrong, restore the original clocks instead
+    burst_ts = int((st.get("xid_burst") or {}).get("ts") or 0)
+    if burst_ts and int(time.time()) - burst_ts > OC_REC_BURST_TTL:
+        orig_c = int((st.get("orig_core") or {}).get(str(gpu)) or 0)
+        orig_m = int((st.get("orig_mem") or {}).get(str(gpu)) or 0)
+        if orig_c or orig_m:
+            run_command("sudo /hive/bin/miner stop")
+            time.sleep(3)
+            if orig_c:
+                _oc_apply_single("core", gpu, orig_c)
+            if orig_m:
+                _oc_apply_single("mem", gpu, orig_m)
+            run_command(MINER_RESTART_CMD)
+        _oc_finish(st, "warning",
+                   f"GPU {gpu} hit the clock floor with zero hashrate but no recent Xid faults - "
+                   f"pool/network outage suspected, original clocks restored, GPU NOT disabled")
+        return
     miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
     if miner != "custom":
         _oc_finish(st, "warning", f"GPU {gpu} unstable at minimum clocks; miner '{miner}' has no per-GPU disable support - manual action needed")
@@ -3362,7 +3459,9 @@ def _oc_disable_gpu(st):
 
 def _oc_detect(st, now):
     """Idle-phase detection: a restart loop with a zero hashrate and fresh
-    fatal Xids on one GPU engages the recovery for that GPU."""
+    fatal Xids on one GPU engages the recovery for that GPU. A zombie miner
+    (process alive, workers dead, zero hashrate, NO restarts) engages too -
+    sustained zero + a recent Xid burst on one PCI is enough."""
     miner = _conf_value(RIG_CONF_PATH, "MINER") or ""
     if not miner or miner == "none":
         return
@@ -3374,17 +3473,26 @@ def _oc_detect(st, now):
     if now - int(st.get("last_run") or 0) < OC_REC_COOLDOWN:
         return
     if _oc_read_khs() > 0:
+        st["zero_since"] = 0
+        st["xid_burst"] = {}
         return
-    if len(st.get("restart_times") or []) < OC_REC_RESTARTS_REQUIRED:
+    burst = st.get("xid_burst") or {}
+    pcis = {p: int(v) for p, v in burst.items() if p != "ts"}
+    if not pcis:
+        st["zero_since"] = 0
         return
-    prev_counts = st.get("prev_xid_counts") or {}
-    fresh = {pci: cnt for pci, cnt in (st.get("xid_counts") or {}).items()
-             if cnt > int(prev_counts.get(pci) or 0)}
-    if not fresh:
-        st["prev_xid_counts"] = st.get("xid_counts") or {}
-        return
-    st["prev_xid_counts"] = st.get("xid_counts") or {}
-    pci = max(fresh, key=lambda p: fresh[p])
+    loop = len(st.get("restart_times") or []) >= OC_REC_RESTARTS_REQUIRED
+    zs = int(st.get("zero_since") or 0)
+    if not zs:
+        zs = now
+        st["zero_since"] = zs
+    if not loop:
+        # zombie path: wait for the zero-hash state to prove persistent
+        if now - zs < OC_REC_ZOMBIE_SECONDS:
+            return
+        if now - int(burst.get("ts") or 0) > OC_REC_BURST_TTL:
+            return
+    pci = max(pcis, key=lambda p: pcis[p])
     gpu = _oc_gpu_for_pci(pci)
     if gpu is None:
         logging.warning("OC recovery: Xid loop on PCI %s but no matching GPU index", pci)
@@ -3405,6 +3513,8 @@ def _oc_detect(st, now):
     st["active"] = True
     st["gpu"] = gpu
     st["pci"] = pci
+    st["zombie"] = not loop
+    st["zero_since"] = 0
     st["orig_core"] = {**(st.get("orig_core") or {}), g: orig_core}
     st["orig_mem"] = {**(st.get("orig_mem") or {}), g: orig_mem}
     st["test"] = None
@@ -3418,6 +3528,11 @@ def _oc_detect(st, now):
         st["phase"] = "down_core"
         if known_c and known_c <= orig_core:
             st["current"] = known_c  # repeat recovery: re-test the last good value
+        elif not loop:
+            # zombie: detection did not prove this clock fails (the burst may
+            # be a one-off) - re-test the current value first, a plain miner
+            # restart alone may bring the rig back at the original clocks
+            st["current"] = orig_core
         else:
             # detection already proved the current value fails - start below it
             st["current"] = max(orig_core - OC_REC_STEP_CORE, OC_REC_FLOOR_CORE)
@@ -3430,6 +3545,8 @@ def _oc_detect(st, now):
         known_m = int((st.get("known_mem") or {}).get(g) or 0)
         if known_m and known_m <= orig_mem:
             st["current"] = known_m
+        elif not loop:
+            st["current"] = orig_mem  # zombie: re-test the current value first
         else:
             st["current"] = max(orig_mem - OC_REC_STEP_MEM, OC_REC_FLOOR_MEM)
     else:
@@ -3437,11 +3554,15 @@ def _oc_detect(st, now):
         st["ceiling"] = 0
     st["restart_times"] = []
     _oc_suspended_guard(True)
-    _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), restarts {OC_REC_RESTARTS_REQUIRED}+, khs=0")
-    logging.warning("OC recovery: engaged for GPU %s (PCI %s), phase %s, ceiling %s",
-                    gpu, pci, st["phase"], st.get("ceiling"))
+    if loop:
+        _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), restarts {OC_REC_RESTARTS_REQUIRED}+, khs=0")
+    else:
+        _oc_history(st, f"engaged: GPU {gpu} (PCI {pci}), zombie miner (khs=0 for {now - zs}s, "
+                        f"Xid burst +{pcis[pci]} on {pci})")
+    logging.warning("OC recovery: engaged for GPU %s (PCI %s), phase %s, ceiling %s (zombie=%s)",
+                    gpu, pci, st["phase"], st.get("ceiling"), not loop)
     record_metrics_event("warning",
-                         f"OC recovery: GPU {gpu} Xid fault loop detected - walking {st['kind']} clock down from {st.get('current', st.get('ceiling'))} MHz")
+                         f"OC recovery: GPU {gpu} Xid faults with zero hashrate detected - walking {st['kind']} clock from {st.get('current', st.get('ceiling'))} MHz")
 
 _oc_recovery_boot_done = {"flag": False}
 
