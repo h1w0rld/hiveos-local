@@ -2972,7 +2972,291 @@ def api_heal_pkg():
 @app.route('/api/heal/status')
 def api_heal_status():
     return jsonify({"success": True, "heal": _heal_state_load(),
-                    "oc_recovery": _oc_state_load()})
+                    "oc_recovery": _oc_state_load(),
+                    "net_heal": _net_heal_state_load()})
+
+# ---------------- Network self-heal: Wi-Fi/link recovery WITHOUT reboot ----------------
+# A local worker that detects layered connectivity loss (interface gone, wifi
+# de-associated, no DHCP route, gateway unreachable, internet unreachable) and
+# recovers it with soft actions only. Reboot is the LAST resort, gated by a
+# long arm time, a min gap, and quiet hours (fans are loud at night).
+# Key distinction: gateway OK + internet dead = router WAN problem, the rig is
+# NOT at fault -> no rig action at all, just record the event.
+
+NET_HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "net_heal.json")
+NET_HEAL_CHECK_INTERVAL = 60        # probe period
+NET_HEAL_BOOT_DELAY = 240           # wifi needs time to associate after boot
+NET_HEAL_GRACE = 240                # external causes (router/AP reboot) self-heal in this window
+NET_HEAL_STEP_GAP = 120             # give each recovery step this long to take effect
+NET_HEAL_REBOOT_ARM = 600           # ladder exhausted -> still dead this long -> reboot eligible
+NET_HEAL_REBOOT_GAP = 6 * 3600      # min time between net-heal reboots
+NET_HEAL_REBOOT_QUIET = (23, 8)     # local hours: reboot deferred (loud fans at night)
+NET_HEAL_TCP_PROBES = (("1.1.1.1", 443), ("8.8.8.8", 53), ("9.9.9.9", 53))
+NET_HEAL_INET_TIMEOUT = 4
+NET_HEAL_GRACE_LAYERS = ("not-associated", "gateway-unreachable", "no-default-route")
+
+_net_heal_state_lock = threading.Lock()
+_net_heal_state_cache = {"loaded": False, "data": None}
+
+def _net_heal_state_load():
+    with _net_heal_state_lock:
+        if _net_heal_state_cache["loaded"]:
+            return _net_heal_state_cache["data"]
+        st = {"state": "ok", "last_check": 0, "last_action": "", "layer": "",
+              "broken_since": 0, "step": 0, "step_ts": 0, "driver": "",
+              "last_reboot": 0, "reboots": [], "inet_down_since": 0}
+        try:
+            with open(NET_HEAL_STATE_PATH, 'r') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                for k in st:
+                    if k in disk:
+                        st[k] = disk[k]
+        except Exception:
+            pass
+        _net_heal_state_cache["data"] = st
+        _net_heal_state_cache["loaded"] = True
+        return st
+
+def _net_heal_state_save(st):
+    with _net_heal_state_lock:
+        _net_heal_state_cache["data"] = st
+        _net_heal_state_cache["loaded"] = True
+        try:
+            _atomic_write_file(NET_HEAL_STATE_PATH, json.dumps(st, indent=2))
+        except Exception as e:
+            logging.error("Failed to save net heal state: %s", e)
+
+def _net_heal_wifi_iface():
+    """First wireless interface name, or None on non-wifi rigs."""
+    try:
+        for d in sorted(os.listdir('/sys/class/net')):
+            if os.path.isdir('/sys/class/net/%s/wireless' % d):
+                return d
+    except Exception:
+        pass
+    return None
+
+def _net_heal_carrier_state(iface):
+    """'missing' (driver gone), 'down' (admin down / not associated), 'up'."""
+    base = '/sys/class/net/%s' % iface
+    if not os.path.exists(base):
+        return "missing"
+    try:
+        with open(base + '/carrier', 'r') as f:
+            return "up" if f.read().strip() == "1" else "down"
+    except Exception:
+        return "down"  # OSError EINVAL when admin-down
+
+def _net_heal_gateway(iface):
+    """(gw_ip|None, has_default_route) for the given interface."""
+    out, _err, _rc = run_command("ip route show default")
+    for line in (out or "").splitlines():
+        if " dev %s " % iface not in line and not line.rstrip().endswith(" dev %s" % iface):
+            continue
+        m = re.search(r'via (\S+)', line)
+        return (m.group(1) if m else None), True
+    return None, False
+
+def _net_heal_ping(gw):
+    _out, _err, rc = run_command("ping -c1 -W2 %s" % gw)
+    return rc == 0
+
+def _net_heal_inet_ok():
+    """True when any public TCP endpoint is reachable (pure IP, no DNS)."""
+    for host, port in NET_HEAL_TCP_PROBES:
+        try:
+            s = socket.create_connection((host, port), timeout=NET_HEAL_INET_TIMEOUT)
+            s.close()
+            return True
+        except Exception:
+            continue
+    return False
+
+def _net_heal_detect_driver(iface):
+    try:
+        p = os.path.realpath('/sys/class/net/%s/device/driver' % iface)
+        if p and os.path.basename(p):
+            return os.path.basename(p)
+    except Exception:
+        pass
+    return ""
+
+def _net_heal_wpa_conf_fix():
+    """netpre writes key_mgmt=PSK (invalid, must be WPA-PSK) into
+    /etc/wpa_supplicant/wpa_supplicant.conf on some boots - wpa_supplicant
+    then fails to parse and the service dies. Sanitize; True when rewritten."""
+    path = '/etc/wpa_supplicant/wpa_supplicant.conf'
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        fixed = re.sub(r'key_mgmt\s*=\s*PSK\b', 'key_mgmt=WPA-PSK', content)
+        if fixed != content:
+            with open(path, 'w') as f:
+                f.write(fixed)
+            return True
+    except Exception:
+        pass
+    return False
+
+_NET_HEAL_STEP_LABELS = {1: "dhcp renew", 2: "wpa restart", 3: "netplan apply",
+                         4: "wifi driver reload", 5: "reboot (last resort)"}
+
+def _net_heal_apply_step(step, st, iface):
+    """Run recovery step N. Returns (ok, description)."""
+    if step == 1:
+        cmds = []
+        if _net_heal_carrier_state(iface) != "up":
+            cmds.append("ip link set %s up" % iface)
+        cmds.append("networkctl renew %s" % iface)
+        for c in cmds:
+            run_command(c)
+        return True, "; ".join(cmds)
+    if step == 2:
+        conf_fixed = _net_heal_wpa_conf_fix()
+        for unit in ("wpa_supplicant", "wpa_supplicant@%s" % iface):
+            run_command("systemctl restart %s 2>/dev/null" % unit)
+        run_command("wpa_cli -i %s reassociate 2>/dev/null" % iface)
+        return True, "wpa restart%s" % (" + wpa conf sanitized" if conf_fixed else "")
+    if step == 3:
+        run_command("netplan apply")
+        return True, "netplan apply"
+    if step == 4:
+        drv = st.get("driver") or ""
+        if not drv:
+            return False, "driver unknown - reload skipped"
+        run_command("modprobe -r %s && sleep 2 && modprobe %s" % (drv, drv))
+        run_command("netplan apply")
+        return True, "driver reload %s" % drv
+    if step == 5:
+        now = int(time.time())
+        hour = time.localtime().tm_hour
+        qs, qe = NET_HEAL_REBOOT_QUIET
+        in_quiet = (hour >= qs or hour < qe) if qs > qe else (qs <= hour < qe)
+        if in_quiet:
+            return False, "reboot deferred (quiet hours %02d:00-%02d:00)" % (qs, qe)
+        if now - int(st.get("last_reboot") or 0) < NET_HEAL_REBOOT_GAP:
+            return False, "reboot deferred (rate limit)"
+        run_command('nohup bash -c "sleep 1.5 && sudo /hive/sbin/sreboot" > /dev/null 2>&1 &')
+        st["last_reboot"] = now
+        reboots = st.get("reboots") or []
+        reboots.append(now)
+        st["reboots"] = reboots[-20:]
+        return True, "reboot issued (wifi dead > %d min)" % ((now - int(st.get("broken_since") or now)) // 60)
+    return False, "unknown step"
+
+def _net_heal_reset_broken(st):
+    st["state"] = "ok"
+    st["layer"] = ""
+    st["broken_since"] = 0
+    st["step"] = 0
+    st["step_ts"] = 0
+
+def net_heal_run_check():
+    """One connectivity probe + (maybe) one recovery action."""
+    st = _net_heal_state_load()
+    now = int(time.time())
+    st["last_check"] = now
+    iface = _net_heal_wifi_iface()
+    if not iface:
+        if st.get("state") != "n/a":
+            st["state"] = "n/a"
+            st["last_action"] = "no wireless interface - worker idle"
+            _net_heal_state_save(st)
+        return
+    # Miner hashing = pool reachable = network fine (fast path, also resets).
+    if _oc_read_khs() > 0:
+        if st.get("broken_since") or st.get("inet_down_since"):
+            record_metrics_event("info", "Net-heal: connectivity recovered (miner hashing)")
+        _net_heal_reset_broken(st)
+        st["inet_down_since"] = 0
+        st["driver"] = _net_heal_detect_driver(iface)
+        _net_heal_state_save(st)
+        return
+    layer = None
+    cstate = _net_heal_carrier_state(iface)
+    if cstate == "missing":
+        layer = "iface-missing"
+    elif cstate == "down":
+        layer = "iface-down"
+    else:
+        gw, has_route = _net_heal_gateway(iface)
+        if not has_route or not gw:
+            layer = "no-default-route"
+        elif not _net_heal_ping(gw):
+            layer = "gateway-unreachable"
+    if layer is None:
+        # L2/L3 fine: is the internet actually reachable?
+        if not _net_heal_inet_ok():
+            if not st.get("inet_down_since"):
+                st["inet_down_since"] = now
+                st["last_action"] = "internet unreachable while wifi/gateway OK (router WAN?) - no rig action"
+                record_metrics_event("info", "Net-heal: " + st["last_action"])
+            st["state"] = "inet_down"
+            _net_heal_state_save(st)
+            return
+        if st.get("inet_down_since"):
+            record_metrics_event("info", "Net-heal: internet connectivity recovered")
+        st["inet_down_since"] = 0
+        if st.get("broken_since"):
+            record_metrics_event("info", "Net-heal: connectivity recovered after %d min" % ((now - st["broken_since"]) // 60))
+        _net_heal_reset_broken(st)
+        st["driver"] = _net_heal_detect_driver(iface)
+        _net_heal_state_save(st)
+        return
+    # Broken at some layer.
+    if st.get("inet_down_since"):
+        st["inet_down_since"] = 0
+        record_metrics_event("info", "Net-heal: internet connectivity recovered")
+    if st.get("layer") != layer or not st.get("broken_since"):
+        st["layer"] = layer
+        st["broken_since"] = now
+        st["step"] = 0
+        st["step_ts"] = 0
+        st["state"] = "broken"
+        st["last_action"] = "network problem detected: %s" % layer
+        record_metrics_event("info", "Net-heal: " + st["last_action"])
+    # Before the first action: external causes (AP/router reboot) get a long
+    # grace window, local causes get one probe interval of observation.
+    # After that: give each recovery step NET_HEAL_STEP_GAP to take effect.
+    if st["step"] == 0:
+        wait = NET_HEAL_GRACE if layer in NET_HEAL_GRACE_LAYERS else NET_HEAL_STEP_GAP
+        if now - st["broken_since"] < wait:
+            _net_heal_state_save(st)
+            return
+    elif now - st["step_ts"] < NET_HEAL_STEP_GAP:
+        _net_heal_state_save(st)
+        return
+    # Advance the ladder. Steps 1-4 = soft actions; step 5 (reboot) arms only
+    # after a long observation window past the last soft step, and retries
+    # (paced) while deferred (quiet hours / rate limit).
+    if st["step"] < 4:
+        st["step"] += 1
+        st["step_ts"] = now
+    elif st["step"] == 4:
+        if now - st["step_ts"] < NET_HEAL_REBOOT_ARM:
+            _net_heal_state_save(st)
+            return
+        st["step"] = 5
+        st["step_ts"] = now
+    ok, desc = _net_heal_apply_step(st["step"], st, iface)
+    st["last_action"] = "step %d (%s): %s" % (st["step"], _NET_HEAL_STEP_LABELS.get(st["step"], "?"), desc)
+    record_metrics_event("warning" if ok or st["step"] < 5 else "info", "Net-heal: " + st["last_action"])
+    _net_heal_state_save(st)
+
+def _net_heal_worker():
+    time.sleep(NET_HEAL_BOOT_DELAY)
+    while True:
+        try:
+            net_heal_run_check()
+        except Exception as e:
+            logging.error("Net-heal check failed: %s", e)
+        time.sleep(NET_HEAL_CHECK_INTERVAL)
+
+def start_net_heal_worker():
+    t = threading.Thread(target=_net_heal_worker, daemon=True, name="net-heal")
+    t.start()
+    logging.info("Network self-heal worker started (wifi/link recovery, reboot last resort)")
 
 # ---------------- OC recovery: Xid death-loop self-healing ----------------
 # A GPU that starts throwing fatal driver faults (Xid 13/31) under mining load
@@ -8881,6 +9165,9 @@ if __name__ == '__main__':
 
     # Start the OC recovery worker (Xid death-loop self-healing)
     start_oc_recovery_worker()
+
+    # Start the network self-heal worker (wifi/link recovery, reboot last resort)
+    start_net_heal_worker()
 
     local_ip = get_local_ip()
     port = 1337
