@@ -3305,6 +3305,14 @@ def net_heal_run_check():
             st["last_action"] = "no wireless interface - worker idle"
             _net_heal_state_save(st)
         return
+    # Static ip drift is checked even when everything else is healthy: an ip
+    # conflict (dhcp squatting another rig's address) does NOT break
+    # connectivity, so the miner keeps hashing and the khs fast-path below
+    # would otherwise hide it forever (RIG8 drill 19 Oct: .105 conflict with
+    # RIG5 while hashing at full speed).
+    if st.get("static"):
+        _net_heal_static_check(st, iface, now)
+        st = _net_heal_state_load()
     # Miner hashing = pool reachable = network fine (fast path, also resets).
     if _oc_read_khs() > 0:
         if st.get("broken_since") or st.get("inet_down_since"):
@@ -3344,7 +3352,6 @@ def net_heal_run_check():
         _net_heal_reset_broken(st)
         st["driver"] = _net_heal_detect_driver(iface)
         _net_heal_state_save(st)
-        _net_heal_static_check(st, iface, now)
         return
     # Broken at some layer.
     if st.get("inet_down_since"):
