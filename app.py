@@ -2984,6 +2984,8 @@ def api_heal_status():
 # NOT at fault -> no rig action at all, just record the event.
 
 NET_HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "net_heal.json")
+NET_HEAL_WPA_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf"
+NET_HEAL_NETPLAN_DIR = "/etc/netplan"
 NET_HEAL_CHECK_INTERVAL = 60        # probe period
 NET_HEAL_BOOT_DELAY = 240           # wifi needs time to associate after boot
 NET_HEAL_GRACE = 240                # external causes (router/AP reboot) self-heal in this window
@@ -2994,6 +2996,8 @@ NET_HEAL_REBOOT_QUIET = (23, 8)     # local hours: reboot deferred (loud fans at
 NET_HEAL_TCP_PROBES = (("1.1.1.1", 443), ("8.8.8.8", 53), ("9.9.9.9", 53))
 NET_HEAL_INET_TIMEOUT = 4
 NET_HEAL_GRACE_LAYERS = ("not-associated", "gateway-unreachable", "no-default-route")
+NET_HEAL_STATIC_RETRY = 600         # re-assert static wifi ip at most this often
+NET_HEAL_STATIC_BAK_KEEP = 3
 
 _net_heal_state_lock = threading.Lock()
 _net_heal_state_cache = {"loaded": False, "data": None}
@@ -3004,7 +3008,8 @@ def _net_heal_state_load():
             return _net_heal_state_cache["data"]
         st = {"state": "ok", "last_check": 0, "last_action": "", "layer": "",
               "broken_since": 0, "step": 0, "step_ts": 0, "driver": "",
-              "last_reboot": 0, "reboots": [], "inet_down_since": 0}
+              "last_reboot": 0, "reboots": [], "inet_down_since": 0,
+              "static": None, "static_try": 0}
         try:
             with open(NET_HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -3058,8 +3063,14 @@ def _net_heal_gateway(iface):
         return (m.group(1) if m else None), True
     return None, False
 
+def _net_heal_run(cmd, timeout=30):
+    """run_command under coreutils timeout: a hung modprobe/netplan/systemctl
+    must never wedge the worker thread (the ladder would stop advancing and
+    the recovery would stall until the next panel restart)."""
+    return run_command("timeout %d %s" % (int(timeout), cmd))
+
 def _net_heal_ping(gw):
-    _out, _err, rc = run_command("ping -c1 -W2 %s" % gw)
+    _out, _err, rc = _net_heal_run("ping -c1 -W2 %s" % gw, 10)
     return rc == 0
 
 def _net_heal_inet_ok():
@@ -3084,20 +3095,150 @@ def _net_heal_detect_driver(iface):
 
 def _net_heal_wpa_conf_fix():
     """netpre writes key_mgmt=PSK (invalid, must be WPA-PSK) into
-    /etc/wpa_supplicant/wpa_supplicant.conf on some boots - wpa_supplicant
-    then fails to parse and the service dies. Sanitize; True when rewritten."""
-    path = '/etc/wpa_supplicant/wpa_supplicant.conf'
+    wpa_supplicant.conf on some boots - wpa_supplicant then fails to parse and
+    the service dies. Sanitize with an ATOMIC, validated write: this file is
+    parsed at every boot, a truncated/corrupted write here would kill wifi
+    persistently (the exact disaster class this worker must never cause)."""
+    path = NET_HEAL_WPA_CONF
+    tmp = path + ".tmp-netheal"
     try:
         with open(path, 'r') as f:
             content = f.read()
+        if not re.search(r'key_mgmt\s*=\s*PSK\b', content):
+            return False
         fixed = re.sub(r'key_mgmt\s*=\s*PSK\b', 'key_mgmt=WPA-PSK', content)
-        if fixed != content:
-            with open(path, 'w') as f:
-                f.write(fixed)
-            return True
+        # Never make it worse: a usable conf must keep ssid and psk.
+        if not re.search(r'ssid\s*=', fixed) or not re.search(r'psk\s*=', fixed):
+            return False
+        try:
+            mode = os.stat(path).st_mode & 0o777
+            uid = os.stat(path).st_uid
+            gid = os.stat(path).st_gid
+        except Exception:
+            mode, uid, gid = 0o600, 0, 0
+        with open(tmp, 'w') as f:
+            f.write(fixed)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        try:
+            os.chown(tmp, uid, gid)
+        except Exception:
+            pass
+        bak = path + ".bak-netheal"
+        if not os.path.exists(bak):
+            try:
+                with open(bak, 'w') as f:
+                    f.write(content)
+                os.chmod(bak, 0o600)
+            except Exception:
+                pass
+        os.replace(tmp, path)
+        return True
     except Exception:
-        pass
-    return False
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
+def _net_heal_current_ip(iface):
+    out, _err, _rc = _net_heal_run("ip -4 -o addr show dev %s" % iface, 15)
+    m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out or "")
+    return m.group(1) if m else ""
+
+def _net_heal_static_check(st, iface, now):
+    """Re-assert the intended static wifi address after hive rewrites the
+    netplan yaml to dhcp on boot (proven RIG8/RIG7 behavior: every reboot the
+    rig DHCPs a foreign/other rig's IP and LAN conflicts return). Opt-in per
+    rig via the 'static' key in net_heal.json (POST /api/net_heal/static).
+    Safety: SSID/password are extracted from the CURRENT yaml (never stored or
+    regenerated by us), the write is atomic with a rotating backup, and
+    netplan apply on any parse error leaves the running config untouched -
+    association itself never depends on the IP fields, so the worst case is
+    'no change', not a dead adapter."""
+    si = st.get("static")
+    if not (isinstance(si, dict) and si.get("ip") and si.get("gw")):
+        return
+    want_ip = str(si["ip"]).split("/")[0]
+    cur = _net_heal_current_ip(iface)
+    if cur == want_ip:
+        return
+    if now - int(st.get("static_try") or 0) < NET_HEAL_STATIC_RETRY:
+        return
+    st["static_try"] = now
+    target = None
+    for p in sorted(glob.glob(os.path.join(NET_HEAL_NETPLAN_DIR, "*.yaml"))):
+        try:
+            with open(p, 'r') as f:
+                text = f.read()
+        except Exception:
+            continue
+        if "wifis:" in text and re.search(r'^\s+%s:\s*$' % re.escape(iface), text, re.M):
+            target = (p, text)
+            break
+    if not target:
+        _net_heal_state_save(st)
+        return
+    path, text = target
+    m_ssid = re.search(r'access-points:\s*\n\s+([^\s#][^:\n]*):\s*$', text, re.M)
+    m_pass = re.search(r'password:\s*"([^"]*)"', text)
+    if not m_ssid or m_pass is None:
+        _net_heal_state_save(st)
+        return
+    ssid, password = m_ssid.group(1).strip(), m_pass.group(1)
+    gw = str(si["gw"])
+    dns = si.get("dns") or [gw]
+    dns_lines = "\n".join("       - %s" % d for d in dns)
+    new_text = (
+        "network:\n"
+        " version: 2\n"
+        " wifis:\n"
+        "  %s:\n"
+        "   dhcp4: no\n"
+        "   addresses: [%s]\n"
+        "   routes:\n"
+        "     - to: default\n"
+        "       via: %s\n"
+        "   nameservers:\n"
+        "     addresses:\n"
+        "%s\n"
+        "   access-points:\n"
+        "    %s:\n"
+        "     password: \"%s\"\n" % (iface, si["ip"], gw, dns_lines, ssid, password)
+    )
+    tmp = path + ".tmp-netheal"
+    try:
+        baks = sorted(glob.glob(path + ".bak-netheal-static-*"))
+        for old in baks[:-max(1, NET_HEAL_STATIC_BAK_KEEP - 1)]:
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+        with open(path + ".bak-netheal-static-%d" % now, 'w') as f:
+            f.write(text)
+        with open(tmp, 'w') as f:
+            f.write(new_text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o644)
+        except Exception:
+            pass
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        _net_heal_state_save(st)
+        return
+    _net_heal_run("netplan apply", 90)
+    st["last_action"] = "static wifi ip re-asserted (%s -> %s)" % (cur or "none", want_ip)
+    record_metrics_event("warning", "Net-heal: " + st["last_action"])
+    _net_heal_state_save(st)
 
 _NET_HEAL_STEP_LABELS = {1: "dhcp renew", 2: "wpa restart", 3: "netplan apply",
                          4: "wifi driver reload", 5: "reboot (last resort)"}
@@ -3107,26 +3248,26 @@ def _net_heal_apply_step(step, st, iface):
     if step == 1:
         cmds = []
         if _net_heal_carrier_state(iface) != "up":
+            _net_heal_run("ip link set %s up" % iface, 15)
             cmds.append("ip link set %s up" % iface)
+        _net_heal_run("networkctl renew %s" % iface, 30)
         cmds.append("networkctl renew %s" % iface)
-        for c in cmds:
-            run_command(c)
         return True, "; ".join(cmds)
     if step == 2:
         conf_fixed = _net_heal_wpa_conf_fix()
         for unit in ("wpa_supplicant", "wpa_supplicant@%s" % iface):
-            run_command("systemctl restart %s 2>/dev/null" % unit)
-        run_command("wpa_cli -i %s reassociate 2>/dev/null" % iface)
+            _net_heal_run("systemctl restart %s 2>/dev/null" % unit, 30)
+        _net_heal_run("wpa_cli -i %s reassociate 2>/dev/null" % iface, 15)
         return True, "wpa restart%s" % (" + wpa conf sanitized" if conf_fixed else "")
     if step == 3:
-        run_command("netplan apply")
+        _net_heal_run("netplan apply", 90)
         return True, "netplan apply"
     if step == 4:
         drv = st.get("driver") or ""
         if not drv:
             return False, "driver unknown - reload skipped"
-        run_command("modprobe -r %s && sleep 2 && modprobe %s" % (drv, drv))
-        run_command("netplan apply")
+        _net_heal_run("sh -c 'modprobe -r %s && sleep 2 && modprobe %s'" % (drv, drv), 120)
+        _net_heal_run("netplan apply", 90)
         return True, "driver reload %s" % drv
     if step == 5:
         now = int(time.time())
@@ -3203,6 +3344,7 @@ def net_heal_run_check():
         _net_heal_reset_broken(st)
         st["driver"] = _net_heal_detect_driver(iface)
         _net_heal_state_save(st)
+        _net_heal_static_check(st, iface, now)
         return
     # Broken at some layer.
     if st.get("inet_down_since"):
@@ -3257,6 +3399,41 @@ def start_net_heal_worker():
     t = threading.Thread(target=_net_heal_worker, daemon=True, name="net-heal")
     t.start()
     logging.info("Network self-heal worker started (wifi/link recovery, reboot last resort)")
+
+@app.route('/api/net_heal/static', methods=['POST'])
+def api_net_heal_static():
+    """Set/clear the per-rig static wifi intent the worker re-asserts whenever
+    hive flips the netplan yaml back to dhcp (every boot). Empty ip = clear."""
+    data = request.get_json(silent=True) or {}
+    ip = str(data.get("ip") or "").strip()
+    gw = str(data.get("gw") or "").strip()
+    iface = str(data.get("iface") or "wlan0").strip()
+    dns = data.get("dns") if isinstance(data.get("dns"), list) else []
+    host_re = r'^(\d{1,3}\.){3}\d{1,3}$'
+    def _valid_ip(s):
+        return bool(re.match(host_re, s)) and all(int(o) <= 255 for o in s.split("."))
+    if not re.match(r'^[a-z0-9]{2,15}$', iface):
+        return jsonify({"success": False, "message": "Bad interface"}), 400
+    if not ip:
+        st = _net_heal_state_load()
+        st.pop("static", None)
+        st["static_try"] = 0
+        _net_heal_state_save(st)
+        return jsonify({"success": True, "static": None})
+    if not _valid_ip(ip.split("/")[0]) or (("/" in ip) and not re.match(r'^/\d{1,2}$', ip[ip.index("/"):])):
+        return jsonify({"success": False, "message": "Bad ip"}), 400
+    if not _valid_ip(gw):
+        return jsonify({"success": False, "message": "Bad gateway"}), 400
+    dns = [str(d).strip() for d in dns][:3]
+    for d in dns:
+        if not _valid_ip(d):
+            return jsonify({"success": False, "message": "Bad dns"}), 400
+    st = _net_heal_state_load()
+    st["static"] = {"iface": iface, "ip": ip if "/" in ip else ip + "/24",
+                    "gw": gw, "dns": dns or [gw]}
+    st["static_try"] = 0
+    _net_heal_state_save(st)
+    return jsonify({"success": True, "static": st["static"]})
 
 # ---------------- OC recovery: Xid death-loop self-healing ----------------
 # A GPU that starts throwing fatal driver faults (Xid 13/31) under mining load
