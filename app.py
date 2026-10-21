@@ -6242,6 +6242,147 @@ def handle_watchdog():
     else:
         return jsonify({"success": False, "message": "Failed to write watchdog settings to rig.conf."}), 500
 
+# 3b. Hardware watchdog (iTCO_wdt via systemd RuntimeWatchdogSec)
+#
+# A kernel freeze (RIG9 21 Oct: whole-OS hang for 5.5h, only a manual reset
+# helped; same class as RIG2 30 Sep) kills every in-OS healer - the only
+# automatic cure is a hardware timer that resets the board when PID1 stops
+# petting it. With RuntimeWatchdogSec>0 in /etc/systemd/system.conf systemd
+# opens /dev/watchdog and pings it every RuntimeWatchdogSec/2; a frozen
+# kernel stops being petted and the hardware resets the rig. Applied by an
+# atomic conf rewrite + `systemctl daemon-reexec` (no reboot needed; verified
+# live: enable -> state active, disable -> device released, state inactive).
+# The BTC B250/Kaby boards on this farm expose iTCO_wdt built into the hive
+# kernel (/sys/class/watchdog/watchdog0).
+SWDT_SYSTEM_CONF = "/etc/systemd/system.conf"
+SWDT_SYSFS = "/sys/class/watchdog/watchdog0"
+SWDT_TIMEOUT_SEC = 10
+
+def _swdt_conf_lines():
+    try:
+        with open(SWDT_SYSTEM_CONF, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except Exception:
+        return []
+
+def _swdt_status():
+    st = {"available": os.path.exists("/dev/watchdog"), "identity": "", "hw_state": "",
+          "hw_timeout": 0, "enabled": False, "conf_value": ""}
+    for key, name in (("identity", "identity"), ("hw_state", "state"), ("hw_timeout", "timeout")):
+        try:
+            st[key] = open(os.path.join(SWDT_SYSFS, name)).read().strip()
+        except Exception:
+            pass
+    try:
+        st["hw_timeout"] = int(st["hw_timeout"] or 0)
+    except (TypeError, ValueError):
+        st["hw_timeout"] = 0
+    # last uncommented RuntimeWatchdogSec wins (systemd config semantics)
+    val = None
+    for ln in _swdt_conf_lines():
+        m = re.match(r"^\s*RuntimeWatchdogSec\s*=\s*(\S+)\s*$", ln)
+        if m:
+            val = m.group(1)
+    st["conf_value"] = val or ""
+    st["enabled"] = val not in (None, "", "0")
+    return st
+
+def _swdt_set_enabled(enable):
+    """Rewrite RuntimeWatchdogSec in system.conf atomically and re-exec systemd.
+    Returns (ok, message, status)."""
+    lines = _swdt_conf_lines()
+    if not lines:
+        return False, "Cannot read " + SWDT_SYSTEM_CONF, _swdt_status()
+    new_val = str(SWDT_TIMEOUT_SEC) if enable else "0"
+    out, replaced = [], False
+    for ln in lines:
+        if re.match(r"^\s*#?\s*RuntimeWatchdogSec\s*=", ln):
+            if not replaced:
+                out.append("RuntimeWatchdogSec=" + new_val)
+                replaced = True
+            # duplicate RuntimeWatchdogSec lines are dropped - the last one
+            # would silently win in systemd anyway
+        else:
+            out.append(ln)
+    if not replaced:
+        # insert as the first directive of the [Manager] section, or before
+        # the first other section header; append a [Manager] block if absent
+        ins = None
+        for i, ln in enumerate(out):
+            s = ln.strip()
+            if s == "[Manager]":
+                ins = i + 1
+                break
+            if s.startswith("[") and s.endswith("]"):
+                ins = i
+                break
+        if ins is None:
+            out += ["", "[Manager]", "RuntimeWatchdogSec=" + new_val]
+        else:
+            out.insert(ins, "RuntimeWatchdogSec=" + new_val)
+    try:
+        ts = int(time.time())
+        shutil.copy2(SWDT_SYSTEM_CONF, SWDT_SYSTEM_CONF + ".bak-swdt-" + str(ts))
+        for old in sorted(glob.glob(SWDT_SYSTEM_CONF + ".bak-swdt-*"))[:-5]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    tmp = SWDT_SYSTEM_CONF + ".tmp-swdt"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.copymode(SWDT_SYSTEM_CONF, tmp)
+        os.replace(tmp, SWDT_SYSTEM_CONF)
+    except OSError as e:
+        return False, "Failed to write " + SWDT_SYSTEM_CONF + ": " + str(e), _swdt_status()
+    try:
+        p = subprocess.run("systemctl daemon-reexec", shell=True,
+                           capture_output=True, text=True, timeout=60)
+        rc, err = p.returncode, (p.stderr or "").strip()
+    except Exception as e:
+        rc, err = -1, str(e)
+    want = "active" if enable else "inactive"
+    deadline = time.time() + 10
+    while True:
+        st = _swdt_status()
+        if st["hw_state"] == want:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
+    if rc != 0:
+        return False, "systemctl daemon-reexec failed: " + (err or "rc=" + str(rc)), st
+    if st["enabled"] != enable or st["hw_state"] != want:
+        return False, ("Hardware watchdog did not reach the expected state (conf=%s, hw=%s)."
+                       % (st["conf_value"] or "?", st["hw_state"] or "?")), st
+    if enable:
+        msg = ("Hardware watchdog enabled (%s pings /dev/watchdog every %d s - a frozen kernel "
+               "gets hardware-reset within ~%d s)."
+               % (st["identity"] or "systemd", max((st["hw_timeout"] or SWDT_TIMEOUT_SEC) // 2, 1),
+                  st["hw_timeout"] or SWDT_TIMEOUT_SEC))
+    else:
+        msg = "Hardware watchdog disabled (device released, auto-reset off)."
+    logging.info("Hardware watchdog %s by IP: %s", "enabled" if enable else "disabled", request.remote_addr)
+    return True, msg, st
+
+@app.route('/api/syswatchdog', methods=['GET', 'POST'])
+def handle_syswatchdog():
+    if request.method == 'GET':
+        return jsonify({"success": True, **_swdt_status()})
+    data = request.get_json(silent=True) or {}
+    if "enabled" not in data:
+        return jsonify({"success": False, "message": "Provide enabled: true/false."}), 400
+    enable = bool(data.get("enabled"))
+    if enable and not _swdt_status()["available"]:
+        return jsonify({"success": False, "message": "No /dev/watchdog device on this rig."}), 400
+    ok, msg, st = _swdt_set_enabled(enable)
+    return jsonify({"success": ok, "message": msg, **st}), (200 if ok else 500)
+
 # 4. AutoFan settings (HiveOS-parity: global settings + per-GPU overrides)
 #
 # Hive autofan daemon (/hive/sbin/autofan) re-reads autofan.conf every cycle:

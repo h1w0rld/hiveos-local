@@ -951,7 +951,34 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.disabled = false;
         }
     });
-    
+
+    // Hardware watchdog switch (kernel-freeze auto-reset, systemd RuntimeWatchdogSec)
+    document.getElementById('swdtSwitch').addEventListener('change', async function() {
+        const sw = this;
+        const enable = sw.checked;
+        sw.disabled = true;
+        try {
+            const res = await apiFetch('/api/syswatchdog', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken
+                },
+                body: JSON.stringify({ enabled: enable })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                showToast(data.message || 'Saved.', true);
+            } else {
+                showToast(data.message || 'Failed to toggle hardware watchdog.', false);
+            }
+        } catch (error) {
+            showToast('Network error toggling hardware watchdog.', false);
+        } finally {
+            loadHardwareWatchdog();
+        }
+    });
+
     // AutoFan is saved through the "Apply" button (afSaveBtn);
     // no separate global form submit here.
 
@@ -2774,6 +2801,47 @@ async function loadTuningSettings() {
         loadFsheets();
     } catch (error) {
         console.error("Failed to load tuning configs:", error);
+    }
+    loadHardwareWatchdog();
+}
+
+// ---------- Hardware watchdog (kernel-freeze auto-reset via systemd RuntimeWatchdogSec) ----------
+function renderSysWatchdog(d) {
+    const sw = document.getElementById('swdtSwitch');
+    const badge = document.getElementById('swdtStateBadge');
+    const info = document.getElementById('swdtInfo');
+    if (!d || !d.success) {
+        sw.disabled = true;
+        sw.checked = false;
+        info.textContent = 'Status unknown';
+        return;
+    }
+    if (!d.available) {
+        sw.disabled = true;
+        sw.checked = false;
+        badge.className = 'badge rounded-pill text-bg-secondary ms-1';
+        badge.textContent = 'N/A';
+        badge.classList.remove('d-none');
+        info.textContent = 'No hardware watchdog device on this rig.';
+        return;
+    }
+    sw.disabled = false;
+    sw.checked = !!d.enabled;
+    const active = String(d.hw_state || '') === 'active';
+    badge.className = 'badge rounded-pill ms-1 ' + (active ? 'text-bg-success' : 'text-bg-secondary');
+    badge.textContent = active ? 'Active' : 'Inactive';
+    badge.classList.remove('d-none');
+    const parts = [String(d.identity || 'watchdog')];
+    if (d.hw_timeout > 0) parts.push('timeout ' + d.hw_timeout + ' s');
+    info.textContent = parts.join(' · ');
+}
+
+async function loadHardwareWatchdog() {
+    try {
+        const res = await apiFetch('/api/syswatchdog');
+        renderSysWatchdog(res.ok ? await res.json() : null);
+    } catch (error) {
+        renderSysWatchdog(null);
     }
 }
 
