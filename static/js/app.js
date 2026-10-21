@@ -2763,6 +2763,10 @@ function finishCount(okCount, failCount, total) {
 
 // Load tuning settings on authorization
 async function loadTuningSettings() {
+    // independent of the awaits below: a slow /api/watchdog or /api/autofan
+    // (remote rigs go through the SSH proxy) must not leave the card in
+    // "Loading..." forever
+    loadHardwareWatchdog();
     try {
         const wdRes = await apiFetch('/api/watchdog');
         if (wdRes.ok) {
@@ -2802,7 +2806,6 @@ async function loadTuningSettings() {
     } catch (error) {
         console.error("Failed to load tuning configs:", error);
     }
-    loadHardwareWatchdog();
 }
 
 // ---------- Hardware watchdog (kernel-freeze auto-reset via systemd RuntimeWatchdogSec) ----------
@@ -2837,11 +2840,15 @@ function renderSysWatchdog(d) {
 }
 
 async function loadHardwareWatchdog() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
-        const res = await apiFetch('/api/syswatchdog');
+        const res = await apiFetch('/api/syswatchdog', { signal: ctrl.signal });
         renderSysWatchdog(res.ok ? await res.json() : null);
     } catch (error) {
         renderSysWatchdog(null);
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -5839,6 +5846,7 @@ function showDashTab(tab) {
     if (tab === 'fans') { loadAutofan(); loadFans(); renderAfLiveChips(); }
     if (tab === 'presets') loadOcPresetsList();
     if (tab === 'stats') loadMetricsTab();
+    if (tab === 'services') loadHardwareWatchdog();
     if (tab === 'updates') {
         // fresh rig list/online flags feed the version table + re-check the banner
         loadClusterData(true).then(() => refreshClusterUpdate());
