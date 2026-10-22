@@ -4066,11 +4066,18 @@ def _oc_detect(st, now):
     cur_mem = int(_oc_conf_token("mem", gpu) or 0)
     orig_core = max(cur_core, int((st.get("orig_core") or {}).get(g) or 0))
     orig_mem = max(cur_mem, int((st.get("orig_mem") or {}).get(g) or 0))
-    # a ceiling raised above a known failure point makes that point obsolete
+    # a ceiling RAISED since the last engagement makes the previously found
+    # failure point obsolete - the extra headroom must be re-tested. Compare
+    # against the ceiling recorded at the previous engage: comparing against
+    # orig_core itself re-emptied the map on EVERY engage (the ceiling is
+    # stable between engagements), so the walk re-probed the same boundary
+    # again and again (observed RIG6 GPU7: 1505/1520 dance at each episode)
     fu = st.get("failed_up") or {}
-    if fu.get(g + "_core") is not None and int(fu[g + "_core"]) < orig_core:
+    prev_core = int((st.get("orig_core") or {}).get(g) or 0)
+    prev_mem = int((st.get("orig_mem") or {}).get(g) or 0)
+    if prev_core and orig_core > prev_core:
         fu.pop(g + "_core", None)
-    if fu.get(g + "_mem") is not None and int(fu[g + "_mem"]) < orig_mem:
+    if prev_mem and orig_mem > prev_mem:
         fu.pop(g + "_mem", None)
     st["active"] = True
     st["gpu"] = gpu
