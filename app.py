@@ -2980,8 +2980,16 @@ def api_heal_status():
 # de-associated, no DHCP route, gateway unreachable, internet unreachable) and
 # recovers it with soft actions only. Reboot is the LAST resort, gated by a
 # long arm time, a min gap, and quiet hours (fans are loud at night).
-# Key distinction: gateway OK + internet dead = router WAN problem, the rig is
-# NOT at fault -> no rig action at all, just record the event.
+# Key distinction: gateway OK + internet dead USED to mean "router WAN problem,
+# rig not at fault -> no action". RIG1 23 Oct proved a hole in that matrix: its
+# own USB-wifi uplink died while the router WAN stayed alive (peers kept
+# mining) - the rig sat uselessly at zero hashrate for 29 minutes and then died
+# entirely. Now a persistent "gateway OK + internet dead" is classified with
+# cluster evidence: any peer reporting fresh net-heal state 'ok' (its miner
+# hashes = its internet works) proves the WAN is alive and OUR uplink is the
+# dead part -> the recovery ladder engages. Fresh 'inet_down' on peers = WAN
+# down for everyone -> still no rig action. No peer evidence at all -> after a
+# long window run SOFT steps only (reboot disabled: never reboot on a guess).
 
 NET_HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "net_heal.json")
 NET_HEAL_WPA_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf"
@@ -2998,6 +3006,12 @@ NET_HEAL_INET_TIMEOUT = 4
 NET_HEAL_GRACE_LAYERS = ("not-associated", "gateway-unreachable", "no-default-route")
 NET_HEAL_STATIC_RETRY = 600         # re-assert static wifi ip at most this often
 NET_HEAL_STATIC_BAK_KEEP = 3
+NET_HEAL_SELF_INET_CONFIRM = 120    # gateway OK + internet dead this long -> ask the cluster
+NET_HEAL_PEER_CHECK_GAP = 300       # min interval between peer verdict rounds
+NET_HEAL_PEER_FRESH = 300           # peer net-heal last_check max age for a valid verdict
+NET_HEAL_PEER_MAX = 3               # peers queried per verdict round
+NET_HEAL_NOPEER_INET_WAIT = 600     # no peer evidence -> soft ladder (reboot OFF) after this long
+NET_HEAL_SOFT_CYCLE_GAP = 1800      # min spacing between repeated no-reboot soft cycles
 
 _net_heal_state_lock = threading.Lock()
 _net_heal_state_cache = {"loaded": False, "data": None}
@@ -3009,7 +3023,9 @@ def _net_heal_state_load():
         st = {"state": "ok", "last_check": 0, "last_action": "", "layer": "",
               "broken_since": 0, "step": 0, "step_ts": 0, "driver": "",
               "last_reboot": 0, "reboots": [], "inet_down_since": 0,
-              "static": None, "static_try": 0}
+              "static": None, "static_try": 0,
+              "no_reboot": False, "wan_down_noted": False,
+              "peer_check_ts": 0, "soft_cycle_ts": 0, "peer_verdict": {}}
         try:
             with open(NET_HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -3270,6 +3286,8 @@ def _net_heal_apply_step(step, st, iface):
         _net_heal_run("netplan apply", 90)
         return True, "driver reload %s" % drv
     if step == 5:
+        if st.get("no_reboot"):
+            return False, "reboot skipped (no peer evidence - soft mode)"
         now = int(time.time())
         hour = time.localtime().tm_hour
         qs, qe = NET_HEAL_REBOOT_QUIET
@@ -3292,6 +3310,105 @@ def _net_heal_reset_broken(st):
     st["broken_since"] = 0
     st["step"] = 0
     st["step_ts"] = 0
+    st["no_reboot"] = False
+    st["wan_down_noted"] = False
+    st["peer_check_ts"] = 0
+    st["soft_cycle_ts"] = 0
+
+def _net_heal_peer_inet_verdict():
+    """Classify a persistent 'gateway OK + internet dead' with cluster evidence.
+
+    Returns (verdict, detail): 'our_uplink' when at least one peer reports a
+    FRESH net-heal state 'ok' (the peer's miner is hashing = its internet
+    works = the router WAN is alive, so OUR uplink is the dead part),
+    'wan_down' when a fresh 'inet_down' peer (and no contradicting 'ok') shows
+    the internet is down for everyone, or None when there is no usable
+    evidence (peers offline, no panels, wired rigs with 'n/a', stale states).
+    Never raises."""
+    detail = {"checked": {}}
+    try:
+        state = load_cluster_state()
+    except Exception as e:
+        detail["error"] = str(e)
+        return None, detail
+    self_id = state.get("self_id")
+    ok_peer = wan_peer = None
+    tries = 0
+    now = int(time.time())
+    for rig in state.get("rigs", []):
+        if tries >= NET_HEAL_PEER_MAX:
+            break
+        if rig.get("is_self") or rig.get("id") == self_id:
+            continue
+        tries += 1
+        try:
+            ok, data, _code, _err, _acc = cluster_remote_api(rig, "GET", "api/heal/status", timeout=15)
+        except Exception:
+            continue
+        if not ok or not isinstance(data, dict):
+            continue
+        nh = data.get("net_heal") or {}
+        name = str(rig.get("name") or rig.get("id") or "?")
+        st_name = str(nh.get("state") or "")
+        try:
+            lc = int(nh.get("last_check") or 0)
+        except Exception:
+            lc = 0
+        fresh = bool(lc and now - lc <= NET_HEAL_PEER_FRESH)
+        detail["checked"][name] = {"state": st_name, "fresh": fresh}
+        if not fresh:
+            continue
+        if st_name == "ok" and ok_peer is None:
+            ok_peer = name
+        elif st_name == "inet_down" and wan_peer is None:
+            wan_peer = name
+    if ok_peer:
+        return "our_uplink", {"peer": ok_peer, "checked": detail["checked"]}
+    if wan_peer:
+        return "wan_down", {"peer": wan_peer, "checked": detail["checked"]}
+    return None, detail
+
+def _net_heal_advance_ladder(st, iface, now):
+    """Shared ladder driver: grace, step pacing, the no-reboot soft-cycle
+    pacing, and step application. Used both by the classic broken-layer path
+    and by the peer-verified self-uplink path."""
+    # Before the first action: external causes (AP/router reboot) get a long
+    # grace window, local causes get one probe interval of observation.
+    # After that: give each recovery step NET_HEAL_STEP_GAP to take effect.
+    if st["step"] == 0:
+        wait = NET_HEAL_GRACE if st.get("layer") in NET_HEAL_GRACE_LAYERS else NET_HEAL_STEP_GAP
+        if now - st["broken_since"] < wait:
+            _net_heal_state_save(st)
+            return
+    elif now - st["step_ts"] < NET_HEAL_STEP_GAP:
+        _net_heal_state_save(st)
+        return
+    # Advance the ladder. Steps 1-4 = soft actions; step 5 (reboot) arms only
+    # after a long observation window past the last soft step, and retries
+    # (paced) while deferred (quiet hours / rate limit). Without peer evidence
+    # the reboot is disabled: paced soft cycles repeat instead.
+    if st["step"] < 4:
+        st["step"] += 1
+        st["step_ts"] = now
+    elif st["step"] == 4:
+        if now - st["step_ts"] < NET_HEAL_REBOOT_ARM:
+            _net_heal_state_save(st)
+            return
+        if st.get("no_reboot"):
+            if now - int(st.get("soft_cycle_ts") or 0) < NET_HEAL_SOFT_CYCLE_GAP:
+                st["last_action"] = "soft ladder exhausted - waiting before next soft cycle (reboot disabled: no peer evidence)"
+                _net_heal_state_save(st)
+                return
+            st["soft_cycle_ts"] = now
+            st["step"] = 1
+            st["step_ts"] = now
+        else:
+            st["step"] = 5
+            st["step_ts"] = now
+    ok, desc = _net_heal_apply_step(st["step"], st, iface)
+    st["last_action"] = "step %d (%s): %s" % (st["step"], _NET_HEAL_STEP_LABELS.get(st["step"], "?"), desc)
+    record_metrics_event("warning" if ok or st["step"] < 5 else "info", "Net-heal: " + st["last_action"])
+    _net_heal_state_save(st)
 
 def net_heal_run_check():
     """One connectivity probe + (maybe) one recovery action."""
@@ -3336,22 +3453,82 @@ def net_heal_run_check():
             layer = "gateway-unreachable"
     if layer is None:
         # L2/L3 fine: is the internet actually reachable?
-        if not _net_heal_inet_ok():
-            if not st.get("inet_down_since"):
-                st["inet_down_since"] = now
-                st["last_action"] = "internet unreachable while wifi/gateway OK (router WAN?) - no rig action"
-                record_metrics_event("info", "Net-heal: " + st["last_action"])
+        if _net_heal_inet_ok():
+            if st.get("inet_down_since"):
+                record_metrics_event("info", "Net-heal: internet connectivity recovered")
+            st["inet_down_since"] = 0
+            if st.get("broken_since"):
+                record_metrics_event("info", "Net-heal: connectivity recovered after %d min" % ((now - st["broken_since"]) // 60))
+            _net_heal_reset_broken(st)
+            st["driver"] = _net_heal_detect_driver(iface)
+            _net_heal_state_save(st)
+            return
+        # Internet dead while wifi/gateway fine.
+        if not st.get("inet_down_since"):
+            st["inet_down_since"] = now
+            st["wan_down_noted"] = False
+            st["peer_check_ts"] = 0
+            st["last_action"] = "internet unreachable while wifi/gateway OK (router WAN?) - no rig action"
+            record_metrics_event("info", "Net-heal: " + st["last_action"])
             st["state"] = "inet_down"
             _net_heal_state_save(st)
             return
-        if st.get("inet_down_since"):
-            record_metrics_event("info", "Net-heal: internet connectivity recovered")
-        st["inet_down_since"] = 0
-        if st.get("broken_since"):
-            record_metrics_event("info", "Net-heal: connectivity recovered after %d min" % ((now - st["broken_since"]) // 60))
-        _net_heal_reset_broken(st)
-        st["driver"] = _net_heal_detect_driver(iface)
-        _net_heal_state_save(st)
+        if st.get("state") == "broken" and st.get("layer") == "self-uplink":
+            pass  # ladder already engaged - fall through to the shared driver
+        else:
+            if now - st["inet_down_since"] < NET_HEAL_SELF_INET_CONFIRM:
+                st["state"] = "inet_down"
+                _net_heal_state_save(st)
+                return
+            # Persistent. Ask the cluster who still sees the internet (a peer
+            # that hashes has a working internet path): a fresh peer 'ok'
+            # proves the router WAN is alive and OUR uplink is dead - engage
+            # the ladder; fresh peer 'inet_down' = WAN down for everyone -
+            # keep hands off the rig.
+            if now - int(st.get("peer_check_ts") or 0) < NET_HEAL_PEER_CHECK_GAP:
+                st["state"] = "inet_down"
+                _net_heal_state_save(st)
+                return
+            st["peer_check_ts"] = now
+            verdict, detail = _net_heal_peer_inet_verdict()
+            st["peer_verdict"] = {"ts": now, "result": verdict or "none", "detail": detail}
+            if verdict == "our_uplink":
+                st["layer"] = "self-uplink"
+                st["state"] = "broken"
+                st["broken_since"] = now
+                st["step"] = 0
+                st["step_ts"] = 0
+                st["no_reboot"] = False
+                st["soft_cycle_ts"] = 0
+                st["driver"] = _net_heal_detect_driver(iface)
+                st["last_action"] = "own uplink dead (peer %s sees internet OK) - recovery ladder engaged" % (detail.get("peer") or "?")
+                record_metrics_event("warning", "Net-heal: " + st["last_action"])
+            elif verdict == "wan_down":
+                st["state"] = "inet_down"
+                if not st.get("wan_down_noted"):
+                    st["wan_down_noted"] = True
+                    st["last_action"] = "internet down for peers too (%s) - router WAN, no rig action" % (detail.get("peer") or "?")
+                    record_metrics_event("info", "Net-heal: " + st["last_action"])
+                _net_heal_state_save(st)
+                return
+            else:
+                # No peer evidence (peers offline / panels down). After a long
+                # window suspect our own link, but NEVER reboot on a guess:
+                # soft steps only, paced soft cycles.
+                if now - st["inet_down_since"] < NET_HEAL_NOPEER_INET_WAIT:
+                    st["state"] = "inet_down"
+                    _net_heal_state_save(st)
+                    return
+                st["layer"] = "self-uplink"
+                st["state"] = "broken"
+                if not st.get("broken_since"):
+                    st["broken_since"] = now
+                st["no_reboot"] = True
+                st["soft_cycle_ts"] = now
+                st["driver"] = st.get("driver") or _net_heal_detect_driver(iface)
+                st["last_action"] = "own uplink suspected (no peer evidence for %d min) - soft ladder, reboot disabled" % (NET_HEAL_NOPEER_INET_WAIT // 60)
+                record_metrics_event("warning", "Net-heal: " + st["last_action"])
+        _net_heal_advance_ladder(st, iface, now)
         return
     # Broken at some layer.
     if st.get("inet_down_since"):
@@ -3362,36 +3539,11 @@ def net_heal_run_check():
         st["broken_since"] = now
         st["step"] = 0
         st["step_ts"] = 0
+        st["no_reboot"] = False
         st["state"] = "broken"
         st["last_action"] = "network problem detected: %s" % layer
         record_metrics_event("info", "Net-heal: " + st["last_action"])
-    # Before the first action: external causes (AP/router reboot) get a long
-    # grace window, local causes get one probe interval of observation.
-    # After that: give each recovery step NET_HEAL_STEP_GAP to take effect.
-    if st["step"] == 0:
-        wait = NET_HEAL_GRACE if layer in NET_HEAL_GRACE_LAYERS else NET_HEAL_STEP_GAP
-        if now - st["broken_since"] < wait:
-            _net_heal_state_save(st)
-            return
-    elif now - st["step_ts"] < NET_HEAL_STEP_GAP:
-        _net_heal_state_save(st)
-        return
-    # Advance the ladder. Steps 1-4 = soft actions; step 5 (reboot) arms only
-    # after a long observation window past the last soft step, and retries
-    # (paced) while deferred (quiet hours / rate limit).
-    if st["step"] < 4:
-        st["step"] += 1
-        st["step_ts"] = now
-    elif st["step"] == 4:
-        if now - st["step_ts"] < NET_HEAL_REBOOT_ARM:
-            _net_heal_state_save(st)
-            return
-        st["step"] = 5
-        st["step_ts"] = now
-    ok, desc = _net_heal_apply_step(st["step"], st, iface)
-    st["last_action"] = "step %d (%s): %s" % (st["step"], _NET_HEAL_STEP_LABELS.get(st["step"], "?"), desc)
-    record_metrics_event("warning" if ok or st["step"] < 5 else "info", "Net-heal: " + st["last_action"])
-    _net_heal_state_save(st)
+    _net_heal_advance_ladder(st, iface, now)
 
 def _net_heal_worker():
     time.sleep(NET_HEAL_BOOT_DELAY)
