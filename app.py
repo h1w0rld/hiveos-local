@@ -3832,16 +3832,27 @@ def _oc_state_save(st):
         except Exception as e:
             logging.error("Failed to save oc recovery state: %s", e)
 
+# Any hashrate below this counts as ZERO for every healer (zombie check,
+# net-heal fast path, oc-recovery pass criteria). The agent writes the miner's
+# 1-minute AVERAGE into /run/hive/khs: a zombie miner with every worker stuck
+# at 0.00 H/s still reports a phantom 0.00026 kH/s (RIG6 25 Oct: 0.26 H/s
+# average) which defeated every "khs > 0 = healthy" test for hours. Real rigs
+# mine at tens of TH/s (=1e8+ kH/s) - a 1 GH/s floor is safe by orders of
+# magnitude.
+MINING_KHS_FLOOR = 1000000.0
+
 def _oc_read_khs():
     """Current rig hashrate (kH/s) as reported by the hive agent. A stale
     file (>120s without an update, hive-watchdog semantics) reads as 0 -
-    a dead miner leaves the last value behind otherwise."""
+    a dead miner leaves the last value behind otherwise. Sub-floor values
+    (phantom averages of zombie workers) read as 0 as well."""
     try:
         age = time.time() - os.path.getmtime(OC_REC_KHS_PATH)
         if age > 120:
             return 0.0
         with open(OC_REC_KHS_PATH, 'r') as f:
-            return float((f.read() or "0").strip() or 0)
+            val = float((f.read() or "0").strip() or 0)
+        return val if val >= MINING_KHS_FLOOR else 0.0
     except Exception:
         return 0.0
 
