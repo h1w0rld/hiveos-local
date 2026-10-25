@@ -2359,6 +2359,9 @@ HEAL_MINER_GAP = 1800          # min seconds between miner start/restart heal ac
 HEAL_ZOMBIE_ZERO_SECONDS = 900 # miner alive but zero hashrate for this long = zombie -> restart
 HEAL_ZOMBIE_GAP = 3600         # min seconds between zombie restarts
 HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
+HEAL_WD_GAP = 3600             # min seconds between watchdog-intent re-asserts
+HEAL_ZOMBIE_ESCALATE_STREAK = 3  # zombie restarts without recovery -> try a reboot
+HEAL_ZOMBIE_ESCALATE_ZERO = 10800  # ...and the miner must have been dead at least this long
 HEAL_RIGID_ESCALATE = 180      # wait this long after an id fix before restarting the agent
 HEAL_RIGID_RESTART_GAP = 3600  # min seconds between hive agent restarts after an id fix
 HEAL_CHUNK = 1024 * 1024       # peer transfer chunk size (bytes)
@@ -2380,6 +2383,7 @@ def _heal_state_load():
             return _heal_state_cache["data"]
         st = {"last_check": 0, "last_action": "", "last_host_fix": 0, "last_miner_heal": 0,
               "last_transfer": "", "last_rigid_fix": 0, "last_rigid_restart": 0,
+              "last_wd_fix": 0, "zombie_streak": 0, "zombie_series_since": 0,
               "rig_id_ok": None}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
@@ -2883,6 +2887,8 @@ def _heal_check_zombie(st, report):
     now = int(time.time())
     if _oc_read_khs() > 0:
         st["zombie_zero_since"] = 0
+        st["zombie_streak"] = 0
+        st["zombie_series_since"] = 0
         return
     zs = int(st.get("zombie_zero_since") or 0)
     if not zs:
@@ -2890,6 +2896,28 @@ def _heal_check_zombie(st, report):
         return
     if now - zs < HEAL_ZOMBIE_ZERO_SECONDS:
         return
+    # Escalation: restarts that never produced hashrate mean the miner (or the
+    # network under it) needs a machine-level reset, not another restart.
+    # RIG1 25 Oct: the miner sat at zero for 11 hours and was "restarted" 10
+    # times without any effect - a single reboot cured it in 4 minutes.
+    streak = int(st.get("zombie_streak") or 0)
+    series = int(st.get("zombie_series_since") or 0)
+    if streak >= HEAL_ZOMBIE_ESCALATE_STREAK and series and now - series >= HEAL_ZOMBIE_ESCALATE_ZERO:
+        nst = _net_heal_state_load()
+        issued, desc = _net_heal_try_reboot(
+            nst, "miner zero for %d min despite %d restarts" % ((now - series) // 60, streak))
+        _net_heal_state_save(nst)
+        if issued:
+            st["last_zombie_heal"] = now
+            st["zombie_zero_since"] = 0
+            st["zombie_streak"] = 0
+            st["zombie_series_since"] = 0
+            st["last_action"] = "zombie miner unrecoverable - " + desc
+            report["fixed"].append(st["last_action"])
+            logging.warning("Self-heal: %s", st["last_action"])
+            record_metrics_event("danger", "Self-heal: " + st["last_action"])
+            return
+        report["notes"].append("zombie escalation deferred (%s)" % desc)
     if now - int(st.get("last_zombie_heal") or 0) < HEAL_ZOMBIE_GAP:
         report["notes"].append("zombie restart skipped (rate limit)")
         return
@@ -2900,6 +2928,9 @@ def _heal_check_zombie(st, report):
     run_command(MINER_RESTART_CMD)
     st["last_zombie_heal"] = now
     st["zombie_zero_since"] = 0
+    st["zombie_streak"] = streak + 1
+    if not series:
+        st["zombie_series_since"] = now
     st["last_action"] = "zombie miner restarted (alive but zero hashrate for %d min)" % ((now - zs) // 60)
     report["fixed"].append(st["last_action"])
     logging.warning("Self-heal: %s", st["last_action"])
@@ -2930,6 +2961,11 @@ def heal_run_check():
     except Exception as e:
         logging.error("Self-heal: zombie check failed: %s", e)
         report["notes"].append("zombie check failed: %s" % e)
+    try:
+        _heal_check_wd_intent(st, report)
+    except Exception as e:
+        logging.error("Self-heal: watchdog intent check failed: %s", e)
+        report["notes"].append("watchdog intent check failed: %s" % e)
     st["last_check"] = report["checked"]
     if report["fixed"]:
         st["last_action"] = "; ".join(report["fixed"])
@@ -3001,6 +3037,10 @@ NET_HEAL_STEP_GAP = 120             # give each recovery step this long to take 
 NET_HEAL_REBOOT_ARM = 600           # ladder exhausted -> still dead this long -> reboot eligible
 NET_HEAL_REBOOT_GAP = 6 * 3600      # min time between net-heal reboots
 NET_HEAL_REBOOT_QUIET = (23, 8)     # local hours: reboot deferred (loud fans at night)
+NET_HEAL_REBOOT_RETRY = 600         # deferred reboot (quiet hours/rate limit): retry pacing
+NET_HEAL_FLAP_WINDOW = 3600         # flap-storm accumulator window
+NET_HEAL_FLAP_THRESHOLD = 4         # short outages within the window -> storm -> ladder
+NET_HEAL_FLAP_MAX_LEN = 600         # an outage longer than this is an outage, not a flap
 NET_HEAL_TCP_PROBES = (("1.1.1.1", 443), ("8.8.8.8", 53), ("9.9.9.9", 53))
 NET_HEAL_INET_TIMEOUT = 4
 NET_HEAL_GRACE_LAYERS = ("not-associated", "gateway-unreachable", "no-default-route")
@@ -3025,7 +3065,8 @@ def _net_heal_state_load():
               "last_reboot": 0, "reboots": [], "inet_down_since": 0,
               "static": None, "static_try": 0,
               "no_reboot": False, "wan_down_noted": False,
-              "peer_check_ts": 0, "soft_cycle_ts": 0, "peer_verdict": {}}
+              "peer_check_ts": 0, "soft_cycle_ts": 0, "peer_verdict": {},
+              "flaps": [], "obs_problem": False}
         try:
             with open(NET_HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -3259,6 +3300,29 @@ def _net_heal_static_check(st, iface, now):
 _NET_HEAL_STEP_LABELS = {1: "dhcp renew", 2: "wpa restart", 3: "netplan apply",
                          4: "wifi driver reload", 5: "reboot (last resort)"}
 
+def _net_heal_try_reboot(st, reason):
+    """Quiet-hours + rate-limit gated sreboot, shared by the recovery ladder
+    (step 5) and the zombie-miner escalation. Returns (issued, description)."""
+    now = int(time.time())
+    hour = time.localtime().tm_hour
+    qs, qe = NET_HEAL_REBOOT_QUIET
+    in_quiet = (hour >= qs or hour < qe) if qs > qe else (qs <= hour < qe)
+    if in_quiet:
+        return False, "reboot deferred (quiet hours %02d:00-%02d:00)" % (qs, qe)
+    if now - int(st.get("last_reboot") or 0) < NET_HEAL_REBOOT_GAP:
+        return False, "reboot deferred (rate limit)"
+    run_command('nohup bash -c "sleep 1.5 && sudo /hive/sbin/sreboot" > /dev/null 2>&1 &')
+    st["last_reboot"] = now
+    reboots = list(st.get("reboots") or [])
+    reboots.append(now)
+    st["reboots"] = reboots[-20:]
+    # The reboot ends the episode: a stale flap accumulator must not
+    # re-trigger a storm right after the fresh boot.
+    st["flaps"] = []
+    st["obs_problem"] = False
+    return True, "reboot issued (%s)" % reason
+
+
 def _net_heal_apply_step(step, st, iface):
     """Run recovery step N. Returns (ok, description)."""
     if step == 1:
@@ -3288,20 +3352,9 @@ def _net_heal_apply_step(step, st, iface):
     if step == 5:
         if st.get("no_reboot"):
             return False, "reboot skipped (no peer evidence - soft mode)"
-        now = int(time.time())
-        hour = time.localtime().tm_hour
-        qs, qe = NET_HEAL_REBOOT_QUIET
-        in_quiet = (hour >= qs or hour < qe) if qs > qe else (qs <= hour < qe)
-        if in_quiet:
-            return False, "reboot deferred (quiet hours %02d:00-%02d:00)" % (qs, qe)
-        if now - int(st.get("last_reboot") or 0) < NET_HEAL_REBOOT_GAP:
-            return False, "reboot deferred (rate limit)"
-        run_command('nohup bash -c "sleep 1.5 && sudo /hive/sbin/sreboot" > /dev/null 2>&1 &')
-        st["last_reboot"] = now
-        reboots = st.get("reboots") or []
-        reboots.append(now)
-        st["reboots"] = reboots[-20:]
-        return True, "reboot issued (wifi dead > %d min)" % ((now - int(st.get("broken_since") or now)) // 60)
+        issued, desc = _net_heal_try_reboot(st, "wifi dead > %d min" %
+                                            ((int(time.time()) - int(st.get("broken_since") or time.time())) // 60))
+        return issued, desc
     return False, "unknown step"
 
 def _net_heal_reset_broken(st):
@@ -3404,11 +3457,92 @@ def _net_heal_advance_ladder(st, iface, now):
             st["step_ts"] = now
         else:
             st["step"] = 5
-            st["step_ts"] = now
+            # Backdate so the first reboot attempt is immediate; deferred
+            # retries (quiet hours / rate limit) then pace at RETRY, not at
+            # the per-minute poll (the old code re-emitted the deferral
+            # event every interval all night).
+            st["step_ts"] = now - NET_HEAL_REBOOT_RETRY
+    elif st["step"] == 5:
+        if now - st["step_ts"] < NET_HEAL_REBOOT_RETRY:
+            _net_heal_state_save(st)
+            return
     ok, desc = _net_heal_apply_step(st["step"], st, iface)
+    if st["step"] == 5 and not ok:
+        # Deferred (quiet hours / rate limit): pace the next attempt at RETRY
+        # instead of re-emitting the deferral every poll interval.
+        st["step_ts"] = now
     st["last_action"] = "step %d (%s): %s" % (st["step"], _NET_HEAL_STEP_LABELS.get(st["step"], "?"), desc)
     record_metrics_event("warning" if ok or st["step"] < 5 else "info", "Net-heal: " + st["last_action"])
     _net_heal_state_save(st)
+
+def _net_heal_record_flap(st, now):
+    """Append a short-outage recovery to the flap-storm accumulator.
+    Returns the number of episodes within the window."""
+    flaps = [int(t) for t in (st.get("flaps") or [])
+             if now - int(t) <= NET_HEAL_FLAP_WINDOW]
+    flaps.append(now)
+    st["flaps"] = flaps[-16:]
+    return len(flaps)
+
+
+def _net_heal_flap_ended(st, now, had_problem):
+    """True when a SHORT outage just ended: the previous check observed a
+    problem, this one is healthy, and the broken spell is flap-length (a long
+    outage ending in recovery is an outage, not a flap)."""
+    if not had_problem or not st.get("broken_since"):
+        return False
+    return (now - int(st["broken_since"])) < NET_HEAL_FLAP_MAX_LEN
+
+
+def _net_heal_storm_engage(st, iface, now, count):
+    st["layer"] = "flap-storm"
+    st["state"] = "broken"
+    st["broken_since"] = now
+    st["step"] = 0
+    st["step_ts"] = 0
+    st["no_reboot"] = False
+    st["driver"] = st.get("driver") or _net_heal_detect_driver(iface)
+    st["last_action"] = ("flap storm detected (%d short outages in %d min) - recovery ladder engaged"
+                         % (count, NET_HEAL_FLAP_WINDOW // 60))
+    record_metrics_event("warning", "Net-heal: " + st["last_action"])
+    _net_heal_state_save(st)
+
+
+def _net_heal_storm_healthy(st, iface, now, had_problem):
+    """Healthy observation while a flap storm is active: count the flap if one
+    just ended, keep the ladder armed (it advances on the next problem
+    observation - individual recoveries must not abort it, that is exactly how
+    the RIG1 25 Oct storm survived for 11 h), and end the storm only after a
+    full quiet window without episodes."""
+    st["obs_problem"] = False  # this check observed a healthy network
+    if _net_heal_flap_ended(st, now, had_problem):
+        _net_heal_record_flap(st, now)
+    flaps = [int(t) for t in (st.get("flaps") or []) if now - int(t) <= NET_HEAL_FLAP_WINDOW]
+    st["flaps"] = flaps
+    if len(flaps) < NET_HEAL_FLAP_THRESHOLD and (not flaps or now - max(flaps) >= NET_HEAL_FLAP_WINDOW):
+        st["obs_problem"] = False
+        record_metrics_event("info", "Net-heal: flap storm over - network stable for %d min"
+                             % (NET_HEAL_FLAP_WINDOW // 60))
+        _net_heal_reset_broken(st)
+        st["inet_down_since"] = 0
+        st["driver"] = _net_heal_detect_driver(iface)
+        _net_heal_state_save(st)
+        return
+    _net_heal_state_save(st)
+
+
+def _net_heal_recovery_gate(st, iface, now, had_problem):
+    """Healthy check outside a storm: count a just-ended short outage; when
+    the accumulator crosses the threshold, engage the flap-storm ladder
+    instead of resetting. Returns True when the storm was engaged."""
+    if not _net_heal_flap_ended(st, now, had_problem):
+        return False
+    count = _net_heal_record_flap(st, now)
+    if count < NET_HEAL_FLAP_THRESHOLD:
+        return False
+    _net_heal_storm_engage(st, iface, now, count)
+    return True
+
 
 def net_heal_run_check():
     """One connectivity probe + (maybe) one recovery action."""
@@ -3417,6 +3551,7 @@ def net_heal_run_check():
     st["last_check"] = now
     iface = _net_heal_wifi_iface()
     if not iface:
+        st["obs_problem"] = False
         if st.get("state") != "n/a":
             st["state"] = "n/a"
             st["last_action"] = "no wireless interface - worker idle"
@@ -3430,10 +3565,19 @@ def net_heal_run_check():
     if st.get("static"):
         _net_heal_static_check(st, iface, now)
         st = _net_heal_state_load()
+    had_problem = bool(st.get("obs_problem"))
+    storm_active = st.get("state") == "broken" and st.get("layer") == "flap-storm"
     # Miner hashing = pool reachable = network fine (fast path, also resets).
     if _oc_read_khs() > 0:
+        if storm_active:
+            _net_heal_storm_healthy(st, iface, now, had_problem)
+            return
+        if _net_heal_recovery_gate(st, iface, now, had_problem):
+            st["obs_problem"] = False
+            return
         if st.get("broken_since") or st.get("inet_down_since"):
             record_metrics_event("info", "Net-heal: connectivity recovered (miner hashing)")
+        st["obs_problem"] = False
         _net_heal_reset_broken(st)
         st["inet_down_since"] = 0
         st["driver"] = _net_heal_detect_driver(iface)
@@ -3451,14 +3595,27 @@ def net_heal_run_check():
             layer = "no-default-route"
         elif not _net_heal_ping(gw):
             layer = "gateway-unreachable"
+    st["obs_problem"] = layer is not None
+    if storm_active and layer is None:
+        # L2/L3 fine during a storm: the storm ends only when the internet is
+        # healthy too (an inet-dead observation still counts as a problem).
+        if _net_heal_inet_ok():
+            _net_heal_storm_healthy(st, iface, now, had_problem)
+        else:
+            _net_heal_advance_ladder(st, iface, now)
+        return
     if layer is None:
         # L2/L3 fine: is the internet actually reachable?
         if _net_heal_inet_ok():
+            if _net_heal_recovery_gate(st, iface, now, had_problem):
+                st["obs_problem"] = False
+                return
             if st.get("inet_down_since"):
                 record_metrics_event("info", "Net-heal: internet connectivity recovered")
             st["inet_down_since"] = 0
             if st.get("broken_since"):
                 record_metrics_event("info", "Net-heal: connectivity recovered after %d min" % ((now - st["broken_since"]) // 60))
+            st["obs_problem"] = False
             _net_heal_reset_broken(st)
             st["driver"] = _net_heal_detect_driver(iface)
             _net_heal_state_save(st)
@@ -3534,7 +3691,10 @@ def net_heal_run_check():
     if st.get("inet_down_since"):
         st["inet_down_since"] = 0
         record_metrics_event("info", "Net-heal: internet connectivity recovered")
-    if st.get("layer") != layer or not st.get("broken_since"):
+    if not storm_active and (st.get("layer") != layer or not st.get("broken_since")):
+        # During a flap storm the layer flaps between problem states every few
+        # checks - re-arming the ladder on each transition would restart it
+        # forever without ever reaching the reboot. Keep the storm ladder.
         st["layer"] = layer
         st["broken_since"] = now
         st["step"] = 0
@@ -6393,6 +6553,19 @@ def handle_watchdog():
         target = miner or algo
         logging.info(f"Watchdog settings updated by IP: {request.remote_addr} (Enabled={enabled}, {target}: {khs} kH/s)")
         run_command("sudo /hive/bin/wd restart")
+        # Persist the user's intent: hive/cloud rewrites can silently reset the
+        # WD maps (RIG1+RIG2 lost their armed thresholds this way between the
+        # 1.12.16 arming and 11 Oct; the local-guard snapshot then defended the
+        # wiped state). The self-heal worker re-asserts this intent, so the
+        # hashrate watchdog can not be disarmed behind our back again.
+        _wd_intent_save({
+            "enabled": enabled,
+            "miner": miner,
+            "miner_khs": khs if miner else None,
+            "algo": algo,
+            "algo_khs": khs if algo else None,
+            "ts": int(time.time())
+        })
         return jsonify({
             "success": True,
             "message": "Watchdog settings saved!",
@@ -6400,6 +6573,102 @@ def handle_watchdog():
         })
     else:
         return jsonify({"success": False, "message": "Failed to write watchdog settings to rig.conf."}), 500
+
+
+WD_INTENT_PATH = os.path.join(HIVE_CONFIG_DIR, "wd_intent.json")
+_wd_intent_lock = threading.Lock()
+_wd_intent_cache = {"loaded": False, "data": None}
+
+
+def _wd_intent_load():
+    with _wd_intent_lock:
+        if _wd_intent_cache["loaded"]:
+            return _wd_intent_cache["data"]
+        data = None
+        try:
+            with open(WD_INTENT_PATH, 'r') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                data = disk
+        except Exception:
+            pass
+        _wd_intent_cache["data"] = data
+        _wd_intent_cache["loaded"] = True
+        return data
+
+
+def _wd_intent_save(intent):
+    with _wd_intent_lock:
+        _wd_intent_cache["data"] = intent
+        _wd_intent_cache["loaded"] = True
+        try:
+            _atomic_write_file(WD_INTENT_PATH, json.dumps(intent, indent=2))
+        except Exception as e:
+            logging.error(f"Failed to save watchdog intent: {e}")
+
+
+def _wd_intent_drift(intent, rig_conf, maps):
+    """Keys where the live rig.conf watchdog state differs from the stored
+    intent. Only the intent's own miner/algo entries are enforced - foreign
+    map entries (other miners/algos) are left untouched."""
+    drift = []
+    if str(rig_conf.get("WD_ENABLED", "0")) != str(intent.get("enabled", "0")):
+        drift.append("WD_ENABLED")
+    miner = str(intent.get("miner") or "")
+    want = intent.get("miner_khs")
+    if miner and want is not None:
+        got = _to_float(maps["WD_MINHASHES"].get(miner))
+        if got is None or abs(got - float(want)) > 0.5:
+            drift.append("WD_MINHASHES[%s]" % miner)
+    algo = str(intent.get("algo") or "")
+    want = intent.get("algo_khs")
+    if algo and want is not None:
+        got = _to_float(maps["WD_MINHASHES_ALGO"].get(algo))
+        if got is None or abs(got - float(want)) > 0.5:
+            drift.append("WD_MINHASHES_ALGO[%s]" % algo)
+    return drift
+
+
+def _heal_check_wd_intent(st, report):
+    """Self-heal #5: the user's watchdog arming is enforced against config
+    erosion. hive/cloud rewrites of rig.conf can reset WD_ENABLED/WD_MINHASHES
+    (observed: both RIG1 and RIG2 sat 'enabled' with empty threshold maps for
+    weeks - the hashrate branch of hive wd was silently dead). The intent is
+    written by POST /api/watchdog; here it is re-applied (write goes through
+    write_shell_config, so the local-guard snapshot is refreshed too and
+    starts defending the armed values instead of the wiped ones)."""
+    intent = _wd_intent_load()
+    if not intent or str(intent.get("enabled", "0")) != "1":
+        return
+    rig_conf = parse_shell_config(RIG_CONF_PATH)
+    maps = _wd_threshold_maps(rig_conf)
+    drift = _wd_intent_drift(intent, rig_conf, maps)
+    if not drift:
+        return
+    now = int(time.time())
+    if now - int(st.get("last_wd_fix") or 0) < HEAL_WD_GAP:
+        report["notes"].append("watchdog drift fix skipped (rate limit): " + ", ".join(drift))
+        return
+    st["last_wd_fix"] = now
+    miner = str(intent.get("miner") or "")
+    algo = str(intent.get("algo") or "")
+    rig_conf["WD_ENABLED"] = "1"
+    want = intent.get("miner_khs")
+    if miner and want is not None:
+        maps["WD_MINHASHES"][miner] = int(float(want))
+        rig_conf["WD_MINHASHES"] = json.dumps(maps["WD_MINHASHES"], separators=(",", ":"))
+    want = intent.get("algo_khs")
+    if algo and want is not None:
+        maps["WD_MINHASHES_ALGO"][algo] = int(float(want))
+        rig_conf["WD_MINHASHES_ALGO"] = json.dumps(maps["WD_MINHASHES_ALGO"], separators=(",", ":"))
+    if write_shell_config(RIG_CONF_PATH, rig_conf):
+        run_command("sudo /hive/bin/wd restart")
+        st["last_action"] = "watchdog threshold re-asserted (%s)" % ", ".join(drift)
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: " + st["last_action"])
+    else:
+        report["notes"].append("watchdog threshold re-assert failed (write error)")
 
 # 3b. Hardware watchdog (iTCO_wdt via systemd RuntimeWatchdogSec)
 #
