@@ -330,10 +330,11 @@ def journal_thread(w, state, stop):
 
 
 def filelog_thread(w, state, stop):
-    """Follow plain log files (new ones from byte 0, pre-existing ones from the tail)."""
+    """Follow plain log files. Files that already exist when the recorder starts
+    are read from their last 32 KB (old netbird logs are tens of MB); files that
+    appear later (miner log after a restart, rotated logs) are read from byte 0."""
     files = {}   # path -> {ino, pos, rl}
-    fresh = not state.get("files_started")
-    state["files_started"] = True
+    first_scan = True
     while not stop.is_set():
         paths = list(FILE_LOGS)
         for g in FILE_LOG_GLOBS:
@@ -345,10 +346,9 @@ def filelog_thread(w, state, stop):
                 continue
             info = files.get(p)
             if info is None:
-                name = "FILE:" + os.path.basename(p)
-                start = 0 if fresh else max(0, st.st_size - 16384)
-                info = files[p] = {"ino": st.st_ino, "pos": start, "rl": RateLimiter(w, name[:8] if len(name) > 8 else name)}
-                info["rl"].src = name
+                start = max(0, st.st_size - 32768) if first_scan else 0
+                info = files[p] = {"ino": st.st_ino, "pos": start,
+                                   "rl": RateLimiter(w, "FILE:" + os.path.basename(p))}
             if st.st_ino != info["ino"] or st.st_size < info["pos"]:
                 info["ino"], info["pos"] = st.st_ino, 0
             if st.st_size > info["pos"]:
@@ -358,7 +358,6 @@ def filelog_thread(w, state, stop):
                         chunk = f.read(2 * 1024 * 1024)
                 except Exception:
                     continue
-                # keep only complete lines
                 cut = chunk.rfind(b"\n")
                 if cut < 0:
                     if len(chunk) < 65536:
@@ -368,7 +367,7 @@ def filelog_thread(w, state, stop):
                 for line in chunk[:cut + 1].decode("utf-8", "replace").splitlines():
                     if line.strip():
                         info["rl"].emit(line)
-        fresh = True   # files that show up later in this boot are read from the start
+        first_scan = False
         stop.wait(1.0)
 
 
