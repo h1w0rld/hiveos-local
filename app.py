@@ -3754,6 +3754,132 @@ def api_net_heal_static():
     _net_heal_state_save(st)
     return jsonify({"success": True, "static": st["static"]})
 
+# ---------------- Blackbox: persistent flight recorder ----------------
+# /var/log and journald are tmpfs on these rigs: every reboot erased the
+# evidence of why a rig froze / lost power / lost its network (RIG9 21 Oct,
+# RIG1 23+25 Oct, RIG5 26 Oct). blackbox/hive_blackbox.py runs as a systemd
+# service and streams kernel log, journal, hive/miner/panel logs and a 5 s
+# telemetry heartbeat into /var/lib/hive-blackbox/boots/<n>_<time>/ on the real
+# disk (fsync every second). The panel installs/updates it on every start and
+# exposes status / post-mortem report / purge. Everything lives under ONE
+# directory - purge removes it all.
+
+BLACKBOX_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blackbox", "hive_blackbox.py")
+BLACKBOX_BIN_DIR = "/usr/local/lib/hive-blackbox"
+BLACKBOX_BIN = BLACKBOX_BIN_DIR + "/hive_blackbox.py"
+BLACKBOX_UNIT = "/etc/systemd/system/hive-blackbox.service"
+BLACKBOX_DATA = "/var/lib/hive-blackbox"
+BLACKBOX_UNIT_TEXT = """[Unit]
+Description=Hive blackbox flight recorder (persistent logs for post-mortems)
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %s run
+Restart=always
+RestartSec=5
+Nice=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+""" % BLACKBOX_BIN
+
+def _file_sha(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+def blackbox_ensure_installed():
+    """Install / update the blackbox service. Returns a short status string."""
+    if not os.path.exists(BLACKBOX_SRC):
+        return "source missing"
+    changed = False
+    if _file_sha(BLACKBOX_SRC) != _file_sha(BLACKBOX_BIN):
+        os.makedirs(BLACKBOX_BIN_DIR, exist_ok=True)
+        with open(BLACKBOX_SRC, "rb") as f:
+            data = f.read()
+        tmp = BLACKBOX_BIN + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, BLACKBOX_BIN)
+        changed = True
+    try:
+        with open(BLACKBOX_UNIT, "r") as f:
+            unit_ok = f.read() == BLACKBOX_UNIT_TEXT
+    except Exception:
+        unit_ok = False
+    if not unit_ok:
+        _atomic_write_file(BLACKBOX_UNIT, BLACKBOX_UNIT_TEXT, 0o644)
+        run_command("systemctl daemon-reload")
+        run_command("systemctl enable hive-blackbox")
+        changed = True
+    active, _e, _c = run_command("systemctl is-active hive-blackbox")
+    if changed or (active or "").strip() != "active":
+        run_command("systemctl restart hive-blackbox")
+        return "installed/updated"
+    return "ok"
+
+def _blackbox_worker():
+    time.sleep(20)
+    while True:
+        try:
+            res = blackbox_ensure_installed()
+            if res != "ok":
+                logging.info("Blackbox recorder: %s", res)
+        except Exception as e:
+            logging.error("Blackbox install check failed: %s", e)
+        time.sleep(3600)
+
+def start_blackbox_worker():
+    threading.Thread(target=_blackbox_worker, daemon=True, name="blackbox-install").start()
+    logging.info("Blackbox installer started (persistent flight recorder)")
+
+def _blackbox_cli(args):
+    return run_command("timeout 90 python3 %s %s" % (shlex.quote(BLACKBOX_BIN), args))
+
+@app.route('/api/blackbox/status')
+def api_blackbox_status():
+    out, _err, rc = _blackbox_cli("status")
+    try:
+        st = json.loads(out)
+    except Exception:
+        st = {}
+    active, _e, _c = run_command("systemctl is-active hive-blackbox")
+    st["service"] = (active or "").strip() or "unknown"
+    return jsonify({"success": True, "blackbox": st})
+
+@app.route('/api/blackbox/report')
+def api_blackbox_report():
+    boot = str(request.args.get("boot", "prev"))
+    if not re.match(r'^(prev|previous|latest|\d{1,5})$', boot):
+        return jsonify({"success": False, "message": "Bad boot reference"}), 400
+    try:
+        minutes = max(1, min(120, int(request.args.get("minutes", 15))))
+    except ValueError:
+        minutes = 15
+    out, err, rc = _blackbox_cli("report --boot %s --minutes %d --json" % (boot, minutes))
+    try:
+        rep = json.loads(out)
+    except Exception:
+        return jsonify({"success": False, "message": (err or out or "report failed")[:300]}), 500
+    return jsonify({"success": True, "report": rep})
+
+@app.route('/api/blackbox/purge', methods=['POST'])
+def api_blackbox_purge():
+    data = request.get_json(silent=True) or {}
+    out, err, rc = _blackbox_cli("purge" + (" --all" if data.get("all") else ""))
+    logging.warning("Blackbox purge (%s) by IP %s: %s", "all" if data.get("all") else "old boots",
+                    request.remote_addr, (out or "").strip())
+    return jsonify({"success": rc == 0, "message": (out or err or "").strip()})
+
 # ---------------- OC recovery: Xid death-loop self-healing ----------------
 # A GPU that starts throwing fatal driver faults (Xid 13/31) under mining load
 # kills the whole miner run: SRBMiner stops every worker ("Pearl backend error
@@ -9932,6 +10058,9 @@ if __name__ == '__main__':
 
     # Start the network self-heal worker (wifi/link recovery, reboot last resort)
     start_net_heal_worker()
+
+    # Install/update the persistent flight recorder (survives reboots, one folder)
+    start_blackbox_worker()
 
     local_ip = get_local_ip()
     port = 1337
