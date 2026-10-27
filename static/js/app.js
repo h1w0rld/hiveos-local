@@ -452,10 +452,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (haDropdownEl) {
         haDropdownEl.addEventListener('show.bs.dropdown', () => refreshHaMenu(false));
         haDropdownEl.addEventListener('shown.bs.dropdown', alignHaColumns);
-        const haInfoIcon = document.getElementById('haInfoIcon');
-        if (haInfoIcon && window.bootstrap) {
-            new bootstrap.Tooltip(haInfoIcon, { customClass: 'guard-tip', html: true });
-        }
         const haSettingsBtn = document.getElementById('haSettingsBtn');
         if (haSettingsBtn) {
             haSettingsBtn.addEventListener('click', (e) => { e.stopPropagation(); openHaConnectModal(); });
@@ -1613,53 +1609,42 @@ function haPowerStatusText(rig, rec) {
 }
 
 function renderHaMenu() {
-    const conn = document.getElementById('haConnStatus');
-    const list = document.getElementById('haRigList');
-    const fanSec = document.getElementById('haFanSection');
     const icon = document.getElementById('haIcon');
+    const list = document.getElementById('haRigList');
     if (!haData) {
-        conn.innerHTML = '<span class="text-muted">no status yet — retrying…</span>';
         icon.className = 'bi bi-house-gear text-muted';
-        fanSec.classList.add('d-none');
         return;
     }
-    if (!haData.configured) {
-        conn.innerHTML = '<span class="text-warning"><i class="bi bi-plug me-1"></i>Not connected — open Settings and add the HA URL + token</span>';
-        icon.className = 'bi bi-house-gear text-muted';
-        list.innerHTML = '<div class="small text-muted px-3 py-2">Not configured yet: open Settings (gear) to add the HA connection and mark every rig with its room (К / Д / —) and smart plug.</div>';
-        fanSec.classList.add('d-none');
-        renderHaRigsTable();
-        return;
-    }
-    if (haData.connected) {
-        icon.className = 'bi bi-house-gear text-success';
-        conn.innerHTML = '<span class="text-success"><i class="bi bi-plug-fill me-1"></i>Connected ' + escapeHtml(haData.url || '') + (haData.enabled ? '' : ' <span class="text-warning">· workers disabled</span>') + '</span>';
-    } else {
-        icon.className = 'bi bi-house-gear text-warning';
-        conn.innerHTML = '<span class="text-danger"><i class="bi bi-plug me-1"></i>Unreachable: ' + escapeHtml(haData.connect_err || 'no connection') + '</span>';
-    }
+    icon.className = 'bi bi-house-gear' +
+        (!haData.configured ? ' text-muted' : (haData.connected ? ' text-success' : ' text-warning'));
 
-    // Per-rig rows in the same visual language as the Config Source menu:
-    // name | status badges | auto-powercycle switch (вкл/выкл)
+    // Rows identical to the Config Source menu: name | badges | вкл/выкл switch
     const locChip = {
         boiler: '<span class="badge bg-warning bg-opacity-25 border border-warning text-warning" title="К — boiler room">К</span>',
         house: '<span class="badge bg-info bg-opacity-25 border border-info text-info" title="Д — house">Д</span>',
         none: '<span class="badge bg-secondary bg-opacity-25 border border-secondary text-secondary-emphasis" title="— — lived-in house, never touched">—</span>'
     };
     const rigs = (haData.rigs || []).slice().sort(naturalRigCompare);
-    let rowsHtml = '';
-    for (const rig of rigs) {
-        const rec = (haData.power || {})[rig.id] || {};
+    if (!rigs.length) {
+        list.innerHTML = '<div class="text-muted small px-3 py-2">No rigs in the cluster yet.</div>';
+        renderHaRigsTable();
+        return;
+    }
+    if (!haData.configured) {
+        list.innerHTML = '<div class="text-muted small px-3 py-2">Not configured — open <i class="bi bi-gear"></i> settings.</div>';
+        renderHaRigsTable();
+        return;
+    }
+    list.innerHTML = rigs.map(rig => {
         const on = rig.ha_enabled !== false;
         const swDis = !!rig.is_self;
-        const canCycle = !rig.is_self && rig.location && rig.location !== 'none' && rig.ha_plug;
-        let badge = rig.is_self
+        const badge = rig.is_self
             ? '<span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>'
             : (rig.online
                 ? '<span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
-                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
-        if (locChip[rig.location || '']) badge += ' ' + locChip[rig.location];
-        rowsHtml += '<div class="ha-rig-row" data-rig="' + escapeHtml(rig.id) + '">' +
+                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>') +
+              (locChip[rig.location || ''] ? ' ' + locChip[rig.location] : '');
+        return '<div class="guard-rig-row" data-rig="' + escapeHtml(rig.id) + '">' +
             '<div class="guard-rig-name">' + escapeHtml(rig.name || rig.id) + '</div>' +
             '<div class="guard-rig-badges">' + badge + '</div>' +
             '<div class="guard-switch-wrap">' +
@@ -1670,44 +1655,11 @@ function renderHaMenu() {
                     ' onchange="haRigToggle(\'' + rig.id + '\', this)"' + (swDis ? ' disabled' : '') + '>' +
                 '</div>' +
                 '<i class="bi bi-lightning-charge guard-side-icon' + (on ? ' text-success' : ' text-muted') + '" title="Auto powercycle ON"></i>' +
-                (canCycle ? '<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Manual plug powercycle (OFF 30 s -> ON)" onclick="haPowercycleManual(\'' + rig.id + '\')"><i class="bi bi-power"></i></button>' : '') +
             '</div>' +
-            (function () {
-                const st = haPowerStatusText(rig, rec);
-                return st ? '<div class="ha-rig-status mt-1">' +
-                  '<i class="bi bi-lightning-charge me-1"></i>' + st + '</div>' : '';
-            })() +
         '</div>';
-    }
-    list.innerHTML = rowsHtml;
+    }).join('');
     alignHaColumns();
     renderHaRigsTable();
-
-    // Fan assist card (needs the master plug entity)
-    const fw = haData.fan_worker || {};
-    if (haData.fan_power_entity) {
-        fanSec.classList.remove('d-none');
-        const room = (fw.room_temp !== undefined && fw.room_temp !== null) ? fw.room_temp.toFixed(1) + ' °C' : (fw.room_err ? fw.room_err : 'n/a');
-        const outT = (fw.outdoor_temp !== undefined && fw.outdoor_temp !== null) ? fw.outdoor_temp.toFixed(1) + ' °C' : (fw.out_err ? fw.out_err : 'n/a');
-        const maxT = (fw.max_temp !== undefined && fw.max_temp !== null) ? fw.max_temp.toFixed(1) + ' °C' : 'n/a';
-        const avgT = (fw.avg_temp !== undefined && fw.avg_temp !== null) ? fw.avg_temp.toFixed(1) + ' °C' : 'n/a';
-        fanSec.innerHTML =
-            '<div class="d-flex flex-wrap gap-3 align-items-center">' +
-              '<div><span class="text-muted small">Fan (' + escapeHtml(haData.fan_power_entity) + ')</span><br>' +
-                '<span class="fw-semibold">' + escapeHtml(haData.fan_on_channel ? 'assist channel: ' + haData.fan_on_channel : 'speed via HA automations') + '</span></div>' +
-              '<div><span class="text-muted small">Max card</span><br><span class="fw-semibold">' + maxT + '</span></div>' +
-              '<div><span class="text-muted small">К-avg</span><br><span class="fw-semibold">' + avgT + '</span></div>' +
-              '<div><span class="text-muted small">Room / Out</span><br><span class="fw-semibold">' + room + ' / ' + outT + '</span></div>' +
-            '</div>' +
-            (fw.last_reason ? '<div class="ha-rig-status mt-1">' + escapeHtml(fw.last_reason || '') + '</div>' : '') +
-            '<div class="d-flex gap-2 mt-2">' +
-              '<button class="btn btn-sm btn-outline-success" onclick="haFanManual(\'on\')" title="Turn the fan plug (and assist channel) ON - freeze protection may refuse"><i class="bi bi-fan me-1"></i>Fan ON</button>' +
-              '<button class="btn btn-sm btn-outline-danger" onclick="haFanManual(\'off\')" title="Turn the fan plug OFF"><i class="bi bi-fan me-1"></i>Fan OFF</button>' +
-            '</div>';
-    } else {
-        fanSec.classList.remove('d-none');
-        fanSec.innerHTML = '<span class="text-muted small"><i class="bi bi-fan me-1"></i>Fan assist not configured — pick the fan plugs in Connect.</span>';
-    }
 }
 
 async function loadHaEntities(showModalStatus) {
@@ -1753,17 +1705,19 @@ function renderHaRigsTable() {
     const loc = '';
     host.innerHTML = rigs.map(r => {
         const loc = r.location || '';
+        const canCycle = !r.is_self && loc && loc !== 'none' && r.ha_plug;
         return '<div class="ha-rig-row d-flex align-items-center gap-2" data-rig="' + escapeHtml(r.id) + '">' +
             '<div class="ha-settings-name text-truncate" title="' + escapeHtml(r.name || r.id) + '">' +
                 escapeHtml(r.name || r.id) + (r.is_self ? ' <span class="badge bg-primary bg-opacity-25 text-primary border border-primary fs-10px">THIS RIG</span>' : '') +
             '</div>' +
-            '<select class="form-select form-select-sm ha-loc-select" onchange="saveHaRig(\'' + r.id + '\', this)">' +
+            '<select class="form-select form-select-sm ha-loc-select" onchange="saveHaRig(\'' + r.id + '\', this)" title="Room: К boiler / Д house / — lived-in (never power cycled)">' +
                 [ '', 'boiler', 'house', 'none' ].map(v =>
                     '<option value="' + v + '"' + (loc === v ? ' selected' : '') + '>' + haLocationLabel(v) + '</option>').join('') +
             '</select>' +
             '<input type="text" class="form-control form-control-sm ha-plug-input" list="haPlugList" ' +
                 'placeholder="switch.plug_rig" title="Smart plug entity controlling this rig\'s power" ' +
                 'value="' + escapeHtml(r.ha_plug || '') + '" onchange="saveHaRig(\'' + r.id + '\', this)">' +
+            (canCycle ? '<button class="btn btn-sm btn-outline-danger py-0 px-2 ha-cycle-btn" title="Manual plug powercycle (OFF 30 s -> ON)" onclick="haPowercycleManual(\'' + r.id + '\')"><i class="bi bi-power"></i></button>' : '<i class="ha-cycle-spacer"></i>') +
         '</div>';
     }).join('');
 }

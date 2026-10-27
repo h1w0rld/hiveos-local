@@ -1979,26 +1979,6 @@ hr {
     border-bottom: 1px solid var(--border-color);
 }
 
-.ha-rig-list {
-    max-height: 46vh;
-    overflow-y: auto;
-    padding: 0.25rem 0;
-}
-
-.ha-rig-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    padding: 0.45rem 1rem;
-}
-.ha-rig-row:hover {
-    background: rgba(255, 255, 255, 0.04);
-}
-.ha-rig-row:last-child { border-bottom: none; }
-.ha-rig-row .ha-rig-status {
-    flex: 0 0 100%;
-}
-
 /* Gear in the menu head opens the HA settings modal */
 .ha-settings-icon {
     cursor: pointer;
@@ -2028,39 +2008,32 @@ hr {
     flex: 0 0 118px;
 }
 
-.ha-plug-input {
-    flex: 0 0 200px;
-    background: rgba(255, 255, 255, 0.04);
-}
-
 /* Settings modal: per-rig room mark + plug row */
+.ha-rig-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+}
 .ha-rig-settings .ha-rig-row {
     padding: 0.35rem 0;
 }
 .ha-settings-name {
-    flex: 0 0 150px;
+    flex: 0 0 112px;
     min-width: 0;
     font-size: 0.88rem;
     font-weight: 600;
 }
-
-.ha-rig-status {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+.ha-plug-input {
+    flex: 1 1 120px;
+    min-width: 0;
+    background: rgba(255, 255, 255, 0.04);
 }
-
-.ha-fan-section {
-    padding: 0.6rem 1rem;
-    border-top: 1px solid var(--border-color);
-    font-size: 0.82rem;
+.ha-cycle-btn {
+    flex: 0 0 auto;
+    line-height: 1.1;
 }
-
-.ha-menu-actions {
-    padding: 0.6rem 1rem 0.75rem;
-    border-top: 1px solid var(--border-color);
+.ha-cycle-spacer {
+    flex: 0 0 29px;   /* keeps the plug inputs of rows without the button aligned */
 }
 
 .guard-info-icon {
