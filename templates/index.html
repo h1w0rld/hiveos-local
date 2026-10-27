@@ -82,6 +82,38 @@
                         </div>
                     </div>
                 </div>
+                <!-- Home Assistant integration (per-rig room mark + smart plugs) -->
+                <div class="dropdown" id="haDropdown">
+                    <button class="btn btn-sm btn-dark-card border border-secondary-subtle d-flex align-items-center gap-1 py-2 px-3" id="haBtn" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
+                            title="Home Assistant: smart-plug powercycle for К/Д rigs + boiler room fan assist">
+                        <i class="bi bi-house-gear" id="haIcon"></i>
+                        <span class="fw-semibold">Home Assistant</span>
+                        <i class="bi bi-chevron-down small"></i>
+                    </button>
+                    <div class="dropdown-menu ha-dropdown shadow" id="haMenu">
+                        <div class="ha-dropdown-head">
+                            <h6 class="mb-0 fw-bold d-flex align-items-center gap-1">
+                                <i class="bi bi-house-gear me-1 text-primary"></i>Home Assistant
+                                <i class="bi bi-question-circle guard-info-icon" id="haInfoIcon" tabindex="0"
+                                   data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true"
+                                   title="Automated recovery through Home Assistant.&lt;br&gt;&lt;b&gt;Powercycle:&lt;/b&gt; rigs marked К (boiler) or Д (house) that stay unreachable &ge;5 min get their smart plug turned OFF for 30 s and back ON. Rigs marked &laquo;&mdash;&raquo; (lived-in house) are never touched.&lt;br&gt;&lt;b&gt;Fan assist:&lt;/b&gt; any К-rig card &gt;62&nbsp;&deg;C turns the boiler room fan on, К-rig average &lt;57&nbsp;&deg;C turns it off. Freeze protection outranks cooling: outdoor &lt;0 or room &lt;+5 (or both sensors dead) = the fan is never started.&lt;br&gt;&lt;b&gt;Share&lt;/b&gt; sends the HA connection to all cluster panels."></i>
+                            </h6>
+                            <div class="small mt-1" id="haConnStatus">&nbsp;</div>
+                        </div>
+                        <div id="haRigList" class="ha-rig-list">
+                            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div></div>
+                        </div>
+                        <div id="haFanSection" class="ha-fan-section d-none"></div>
+                        <div class="ha-menu-actions d-flex gap-2">
+                            <button type="button" class="btn btn-sm btn-outline-primary flex-fill" id="haConnectBtn" title="Configure the Home Assistant connection (URL, token, entities)">
+                                <i class="bi bi-plug me-1"></i>Connect
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-info flex-fill" id="haShareBtn" title="Push this HA connection (incl. token) to all cluster rigs">
+                                <i class="bi bi-arrow-repeat me-1"></i>Share
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="d-flex flex-wrap gap-2 align-items-center mt-2 mt-md-0">
@@ -2333,6 +2365,76 @@
                 <div class="modal-footer">
                     <span class="small text-muted me-auto">Closing does not stop the sync.</span>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Home Assistant connection modal -->
+    <div class="modal fade" id="haConnectModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold">
+                        <i class="bi bi-house-gear text-primary me-2"></i>Home Assistant connection
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-5">
+                            <label class="form-label small fw-semibold mb-1" for="haUrlInput">HA URL</label>
+                            <input type="text" id="haUrlInput" class="form-control form-control-sm bg-dark-input" placeholder="http://100.127.0.1:8123" autocomplete="off">
+                        </div>
+                        <div class="col-md-7">
+                            <label class="form-label small fw-semibold mb-1" for="haTokenInput">Long-lived access token
+                                <i class="bi bi-key-fill text-warning ms-1" title="HA: lower-left user (avatar) &rarr; Security &rarr; Long-Lived Access Tokens &rarr; Create Token"></i>
+                            </label>
+                            <input type="password" id="haTokenInput" class="form-control form-control-sm bg-dark-input font-monospace" placeholder="empty = keep saved token" autocomplete="off">
+                        </div>
+                        <div class="col-md-12 d-flex align-items-center gap-3">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="haEnabledSwitch" checked>
+                                <label class="form-check-label small" for="haEnabledSwitch">Workers enabled (powercycle + fan assist)</label>
+                            </div>
+                            <button type="button" id="haTestBtn" class="btn btn-sm btn-outline-info ms-auto">Test</button>
+                        </div>
+                        <div class="col-md-12">
+                            <div id="haTestResult" class="small d-none"></div>
+                        </div>
+                        <div class="col-md-12"><hr class="hr-row-gap border-secondary-subtle my-1"></div>
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold mb-1" for="haFanPowerSelect">Fan master plug (ON/OFF)</label>
+                            <select id="haFanPowerSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold mb-1" for="haFanChannelSelect">Fan channel for assist speed
+                                <i class="bi bi-info-circle text-secondary" title="Optional: turned on together with the master plug (assist speed), off with it. Leave empty if HA automations manage the speed themselves."></i>
+                            </label>
+                            <select id="haFanChannelSelect" class="form-select form-select-sm bg-dark-input"><option value="">— none (automation picks speed) —</option></select>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold mb-1" for="haBoilerSensorSelect">Boiler room temp sensor</label>
+                            <select id="haBoilerSensorSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold mb-1" for="haOutdoorSensorSelect">Outdoor temp sensor
+                                <i class="bi bi-info-circle text-secondary" title="Freeze fallback when the room sensor is dead, exactly like your HA automations: negative outdoor temperature = the fan must not run"></i>
+                            </label>
+                            <select id="haOutdoorSensorSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
+                        </div>
+                        <div class="col-md-12">
+                            <div class="d-flex align-items-center gap-2">
+                                <button type="button" id="haLoadEntitiesBtn" class="btn btn-sm btn-outline-primary"><i class="bi bi-list-ul me-1"></i>Load entities</button>
+                                <span class="small text-muted" id="haEntitiesStatus"></span>
+                            </div>
+                            <div class="form-text small mt-2 mb-0">Note: enable at least one temperature sensor (room or outdoor) — with both sensors dark the worker never starts the fan (freeze fail-safe).</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <span class="small text-muted me-auto">Token is stored 0600 on this rig and is spread only via Share.</span>
+                    <button type="button" id="haSaveConfigBtn" class="btn btn-primary fw-semibold">Save</button>
                 </div>
             </div>
         </div>

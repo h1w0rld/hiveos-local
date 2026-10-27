@@ -21,9 +21,10 @@ import logging
 import threading
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timezone
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
+import urllib.error
 import urllib.request
 from flask import Flask, jsonify, request, render_template, session, Response, has_request_context
 
@@ -133,6 +134,8 @@ def make_self_rig_entry(state):
             "id": state["self_id"],
             "name": snap.get("name") or rig_conf.get("RIG_ID", "") or socket.gethostname(),
             "host_label": snap.get("host_label") or get_local_ip(),
+            "location": snap.get("location") or "",
+            "ha_plug": snap.get("ha_plug") or "",
             "is_self": True,
             "password": str(app.config.get('ACCESS_PASSWORD', '')),
             "accesses": [clean_access_entry(a) for a in snap.get("accesses", [])
@@ -144,6 +147,8 @@ def make_self_rig_entry(state):
         "id": state["self_id"],
         "name": rig_conf.get("RIG_ID", "") or socket.gethostname(),
         "host_label": get_local_ip(),
+        "location": "",
+        "ha_plug": "",
         "is_self": True,
         "password": str(app.config.get('ACCESS_PASSWORD', '')),
         "accesses": [],
@@ -198,6 +203,8 @@ def _self_entry_snapshot_payload(entry):
     return {
         "name": str(entry.get("name", "")),
         "host_label": str(entry.get("host_label", "")),
+        "location": str(entry.get("location", "") or ""),
+        "ha_plug": str(entry.get("ha_plug", "") or ""),
         "accesses": [clean_access_entry(a) for a in entry.get("accesses", [])
                      if isinstance(a, dict)],
     }
@@ -4916,7 +4923,10 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 
 # ---------------- Cluster (multi-rig) state management ----------------
 
-RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at"]
+RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at",
+                    # Home Assistant integration: room mark (boiler/house/none) + smart
+                    # plug entity mapped to this rig (synced with the cluster state)
+                    "location", "ha_plug"]
 ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
                        "jump_id", "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
 
@@ -9307,6 +9317,745 @@ def api_metrics_export():
     return Response(csv_data, mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=metrics_{date_str}_{days}d.csv"})
 
+# ---------------- Home Assistant integration --------------------------------
+# Panel <-> Home Assistant bridge for two assisted operations:
+#   (1) Smart-plug power cycling: a rig marked as "boiler room" (К) or "house"
+#       (Д) that is COMPLETELY unreachable (no SSH route answers) for several
+#       minutes gets its smart plug toggled off/on through the HA REST API.
+#       The 13h POST-hang case (RIG2, 27 Oct) and the 11h "alive but dark"
+#       case (RIG1, 25 Oct) are exactly the states no in-OS mechanism can
+#       get out of - the plug is the external actor.
+#   (2) Fan assist in the boiler room: GPU temps of the rigs marked К drive
+#       one fan (a smart plug + optional channel switches that pick the
+#       speed). Target band 57-62 °C: any card > 62 -> fan on; average < 57
+#       -> fan off. The freeze protection ALWAYS outranks cooling: outdoor
+#       below 0 or the room sensor below +5 (or a dead room sensor falling
+#       back to a negative outdoor reading, or both sensors dark) means
+#       "no fan, ever" while it holds - a frozen pipe costs the building,
+#       a hot GPU costs nothing (rigs have their own autofan/critics).
+#
+# Connection data lives on EVERY panel (/hive-config/ha_config.json) and is
+# spread with the Share button (SSH proxy). Per-rig marks and plug entities
+# are fields of the cluster state and sync with it. Decisions are anchored
+# on the plug's os.last_changed in HA (not on local memory), so any number
+# of panels running the workers converge on the same truth and double
+# commands are idempotent.
+
+HA_CONF_PATH = os.path.join(HIVE_CONFIG_DIR, "ha_config.json")
+HA_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "ha_state.json")
+HA_ENTITY_ID_RE = re.compile(r'^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$')
+HA_DOMAINS = ("switch", "fan", "sensor", "binary_sensor", "group", "input_boolean")
+
+HA_CHECK_TIMEOUT = 8        # GET /api/ auth probe
+HA_CALL_TIMEOUT = 10        # services / states calls
+HA_PROBE_INTERVAL = 120     # worker re-probe of connection health
+HA_BOOT_DELAY = 420         # let the rig finish booting before acting
+
+HA_POWER_INTERVAL = 60      # powercycle worker poll
+HA_POWER_DOWN = 300         # rig fully unreachable this long -> plug cycle
+HA_POWER_DWELL = 30         # plug stays OFF this long (guaranteed power cycle)
+HA_POWER_GAP = 3600         # min time between plug cycles per rig
+HA_POWER_TCP_TIMEOUT = 3    # per-route reachability probe
+
+HA_FAN_INTERVAL = 60
+HA_FAN_ON_TEMP = 62.0       # any K-rig card above this -> fan needed
+HA_FAN_OFF_TEMP = 57.0      # all-K-rig average below this -> fan off
+HA_FAN_MIN_DWELL = 600      # min time in the CURRENT plug state (anti-flapping)
+HA_FAN_MAX_ON = 1800        # continuous run cap -> forced off
+HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
+HA_FAN_OFF_FRESH = 600      # stale-but-not-too-stale temps may still turn the fan off
+HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day
+HA_FREEZE_ROOM = 5.0        # room sensor below this -> fan stays off
+HA_FREEZE_OUT = 0.0         # outdoor sensor below this (room dead) -> fan stays off
+HA_FAN_ON_CHANNEL = ""      # optional channel entity to lift with the assist
+HA_FAN_ON_MASTER = ""       # (set below in _ha_load_conf defaults)
+
+_ha_state_lock = threading.RLock()
+
+def _ha_load_conf():
+    try:
+        with config_lock:
+            with open(HA_CONF_PATH, 'r') as f:
+                cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+def _ha_save_conf(cfg):
+    with _ha_state_lock:
+        cfg["updated_at"] = int(time.time())
+        _atomic_write_file(HA_CONF_PATH, json.dumps(cfg, indent=2), mode=0o600)
+
+def _ha_load_state():
+    try:
+        with config_lock:
+            with open(HA_STATE_PATH, 'r') as f:
+                st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except Exception:
+        return {}
+
+def _ha_save_state(st):
+    with _ha_state_lock:
+        _atomic_write_file(HA_STATE_PATH, json.dumps(st, indent=2), mode=0o600)
+
+def _ha_conf_valid(cfg):
+    return bool(cfg.get("url") and cfg.get("token"))
+
+def _ha_base_url(url):
+    url = str(url or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    return url.rstrip("/")
+
+def _ha_api(conf, method, path, body=None, timeout=None):
+    """One call to the HA REST API. Returns (ok, data_or_text, http_code, err)."""
+    base = _ha_base_url(conf.get("url"))
+    token = str(conf.get("token") or "")
+    if not base or not token:
+        return False, None, 0, "Home Assistant is not configured"
+    url = base + path
+    data = None
+    headers = {"Authorization": "Bearer " + token,
+               "Content-Type": "application/json",
+               "User-Agent": "hiveos-local"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or HA_CALL_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                return True, json.loads(raw), resp.status, ""
+            except Exception:
+                return True, raw, resp.status, ""
+    except urllib.error.HTTPError as e:
+        try:
+            msg = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            msg = ""
+        return False, None, e.code, "HA error: HTTP %d %s" % (e.code, msg)
+    except Exception as e:
+        return False, None, 0, "HA unreachable: %s" % (str(e) or type(e).__name__)
+
+def _ha_check(conf):
+    """Auth probe: GET /api must answer 200 with a message."""
+    ok, data, code, err = _ha_api(conf, "GET", "/api/", timeout=HA_CHECK_TIMEOUT)
+    if ok:
+        return True, "Connected (%s)" % (data.get("message") if isinstance(data, dict) else "ok")
+    if code == 401:
+        return False, "Unauthorized - check the long-lived token"
+    return False, err
+
+def _ha_probe_state(conf):
+    """Connection probe from a worker context; returns (ok, err)."""
+    ok, _msg = _ha_check(conf)
+    return ok, (_msg if not ok else "")
+
+def _ha_state_entity(conf, entity_id):
+    ok, data, code, err = _ha_api(conf, "GET", "/api/states/" + str(entity_id or ""), timeout=HA_CALL_TIMEOUT)
+    if not ok:
+        return None, err
+    if not isinstance(data, dict) or not data.get("entity_id"):
+        return None, "Entity not found: %s" % entity_id
+    return data, ""
+
+def _ha_service(conf, service, entity_id):
+    """switch.turn_on / fan.turn_on / switch.turn_off ... Returns (ok, err)."""
+    domain, _, _name = str(entity_id or "").partition(".")
+    ok, _data, code, err = _ha_api(conf, "POST", "/api/services/%s/%s" % (domain, service),
+                                   body={"entity_id": entity_id}, timeout=HA_CALL_TIMEOUT)
+    if ok:
+        return True, ""
+    return False, err
+
+def _ha_state_ts(entity):
+    """Parse the HA state object's last_changed into epoch seconds (0 on failure)."""
+    try:
+        ts = datetime.fromisoformat(str(entity.get("last_changed") or "").replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.timestamp()
+    except Exception:
+        return 0.0
+
+def _ha_entity_value(state):
+    """Float value of a sensor state; None when unavailable/unknown/non-numeric."""
+    if not isinstance(state, dict):
+        return None
+    val = state.get("state")
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        attrs = state.get("attributes") or {}
+        try:
+            return float(attrs.get("temperature"))
+        except (TypeError, ValueError):
+            return None
+
+def _ha_sensor_temp(conf, entity_id):
+    """Temperature from a sensor entity; (None, 'unavailable') on dead sensor."""
+    if not entity_id:
+        return None, "not configured"
+    state, err = _ha_state_entity(conf, entity_id)
+    if state is None:
+        return None, err or "unreachable"
+    if state.get("state") in ("unavailable", "unknown", "None"):
+        return None, "unavailable"
+    return _ha_entity_value(state), ""
+
+def _ha_reachable(rig):
+    """True when ANY configured SSH route opens a TCP connection.
+    This is the 'is the machine up at all' signal of the plug powercycle.
+    (_probe_tcp lives further down the module - resolved at runtime.)"""
+    try:
+        for access in _ordered_rig_accesses(rig):
+            host = access.get("host")
+            port = int(access.get("port") or 22)
+            if not host:
+                continue
+            if _probe_tcp(host, port, timeout=HA_POWER_TCP_TIMEOUT):
+                return True
+    except Exception:
+        pass
+    return False
+
+def _ha_is_powercycle_rig(rig):
+    """К (boiler) and Д (house) rigs may be power cycled; a rig in a lived-in
+    house (location 'none'/empty) is NEVER touched - a night reboot there
+    would wake people up."""
+    return (rig.get("location") in ("boiler", "house")) and bool(rig.get("ha_plug"))
+
+def _ha_cluster_rigs():
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    cache = load_cluster_cache()
+    return state, cache
+
+def _ha_rig_temps(state, cache, fresh_ttl):
+    """GPU temps of all rigs marked 'boiler': returns (values[], any_stale, names).
+    Temps come from the cluster stats cache, so they keep flowing even when
+    the SSH routes to a rig are broken (only staleness is visible)."""
+    values = []
+    freshest_ok = True
+    any_rig = False
+    for rig in state.get("rigs", []):
+        if rig.get("location") != "boiler":
+            continue
+        any_rig = True
+        entry = cache.get("rigs", {}).get(rig.get("id"), {})
+        ts = int(entry.get("fetched_at") or 0)
+        if not ts or (time.time() - ts) > fresh_ttl:
+            freshest_ok = False
+            continue
+        stats = entry.get("stats") or {}
+        for g in stats.get("gpus") or []:
+            try:
+                t = float(g.get("temp", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if t > 0:
+                values.append(t)
+    return values, freshest_ok, any_rig
+
+def _ha_freeze_ok(room_t, out_t):
+    """Freeze protection verdict. room_t/out_t are floats or None (dead sensor).
+    Conservative on any doubt: 'unknown' is treated as unsafe (no fan)."""
+    if room_t is not None:
+        return room_t >= HA_FREEZE_ROOM
+    if out_t is not None:
+        return out_t >= HA_FREEZE_OUT
+    return None  # both sensors dark: cannot prove safety
+
+def _ha_powercycle_tick():
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        return
+    state, cache = _ha_cluster_rigs()
+    self_id = state.get("self_id")
+    st = _ha_load_state()
+    power = st.setdefault("power", {})
+    now = time.time()
+    for rig in state.get("rigs", []):
+        rid = rig.get("id")
+        if not rid or rid == self_id:
+            continue  # self: this panel IS running, its own plug is not ours to cycle
+        rec = power.setdefault(rid, {})
+        if not _ha_is_powercycle_rig(rig):
+            rec.pop("down_since", None)
+            continue
+        name = rig.get("name") or rid
+        if _ha_reachable(rig):
+            if rec.get("down_since") or rec.get("warned"):
+                rec["down_since"] = None
+                rec.pop("warned", None)
+                rec.pop("last_result", None)
+                _ha_save_state(st)
+                record_metrics_event("success",
+                    "HA powercycle: %s is reachable again - plug cycle cancelled" % name)
+            continue
+        if not rec.get("down_since"):
+            rec["down_since"] = int(now)
+            _ha_save_state(st)
+        if now - int(rec.get("down_since") or 0) < HA_POWER_DOWN:
+            continue
+        if now - float(rec.get("last_cycle") or 0) < HA_POWER_GAP:
+            rec["last_result"] = "waiting rate limit"
+            _ha_save_state(st)
+            continue
+        down_min = int((now - int(rec.get("down_since") or 0)) / 60)
+        # Final gate right before acting: read the plug from HA and confirm it
+        # is ON. off/unavailable = someone else is already cycling it or the
+        # entity is dead; either way touching it would make things worse.
+        plug_state, _age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
+        st["last_probe"] = {"ts": int(now), "ok": bool(plug_state), "err": err or ""}
+        if plug_state != "on":
+            rec["last_result"] = "plug not on (%s%s) - skipped" % (plug_state or "?",
+                                 (": " + err) if err else "")
+            rec["down_since"] = None  # restart the window: next tick re-awaits 5 min
+            if not rec.get("warned"):
+                rec["warned"] = True
+                record_metrics_event("warning",
+                    "HA powercycle skipped for %s: smart plug is not ON%s" % (name, (" (%s)" % err) if err else ""))
+            _ha_save_state(st)
+            continue
+        # Reachability re-check immediately before the command (rig may have
+        # recovered during the 5 min window / the HA round trip)
+        if _ha_reachable(rig):
+            rec["down_since"] = None
+            rec["last_result"] = "recovered before cycle"
+            _ha_save_state(st)
+            logging.info(f"HA powercycle: rig '{name}' recovered before the plug cycle, aborted")
+            continue
+        record_metrics_event("danger",
+            f"Rig {name} unreachable for {down_min} min - power cycle via Home Assistant plug ({rig.get('ha_plug')})")
+        rec["last_cycle"] = int(now)
+        rec["last_result"] = "cycling..."
+        _ha_save_state(st)
+        ok_off, err_off = _ha_service(conf, "turn_off", rig.get("ha_plug"))
+        if not ok_off:
+            rec["last_result"] = "failed to turn plug off (%s)" % err_off
+            record_metrics_event("danger", f"HA powercycle {name}: turn OFF failed ({err_off})")
+            _ha_save_state(st)
+            continue
+        time.sleep(HA_POWER_DWELL)
+        # Verify the plug really went off, then power back up
+        plug_state, _age, _e2 = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
+        if plug_state == "on":
+            ok_off, err_off = _ha_service(conf, "turn_off", rig.get("ha_plug"))
+            if ok_off:
+                time.sleep(5)
+        ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
+        if ok_on:
+            rec["last_result"] = "power cycled (off %ds -> on)" % HA_POWER_DWELL
+            rec["down_since"] = None
+            rec.pop("warned", None)
+            record_metrics_event("success",
+                f"HA powercycle {name}: plug off {HA_POWER_DWELL}s -> on. Rig should boot in 1-3 min.")
+        else:
+            rec["last_result"] = "plug off ok, turn ON failed (%s)" % err_on
+            record_metrics_event("danger",
+                f"HA powercycle {name}: plug was turned OFF but turn ON failed ({err_on}) - CHECK THE PLUG IN HA")
+        _ha_save_state(st)
+
+def _ha_fan_power_state_for_entity(conf, entity_id):
+    if not conf.get("fan_power_entity") and not entity_id:
+        return None, 0, "not configured"
+    ent = entity_id or conf.get("fan_power_entity")
+    st, err = _ha_state_entity(conf, ent)
+    if st is None:
+        return None, 0, err
+    ts = _ha_state_ts(st)
+    age = max(0.0, time.time() - ts) if ts else 0
+    return str(st.get("state") or "unknown"), age, ""
+
+def _ha_fan_tick():
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        return
+    if not conf.get("enabled", True):
+        return
+    master = conf.get("fan_power_entity")
+    if not master:
+        # Touch the state so the UI can show WHY the fan section is inert.
+        st = _ha_load_state()
+        f = st.setdefault("fan", {})
+        f["last_reason"] = "not configured"
+        _ha_save_state(st)
+        return
+    now = time.time()
+    st = _ha_load_state()
+    fan = st.setdefault("fan", {})
+    # One connection probe per tick; HA unreadable -> hands off completely
+    ok, err = _ha_probe_state(conf)
+    fan["last_check"] = int(now)
+    fan["last_err"] = "" if ok else err
+    st["last_probe"] = {"ts": int(now), "ok": bool(ok), "err": "" if ok else err}
+    if not ok:
+        _ha_save_state(st)
+        return
+    plug_state, age, ent_err = _ha_fan_power_state_for_entity(conf, master)
+    if plug_state not in ("on", "off"):
+        fan["last_reason"] = "plug state unknown%s" % (": " + ent_err if ent_err else "")
+        _ha_save_state(st)
+        return
+    state, cache = _ha_cluster_rigs()
+    temp_on, fresh_on, _n1 = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
+    temp_off, fresh_off, n_boiler = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
+    if n_boiler == 0:
+        fan["last_reason"] = "no rigs marked boiler room (К)"
+        _ha_save_state(st)
+        return
+    any_hot = bool(temp_on) and max(temp_on) > HA_FAN_ON_TEMP
+    avg = (sum(temp_off) / len(temp_off)) if temp_off else None
+
+    room_t, room_err = _ha_sensor_temp(conf, conf.get("boiler_sensor_entity"))
+    out_t, out_err = _ha_sensor_temp(conf, conf.get("outdoor_sensor_entity"))
+    freeze = _ha_freeze_ok(room_t, out_t)
+
+    fan.update({"avg_temp": round(avg, 1) if avg is not None else None,
+                "max_temp": round(max(temp_on), 1) if temp_on else None,
+                "room_temp": room_t, "outdoor_temp": out_t,
+                "room_err": room_err, "out_err": out_err})
+    # Rate limiting: count automatic ON starts per calendar day
+    day = time.strftime("%Y%m%d", time.localtime(now))
+    if fan.get("day") != day:
+        fan["day"] = day
+        fan["cycles"] = 0
+
+    reason = ""
+    action = None
+    if plug_state == "on":
+        if freeze is not True:
+            action = "off"
+            reason = "freeze protection (room %s°C, outdoor %s°C)" % (
+                ("%.1f" % room_t) if room_t is not None else "n/a",
+                ("%.1f" % out_t) if out_t is not None else "n/a")
+        elif age >= HA_FAN_MAX_ON:
+            action = "off"
+            reason = "run cap %d min reached" % int(HA_FAN_MAX_ON / 60)
+        elif avg is not None and fresh_off and avg < HA_FAN_OFF_TEMP:
+            action = "off"
+            reason = "avg %.1f°C < %.0f°C" % (avg, HA_FAN_OFF_TEMP)
+    else:
+        if freeze is not True:
+            reason = "fan stays off - freeze protection (room %s, outdoor %s)" % (
+                room_err or (("%.1f" % room_t) if room_t is not None else "n/a"),
+                out_err or (("%.1f" % out_t) if out_t is not None else "n/a"))
+        elif not any_hot:
+            reason = "asleep: cards ≤ %.0f°C" % HA_FAN_ON_TEMP
+        elif not fresh_on:
+            reason = "waiting: no fresh temperature data from К-rigs"
+        elif age < HA_FAN_MIN_DWELL:
+            reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(age), HA_FAN_MIN_DWELL)
+        elif int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
+            reason = "daily cycle cap reached"
+        else:
+            action = "on"
+            reason = ("hot cards detected: max %.1f°C > %.0f°C" %
+                      (max(temp_on), HA_FAN_ON_TEMP))
+
+    if action:
+        ok_act, act_err = _ha_fan_apply(conf, action == "on")
+        fan["last_action"] = action
+        fan["last_ts"] = int(now)
+        fan["last_reason"] = reason
+        if action == "on":
+            fan["cycles"] = int(fan.get("cycles") or 0) + 1
+        if ok_act:
+            record_metrics_event("info" if action == "on" else "success",
+                                 "Boiler room fan assist: turned %s (%s)" % (action.upper(), reason))
+        else:
+            record_metrics_event("danger",
+                                 "Boiler room fan assist: failed to turn %s (%s)" % (action.upper(), act_err))
+    else:
+        fan["last_reason"] = reason
+    _ha_save_state(st)
+
+def _ha_fan_apply(conf, turn_on):
+    """Master plug + optional assist channel. Returns (ok, err)."""
+    master = conf.get("fan_power_entity")
+    channel = conf.get("fan_on_channel") or ""
+    errs = []
+    if turn_on:
+        ok, err = _ha_service(conf, "turn_on", master)
+        if not ok:
+            return False, err
+        if channel:
+            ok2, err2 = _ha_service(conf, "turn_on", channel)
+            if not ok2:
+                errs.append("channel: " + err2)
+    else:
+        ok, err = _ha_service(conf, "turn_off", master)
+        if not ok:
+            return False, err
+        if channel:
+            ok2, err2 = _ha_service(conf, "turn_off", channel)
+            if not ok2:
+                errs.append("channel: " + err2)
+    if errs:
+        return False, "; ".join(errs)
+    return True, ""
+
+def _ha_worker_loop(interval, tick, name):
+    time.sleep(HA_BOOT_DELAY)
+    while True:
+        try:
+            tick()
+        except Exception as e:
+            logging.error(f"HA {name} worker error: {e}")
+        time.sleep(interval)
+
+def start_ha_workers():
+    threading.Thread(target=_ha_worker_loop, args=(HA_POWER_INTERVAL, _ha_powercycle_tick, "powercycle"),
+                     daemon=True, name="ha-powercycle").start()
+    threading.Thread(target=_ha_worker_loop, args=(HA_FAN_INTERVAL, _ha_fan_tick, "fan"),
+                     daemon=True, name="ha-fan").start()
+    logging.info("Home Assistant workers started (powercycle + fan assist, inert until configured)")
+
+# ---------------- HA API endpoints ----------------
+
+def _ha_public():
+    cfg = _ha_load_conf()
+    st = _ha_load_state()
+    token = str(cfg.get("token") or "")
+    now = time.time()
+    # Status comes from the stored last probe (workers refresh it every tick)
+    # - GET must never block on an unreachable HA for 8s
+    probe = st.get("last_probe") or {}
+    fan = st.get("fan", {})
+    probe_fresh = probe and (now - float(probe.get("ts") or 0)) < 900
+    fan_fresh = fan.get("last_check") and (now - int(fan.get("last_check"))) < 900
+    if not _ha_conf_valid(cfg):
+        connected, err = False, "not configured"
+    elif probe_fresh:
+        connected, err = bool(probe.get("ok")), str(probe.get("err") or "")
+    elif fan_fresh:
+        connected, err = not fan.get("last_err"), str(fan.get("last_err") or "")
+    else:
+        connected, err = False, "no fresh status yet - workers idle or HA unreachable"
+    return {
+        "configured": _ha_conf_valid(cfg),
+        "enabled": bool(cfg.get("enabled", True)),
+        "url": _ha_base_url(cfg.get("url")),
+        "token_masked": ("********" if token else ""),
+        "fan_power_entity": cfg.get("fan_power_entity", ""),
+        "fan_on_channel": cfg.get("fan_on_channel", ""),
+        "boiler_sensor_entity": cfg.get("boiler_sensor_entity", ""),
+        "outdoor_sensor_entity": cfg.get("outdoor_sensor_entity", ""),
+        "fan_channel_entities": cfg.get("fan_channel_entities", []),
+        "connected": connected,
+        "connect_err": "" if connected else err,
+        "checked_at": int(probe.get("ts") or fan.get("last_check") or 0),
+        "power": st.get("power", {}),
+        "fan_worker": fan,
+    }
+
+@app.route('/api/ha', methods=['GET'])
+def api_ha():
+    pub = _ha_public()
+    state, cache = _ha_cluster_rigs()
+    rigs = []
+    for r in state.get("rigs", []):
+        rigs.append({
+            "id": r.get("id"), "name": r.get("name", r.get("id")),
+            "is_self": r.get("id") == state.get("self_id"),
+            "location": r.get("location", ""),
+            "ha_plug": r.get("ha_plug", ""),
+            "online": bool(cache.get("rigs", {}).get(r.get("id"), {}).get("online")) if not r["id"] == state["self_id"] else True,
+        })
+    pub["rigs"] = rigs
+    return jsonify({"success": True, "ha": pub})
+
+@app.route('/api/ha/test', methods=['POST'])
+def api_ha_test():
+    data = request.get_json(silent=True) or {}
+    cfg = _ha_load_conf()
+    url = data.get("url")
+    token = data.get("token")
+    if url:
+        cfg["url"] = url
+    if token and token != "********":
+        cfg["token"] = token
+    ok, msg = _ha_check(cfg)
+    return jsonify({"success": ok, "message": msg})
+
+@app.route('/api/ha/config', methods=['POST'])
+def api_ha_config():
+    data = request.get_json(silent=True) or {}
+    cfg = _ha_load_conf()
+    # Token mask keeps the saved secret (same convention as SSH passwords)
+    if data.get("token") and data.get("token") != "********":
+        cfg["token"] = str(data["token"]).strip()
+    if "url" in data:
+        u = _ha_base_url(data.get("url"))
+        if u and not u.startswith(("http://", "https://")):
+            return jsonify({"success": False, "message": "Bad URL"}), 400
+        cfg["url"] = u
+    for key, label in (("fan_power_entity", "fan master plug"), ("fan_on_channel", "fan channel"),
+                       ("boiler_sensor_entity", "boiler room sensor"), ("outdoor_sensor_entity", "outdoor sensor")):
+        if key in data:
+            v = str(data.get(key) or "").strip()
+            if v and not HA_ENTITY_ID_RE.match(v):
+                return jsonify({"success": False, "message": "Bad entity id: %s" % v}), 400
+            cfg[key] = v
+    if "enabled" in data:
+        cfg["enabled"] = bool(data.get("enabled"))
+    ent_list = data.get("fan_channel_entities")
+    if isinstance(ent_list, list):
+        clean = []
+        for e in ent_list[:8]:
+            e = str(e or "").strip()
+            if e and not HA_ENTITY_ID_RE.match(e):
+                return jsonify({"success": False, "message": "Bad entity id: %s" % e}), 400
+            if e:
+                clean.append(e)
+        cfg["fan_channel_entities"] = clean
+    if not _ha_conf_valid(cfg):
+        return jsonify({"success": False, "message": "URL and long-lived token are required"}), 400
+    _ha_save_conf(cfg)
+    ok, msg = _ha_check(cfg)
+    st = _ha_load_state()
+    st["last_probe"] = {"ts": int(time.time()), "ok": bool(ok), "err": "" if ok else msg}
+    _ha_save_state(st)
+    record_metrics_event("info", "Home Assistant connection saved" + (" and verified" if ok else " (probe failed: %s)" % msg))
+    pub = _ha_public()
+    return jsonify({"success": True, "message": "Saved. " + msg, "ha": pub})
+
+@app.route('/api/ha/entities', methods=['GET'])
+def api_ha_entities():
+    cfg = _ha_load_conf()
+    if not _ha_conf_valid(cfg):
+        return jsonify({"success": False, "message": "Home Assistant is not configured"}), 400
+    ok, data, code, err = _ha_api(cfg, "GET", "/api/states", timeout=HA_CALL_TIMEOUT)
+    if not ok or not isinstance(data, list):
+        return jsonify({"success": False, "message": "Cannot read entities (%s)" % (err or code)}), 200
+    out = []
+    for e in data:
+        if not isinstance(e, dict):
+            continue
+        eid = str(e.get("entity_id") or "")
+        domain = eid.split(".", 1)[0]
+        if domain not in HA_DOMAINS:
+            continue
+        out.append({
+            "entity_id": eid,
+            "state": str(e.get("state") or ""),
+            "name": str((e.get("attributes") or {}).get("friendly_name") or eid),
+        })
+        if len(out) >= 400:
+            break
+    return jsonify({"success": True, "entities": out})
+
+@app.route('/api/ha/location', methods=['POST'])
+def api_ha_location():
+    data = request.get_json(silent=True) or {}
+    rig_id = str(data.get("rig_id") or "")
+    if not rig_id:
+        return jsonify({"success": False, "message": "rig_id required"}), 400
+    loc = str(data.get("location") or "")
+    if loc not in ("boiler", "house", "none", ""):
+        return jsonify({"success": False, "message": "Bad location"}), 400
+    plug = str(data.get("ha_plug") or "").strip()
+    if plug and not HA_ENTITY_ID_RE.match(plug):
+        return jsonify({"success": False, "message": "Bad plug entity id"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig = _find_rig(state, rig_id)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found"}), 404
+    rig["location"] = loc
+    if plug or "ha_plug" in data:
+        rig["ha_plug"] = plug
+    rig["updated_at"] = int(time.time())
+    save_cluster_state(state)
+    label = {"boiler": "кочегарка (К)", "house": "дом (Д)", "none": "жилой дом (—)"}.get(loc, "—")
+    record_metrics_event("info", "HA: %s marked as %s" % (rig.get("name") or rig_id, label))
+    return jsonify({"success": True, "message": "Saved (%s)" % label})
+
+@app.route('/api/ha/share', methods=['POST'])
+def api_ha_share():
+    cfg = _ha_load_conf()
+    if not _ha_conf_valid(cfg):
+        return jsonify({"success": False, "message": "Home Assistant is not configured here"}), 400
+    state, _cache = _ha_cluster_rigs()
+    body = dict(cfg)  # full config incl. token -  wires travel inside the cluster SSH channel
+    results = []
+    for rig in state.get("rigs", []):
+        if rig.get("id") == state["self_id"]:
+            continue
+        ok, data, code, err, access_name = cluster_remote_api(rig, "POST", "api/ha/config", body=body, timeout=60)
+        results.append({"rig": rig.get("name") or rig.get("id"),
+                        "ok": bool(ok and isinstance(data, dict) and data.get("success")),
+                        "message": (data.get("message") if isinstance(data, dict) and data.get("message") else err)})
+    record_metrics_event("info", "HA connection shared with %d/%d rigs" %
+                         (sum(1 for r in results if r.get("ok")), len(results)))
+    return jsonify({"success": True, "share": results})
+
+@app.route('/api/ha/powercycle', methods=['POST'])
+def api_ha_powercycle():
+    """Manual plug cycle for one rig (skips the 5-min wait and the rate limit,
+    but never the plug-state and reachability gates)."""
+    data = request.get_json(silent=True) or {}
+    rig_id = str(data.get("rig_id") or "")
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        return jsonify({"success": False, "message": "Home Assistant is not configured"}), 400
+    state, _cache = _ha_cluster_rigs()
+    rig = _find_rig(state, rig_id)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found"}), 404
+    if rig.get("id") == state["self_id"]:
+        return jsonify({"success": False, "message": "Cannot power cycle this own rig"}), 400
+    if rig.get("location") not in ("boiler", "house"):
+        return jsonify({"success": False, "message": "Rig is marked as a lived-in place (—) - powercycle disabled"}), 403
+    plug = rig.get("ha_plug")
+    if not plug:
+        return jsonify({"success": False, "message": "No smart plug is mapped for this rig"}), 400
+    plug_state, _age, err = _ha_fan_power_state_for_entity(conf, plug)
+    if plug_state != "on":
+        return jsonify({"success": False,
+                        "message": "Plug is %s (%s) - nothing to cycle" % (plug_state or "?", err)}), 409
+    name = rig.get("name") or rig_id
+    record_metrics_event("danger", f"HA powercycle (manual) for {name}: plug ({plug}) OFF {HA_POWER_DWELL}s -> ON")
+    ok_off, err_off = _ha_service(conf, "turn_off", plug)
+    if not ok_off:
+        return jsonify({"success": False, "message": "turn OFF failed: " + err_off}), 200
+    time.sleep(HA_POWER_DWELL)
+    ok_on, err_on = _ha_service(conf, "turn_on", plug)
+    if ok_on:
+        record_metrics_event("success", f"HA powercycle (manual) {name}: done")
+        return jsonify({"success": True, "message": "Plug off %ds -> on. Rig boots in 1-3 min." % HA_POWER_DWELL})
+    record_metrics_event("danger", f"HA powercycle (manual) {name}: turn ON failed ({err_on})")
+    return jsonify({"success": False, "message": "Plug is OFF but turn ON FAILED: %s - check it in HA!" % err_on})
+
+@app.route('/api/ha/fan', methods=['POST'])
+def api_ha_fan():
+    """Manual fan assist on/off. Freeze protection is NOT bypassable: if room
+    or outdoor temperature says 'cold', turning the fan ON is refused."""
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    if action not in ("on", "off"):
+        return jsonify({"success": False, "message": "action must be on|off"}), 400
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        return jsonify({"success": False, "message": "Home Assistant is not configured"}), 400
+    if not conf.get("fan_power_entity"):
+        return jsonify({"success": False, "message": "Fan master plug is not configured"}), 400
+    if action == "on":
+        room_t, _er = _ha_sensor_temp(conf, conf.get("boiler_sensor_entity"))
+        out_t, _eo = _ha_sensor_temp(conf, conf.get("outdoor_sensor_entity"))
+        freeze = _ha_freeze_ok(room_t, out_t)
+        if freeze is not True:
+            return jsonify({"success": False,
+                            "message": "Blocked by freeze protection (room %s°C, outdoor %s°C) - turn the fan on from HA if you are sure" %
+                                       (("n/a" if room_t is None else round(room_t, 1)),
+                                        ("n/a" if out_t is None else round(out_t, 1)))}), 409
+    ok, err = _ha_fan_apply(conf, action == "on")
+    record_metrics_event("info" if ok else "danger",
+                         "Boiler room fan assist manual: %s%s" % (action.upper(), (" failed: " + err) if not ok else ""))
+    return jsonify({"success": ok, "message": ("Fan turned %s" % action.upper()) if ok else err})
+
 # ---------------- Cluster API (UI + peer exchange) ----------------
 
 def _find_rig(state, rig_id):
@@ -9325,6 +10074,8 @@ def _rig_view(rig, state, cache):
         "name": rig.get("name", ""),
         "host_label": rig.get("host_label", ""),
         "is_self": is_self,
+        "location": rig.get("location", ""),
+        "ha_plug": rig.get("ha_plug", ""),
         "accesses": [clean_access_entry(a) for a in rig.get("accesses", [])],
         "updated_at": rig.get("updated_at", 0),
         "online": bool(entry.get("online")) if rig.get("id") != state["self_id"] else True,
@@ -10153,6 +10904,10 @@ if __name__ == '__main__':
 
     # Install/update the persistent flight recorder (survives reboots, one folder)
     start_blackbox_worker()
+
+    # Start the Home Assistant bridge workers (smart plug powercycle + fan
+    # assist). Both are inert until /api/ha/config is filled in.
+    start_ha_workers()
 
     local_ip = get_local_ip()
     port = 1337

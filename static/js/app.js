@@ -447,6 +447,29 @@ document.addEventListener('DOMContentLoaded', function() {
         new bootstrap.Tooltip(guardInfoIcon, { customClass: 'guard-tip', html: true });
     }
 
+    // Home Assistant menu: refresh on every open + modal wiring
+    const haDropdownEl = document.getElementById('haDropdown');
+    if (haDropdownEl) {
+        haDropdownEl.addEventListener('show.bs.dropdown', () => refreshHaMenu(false));
+        const haInfoIcon = document.getElementById('haInfoIcon');
+        if (haInfoIcon && window.bootstrap) {
+            new bootstrap.Tooltip(haInfoIcon, { customClass: 'guard-tip', html: true });
+        }
+        const haConnectBtn = document.getElementById('haConnectBtn');
+        if (haConnectBtn) haConnectBtn.addEventListener('click', openHaConnectModal);
+        const haShareBtn = document.getElementById('haShareBtn');
+        if (haShareBtn) haShareBtn.addEventListener('click', shareHaConfig);
+        const haSaveBtn = document.getElementById('haSaveConfigBtn');
+        if (haSaveBtn) haSaveBtn.addEventListener('click', saveHaConfig);
+        const haTestBtn = document.getElementById('haTestBtn');
+        if (haTestBtn) haTestBtn.addEventListener('click', testHaConnection);
+        const haLoadBtn = document.getElementById('haLoadEntitiesBtn');
+        if (haLoadBtn) haLoadBtn.addEventListener('click', () => loadHaEntities(true));
+        document.getElementById('haConnectModal').addEventListener('hidden.bs.modal', () => {
+            refreshHaMenu(false);
+        });
+    }
+
     // Manual Refresh button
     const refreshBtn = document.getElementById('refreshStatsBtn');
     refreshBtn.addEventListener('click', () => {
@@ -1524,6 +1547,336 @@ async function toggleGuardMode(rigId, checkbox) {
     }
 }
 window.toggleGuardMode = toggleGuardMode;
+
+// ===================== Home Assistant integration =====================
+// Smart-plug powercycle for К/Д rigs + boiler room fan assist. The config
+// lives on each panel (/api/ha*), per-rig marks and plug entities are part
+// of the cluster state. Everything else is plain REST calls.
+
+let haData = null;
+let haEntities = [];           // [{entity_id, state, name}]
+let haModalPrefill = false;    // entities loaded once per modal session
+
+function haApiPost(path, body) {
+    return fetch(apiPath(path), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify(body || {})
+    });
+}
+
+async function fetchHa() {
+    try {
+        const res = await apiFetch('/api/ha');
+        if (!res.ok) return null;
+        const data = await res.json();
+        return (data && data.success) ? data.ha : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function refreshHaMenu(loadEntities = false) {
+    haData = await fetchHa();
+    renderHaMenu();
+    if (loadEntities && haData && haData.connected && !haEntities.length) {
+        await loadHaEntities(false);
+        renderHaMenu();
+    }
+}
+
+function haLocationLabel(loc) {
+    if (loc === 'boiler') return 'К — кочегарка';
+    if (loc === 'house') return 'Д — дом';
+    return '— — жилой';
+}
+
+function haPowerStatusText(rig, rec) {
+    if (rig.location === 'none' || !rig.ha_plug) return '';
+    if (!rec) return 'worker: no data yet';
+    const parts = [];
+    if (rec.down_since) {
+        const downMin = Math.floor((Date.now() / 1000 - Number(rec.down_since)) / 60);
+        parts.push('unreachable ' + downMin + ' min');
+        if (downMin >= 5) parts.push('<span class="text-warning fw-semibold">cycle pending</span>');
+    }
+    if (rec.last_result) parts.push(escapeHtml(rec.last_result));
+    const lc = rec.last_cycle ? Math.floor((Date.now() / 1000 - Number(rec.last_cycle)) / 60) : null;
+    if (lc !== null && lc < 180) parts.push('cycled ' + lc + ' min ago');
+    return parts.join(' · ');
+}
+
+function renderHaMenu() {
+    const conn = document.getElementById('haConnStatus');
+    const list = document.getElementById('haRigList');
+    const fanSec = document.getElementById('haFanSection');
+    const icon = document.getElementById('haIcon');
+    if (!haData) {
+        conn.innerHTML = '<span class="text-muted">no status yet — retrying…</span>';
+        icon.className = 'bi bi-house-gear text-muted';
+        fanSec.classList.add('d-none');
+        return;
+    }
+    if (!haData.configured) {
+        conn.innerHTML = '<span class="text-warning"><i class="bi bi-plug me-1"></i>Not connected — press Connect and add the HA URL + token</span>';
+        icon.className = 'bi bi-house-gear text-muted';
+        list.innerHTML = '<div class="small text-muted px-2 py-2">Connect first: this menu maps every rig to its room (К / Д / —) and smart plug.</div>';
+        fanSec.classList.add('d-none');
+        return;
+    }
+    if (haData.connected) {
+        icon.className = 'bi bi-house-gear text-success';
+        conn.innerHTML = '<span class="text-success"><i class="bi bi-plug-fill me-1"></i>Connected ' + escapeHtml(haData.url || '') + (haData.enabled ? '' : ' <span class="text-warning">· workers disabled</span>') + '</span>';
+    } else {
+        icon.className = 'bi bi-house-gear text-warning';
+        conn.innerHTML = '<span class="text-danger"><i class="bi bi-plug me-1"></i>Unreachable: ' + escapeHtml(haData.connect_err || 'no connection') + '</span>';
+    }
+
+    // Per-rig rows: room mark (К/Д/—) + smart plug entity
+    const rigs = (haData.rigs || []).slice();
+    let rowsHtml = '';
+    for (const rig of rigs) {
+        const rec = (haData.power || {})[rig.id] || {};
+        const loc = rig.location || '';
+        rowsHtml += '<div class="ha-rig-row" data-rig="' + escapeHtml(rig.id) + '">' +
+            '<div class="d-flex align-items-center gap-2 flex-wrap">' +
+              '<div class="ha-rig-name flex-grow-1">' + escapeHtml(rig.name || rig.id) +
+                (rig.is_self ? ' <span class="badge bg-primary bg-opacity-25 text-primary border border-primary fs-10px">THIS RIG</span>' : '') +
+              '</div>' +
+              '<select class="form-select form-select-sm ha-loc-select" onchange="saveHaRig(\'' + rig.id + '\', this)">' +
+                [ '', 'boiler', 'house', 'none' ].map(v =>
+                    '<option value="' + v + '"' + (loc === v ? ' selected' : '') + '>' + haLocationLabel(v) + '</option>').join('') +
+              '</select>' +
+              '<input type="text" class="form-control form-control-sm ha-plug-input" list="haPlugList" ' +
+                'placeholder="switch.plug_rig" title="Smart plug entity controlling this rig\'s power" ' +
+                'value="' + escapeHtml(rig.ha_plug || '') + '" onchange="saveHaRig(\'' + rig.id + '\', this)">' +
+            '</div>' +
+            (function () {
+                const st = haPowerStatusText(rig, rec);
+                const canCycle = rig.location && rig.location !== 'none' && rig.ha_plug;
+                return (st || canCycle) ?
+                    '<div class="ha-rig-status mt-1 d-flex align-items-center gap-2">' +
+                      (canCycle ? '<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Manual plug powercycle (OFF 30 s -> ON)" onclick="haPowercycleManual(\'' + rig.id + '\')"><i class="bi bi-power"></i></button>' : '') +
+                      (st ? '<i class="bi bi-lightning-charge me-1"></i>' + st : '') +
+                    '</div>' : '';
+            })() +
+        '</div>';
+    }
+    list.innerHTML = rowsHtml + '<datalist id="haPlugList">' +
+        haEntities.filter(e => e.entity_id.startsWith('switch.') || e.entity_id.startsWith('fan.'))
+            .slice(0, 200).map(e => '<option value="' + escapeHtml(e.entity_id) + '">' + escapeHtml(e.name) + '</option>').join('') +
+        '</datalist>';
+
+    // Fan assist card (needs the master plug entity)
+    const fw = haData.fan_worker || {};
+    if (haData.fan_power_entity) {
+        fanSec.classList.remove('d-none');
+        const room = (fw.room_temp !== undefined && fw.room_temp !== null) ? fw.room_temp.toFixed(1) + ' °C' : (fw.room_err ? fw.room_err : 'n/a');
+        const outT = (fw.outdoor_temp !== undefined && fw.outdoor_temp !== null) ? fw.outdoor_temp.toFixed(1) + ' °C' : (fw.out_err ? fw.out_err : 'n/a');
+        const maxT = (fw.max_temp !== undefined && fw.max_temp !== null) ? fw.max_temp.toFixed(1) + ' °C' : 'n/a';
+        const avgT = (fw.avg_temp !== undefined && fw.avg_temp !== null) ? fw.avg_temp.toFixed(1) + ' °C' : 'n/a';
+        fanSec.innerHTML =
+            '<div class="d-flex flex-wrap gap-3 align-items-center">' +
+              '<div><span class="text-muted small">Fan (' + escapeHtml(haData.fan_power_entity) + ')</span><br>' +
+                '<span class="fw-semibold">' + escapeHtml(haData.fan_on_channel ? 'assist channel: ' + haData.fan_on_channel : 'speed via HA automations') + '</span></div>' +
+              '<div><span class="text-muted small">Max card</span><br><span class="fw-semibold">' + maxT + '</span></div>' +
+              '<div><span class="text-muted small">К-avg</span><br><span class="fw-semibold">' + avgT + '</span></div>' +
+              '<div><span class="text-muted small">Room / Out</span><br><span class="fw-semibold">' + room + ' / ' + outT + '</span></div>' +
+            '</div>' +
+            (fw.last_reason ? '<div class="ha-rig-status mt-1">' + escapeHtml(fw.last_reason || '') + '</div>' : '') +
+            '<div class="d-flex gap-2 mt-2">' +
+              '<button class="btn btn-sm btn-outline-success" onclick="haFanManual(\'on\')" title="Turn the fan plug (and assist channel) ON - freeze protection may refuse"><i class="bi bi-fan me-1"></i>Fan ON</button>' +
+              '<button class="btn btn-sm btn-outline-danger" onclick="haFanManual(\'off\')" title="Turn the fan plug OFF"><i class="bi bi-fan me-1"></i>Fan OFF</button>' +
+            '</div>';
+    } else {
+        fanSec.classList.remove('d-none');
+        fanSec.innerHTML = '<span class="text-muted small"><i class="bi bi-fan me-1"></i>Fan assist not configured — pick the fan plugs in Connect.</span>';
+    }
+}
+
+async function loadHaEntities(showModalStatus) {
+    const statusEl = document.getElementById('haEntitiesStatus');
+    try {
+        const res = await apiFetch('/api/ha/entities');
+        const data = await res.json();
+        if (data && data.success) {
+            haEntities = data.entities || [];
+            if (statusEl) statusEl.textContent = 'Loaded ' + haEntities.length + ' entities';
+        } else {
+            if (statusEl) statusEl.textContent = data.message || 'failed';
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'network error';
+    }
+    fillHaEntitySelects();
+    if (!showModalStatus) document.getElementById('haEntitiesStatus')?.blur();
+}
+
+function fillHaEntitySelects() {
+    const defs = [
+        ['haFanPowerSelect', e => e.entity_id.startsWith('switch.') || e.entity_id.startsWith('fan.'), 'fan_power_entity'],
+        ['haFanChannelSelect', e => e.entity_id.startsWith('switch.') || e.entity_id.startsWith('fan.'), 'fan_on_channel'],
+        ['haBoilerSensorSelect', e => e.entity_id.startsWith('sensor.'), 'boiler_sensor_entity'],
+        ['haOutdoorSensorSelect', e => e.entity_id.startsWith('sensor.'), 'outdoor_sensor_entity']
+    ];
+    for (const [id, filter, cfgKey] of defs) {
+        const sel = document.getElementById(id);
+        if (!sel) continue;
+        const current = (haData && haData[cfgKey]) || '';
+        const opts = ['<option value="">— not configured —</option>'];
+        for (const e of haEntities.filter(filter).slice(0, 300)) {
+            const label = e.entity_id + ' · ' + e.name + (e.state && !['on', 'off'].includes(e.state) ? ' (' + e.state + ')' : '');
+            opts.push('<option value="' + escapeHtml(e.entity_id) + '"' + (e.entity_id === current ? ' selected' : '') + '>' + escapeHtml(label) + '</option>');
+        }
+        if (current && !haEntities.some(e => e.entity_id === current)) {
+            opts.splice(1, 0, '<option value="' + escapeHtml(current) + '" selected>' + escapeHtml(current) + ' (saved, not in list)</option>');
+        }
+        sel.innerHTML = opts.join('');
+    }
+}
+
+async function openHaConnectModal() {
+    const modalEl = document.getElementById('haConnectModal');
+    if (!haData) haData = await fetchHa();
+    document.getElementById('haUrlInput').value = (haData && haData.url) || '';
+    document.getElementById('haTokenInput').value = '';   // empty = keep saved
+    document.getElementById('haEnabledSwitch').checked = haData ? haData.enabled : true;
+    fillHaEntitySelects();
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    if (haData && haData.connected) loadHaEntities(true);
+}
+
+async function saveHaConfig() {
+    const btn = document.getElementById('haSaveConfigBtn');
+    btn.disabled = true;
+    try {
+        const body = {
+            url: document.getElementById('haUrlInput').value.trim(),
+            enabled: document.getElementById('haEnabledSwitch').checked,
+            fan_power_entity: document.getElementById('haFanPowerSelect').value,
+            fan_on_channel: document.getElementById('haFanChannelSelect').value,
+            boiler_sensor_entity: document.getElementById('haBoilerSensorSelect').value,
+            outdoor_sensor_entity: document.getElementById('haOutdoorSensorSelect').value
+        };
+        const token = document.getElementById('haTokenInput').value.trim();
+        if (token) body.token = token;
+        const res = await haApiPost('api/ha/config', body);
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('haConnectModal')).hide();
+            showToast('Home Assistant: ' + (data.message || 'saved'), true, (data.ha && !data.ha.connected));
+            haEntities = [];
+            await refreshHaMenu(true);
+        } else {
+            showToast(data.message || 'Failed to save HA connection.', false);
+        }
+    } catch (e) {
+        showToast('Network error saving HA connection.', false);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function testHaConnection() {
+    const btn = document.getElementById('haTestBtn');
+    const resultEl = document.getElementById('haTestResult');
+    btn.disabled = true;
+    resultEl.classList.remove('d-none', 'text-success', 'text-danger');
+    resultEl.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Testing…';
+    try {
+        const body = { url: document.getElementById('haUrlInput').value.trim() };
+        const token = document.getElementById('haTokenInput').value.trim();
+        if (token) body.token = token;
+        const res = await haApiPost('api/ha/test', body);
+        const data = await res.json().catch(() => ({}));
+        if (data.success) {
+            resultEl.classList.add('text-success');
+            resultEl.innerHTML = '<i class="bi bi-check-circle-fill me-1"></i>' + escapeHtml(data.message || 'Connected');
+        } else {
+            resultEl.classList.add('text-danger');
+            resultEl.innerHTML = '<i class="bi bi-x-circle-fill me-1"></i>' + escapeHtml(data.message || 'Failed');
+        }
+    } catch (e) {
+        resultEl.classList.add('text-danger');
+        resultEl.innerHTML = '<i class="bi bi-x-circle-fill me-1"></i>network error';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function shareHaConfig() {
+    if (!haData || !haData.configured) { showToast('Connect to Home Assistant first.', false); return; }
+    if (!confirm('Push the HA connection (URL + token) to all cluster rigs?')) return;
+    const btn = document.getElementById('haShareBtn');
+    btn.disabled = true;
+    try {
+        const res = await haApiPost('api/ha/share', {});
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            const okN = (data.share || []).filter(r => r.ok).length;
+            const fails = (data.share || []).filter(r => !r.ok).map(r => r.rig + ': ' + (r.message || 'failed'));
+            showToast('HA connection shared: ' + okN + '/' + (data.share || []).length + ' rigs' + (fails.length ? ' · ' + fails.slice(0, 2).join(' | ') : ''), okN > 0, okN === 0);
+        } else {
+            showToast(data.message || 'Share failed.', false);
+        }
+    } catch (e) {
+        showToast('Network error during share.', false);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function saveHaRig(rigId, el) {
+    const row = el.closest('.ha-rig-row');
+    const loc = row.querySelector('.ha-loc-select').value;
+    const plug = row.querySelector('.ha-plug-input').value.trim();
+    try {
+        const res = await haApiPost('api/ha/location', { rig_id: rigId, location: loc, ha_plug: plug });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            showToast('Rig settings saved (' + data.message.replace('Saved ', '') + ')', true);
+            if (haData) {
+                const rig = (haData.rigs || []).find(r => r.id === rigId);
+                if (rig) { rig.location = loc; rig.ha_plug = plug; }
+                renderHaMenu();
+            }
+        } else {
+            showToast(data.message || 'Failed to save', false);
+        }
+    } catch (e) {
+        showToast('Network error saving rig settings.', false);
+    }
+}
+
+async function haFanManual(action) {
+    try {
+        const res = await haApiPost('api/ha/fan', { action });
+        const data = await res.json().catch(() => ({}));
+        showToast(data.message || (data.success ? 'Done' : 'Failed'), data.success, data.success === false && res.status === 409);
+        await refreshHaMenu();
+    } catch (e) {
+        showToast('Network error.', false);
+    }
+}
+
+async function haPowercycleManual(rigId) {
+    const rig = (haData && haData.rigs || []).find(r => r.id === rigId);
+    const name = rig ? (rig.name || rigId) : rigId;
+    if (!confirm('Power cycle ' + name + ' via its smart plug? The rig will be OFF for ~' + '30 s (plug OFF 30 s -> ON).')) return;
+    try {
+        const res = await haApiPost('api/ha/powercycle', { rig_id: rigId });
+        const data = await res.json().catch(() => ({}));
+        showToast(data.message || (data.success ? 'Power cycle done' : 'Failed'), data.success, data.success === false && res.status === 409);
+        await refreshHaMenu();
+    } catch (e) {
+        showToast('Network error.', false);
+    }
+}
+window.saveHaRig = saveHaRig;
+window.haFanManual = haFanManual;
+window.haPowercycleManual = haPowercycleManual;
+window.shareHaConfig = shareHaConfig;
+
 
 // Toast notification helper
 let _toastTimer = null;
