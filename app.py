@@ -136,6 +136,7 @@ def make_self_rig_entry(state):
             "host_label": snap.get("host_label") or get_local_ip(),
             "location": snap.get("location") or "",
             "ha_plug": snap.get("ha_plug") or "",
+            "ha_enabled": bool(snap.get("ha_enabled", True)),
             "is_self": True,
             "password": str(app.config.get('ACCESS_PASSWORD', '')),
             "accesses": [clean_access_entry(a) for a in snap.get("accesses", [])
@@ -149,6 +150,7 @@ def make_self_rig_entry(state):
         "host_label": get_local_ip(),
         "location": "",
         "ha_plug": "",
+        "ha_enabled": True,
         "is_self": True,
         "password": str(app.config.get('ACCESS_PASSWORD', '')),
         "accesses": [],
@@ -205,6 +207,7 @@ def _self_entry_snapshot_payload(entry):
         "host_label": str(entry.get("host_label", "")),
         "location": str(entry.get("location", "") or ""),
         "ha_plug": str(entry.get("ha_plug", "") or ""),
+        "ha_enabled": bool(entry.get("ha_enabled", True)),
         "accesses": [clean_access_entry(a) for a in entry.get("accesses", [])
                      if isinstance(a, dict)],
     }
@@ -4926,7 +4929,7 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at",
                     # Home Assistant integration: room mark (boiler/house/none) + smart
                     # plug entity mapped to this rig (synced with the cluster state)
-                    "location", "ha_plug"]
+                    "location", "ha_plug", "ha_enabled"]
 ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
                        "jump_id", "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
 
@@ -9523,7 +9526,11 @@ def _ha_reachable(rig):
 def _ha_is_powercycle_rig(rig):
     """К (boiler) and Д (house) rigs may be power cycled; a rig in a lived-in
     house (location 'none'/empty) is NEVER touched - a night reboot there
-    would wake people up."""
+    would wake people up. The per-rig HA switch (ha_enabled False, the
+    вкл/выкл toggle in the HA menu) additionally suppresses the automation;
+    manual powercycle does not check this (an explicit user action)."""
+    if rig.get("ha_enabled", True) is False:
+        return False
     return (rig.get("location") in ("boiler", "house")) and bool(rig.get("ha_plug"))
 
 def _ha_cluster_rigs():
@@ -9862,6 +9869,7 @@ def api_ha():
             "is_self": r.get("id") == state.get("self_id"),
             "location": r.get("location", ""),
             "ha_plug": r.get("ha_plug", ""),
+            "ha_enabled": bool(r.get("ha_enabled", True)),
             "online": bool(cache.get("rigs", {}).get(r.get("id"), {}).get("online")) if not r["id"] == state["self_id"] else True,
         })
     pub["rigs"] = rigs
@@ -9967,10 +9975,14 @@ def api_ha_location():
     rig["location"] = loc
     if plug or "ha_plug" in data:
         rig["ha_plug"] = plug
+    if "enabled" in data:
+        rig["ha_enabled"] = bool(data.get("enabled"))
     rig["updated_at"] = int(time.time())
     save_cluster_state(state)
     label = {"boiler": "кочегарка (К)", "house": "дом (Д)", "none": "жилой дом (—)"}.get(loc, "—")
-    record_metrics_event("info", "HA: %s marked as %s" % (rig.get("name") or rig_id, label))
+    if "enabled" in data and not loc:
+        label = "HA powercycle %s" % ("ON" if rig.get("ha_enabled", True) else "OFF")
+    record_metrics_event("info", "HA: %s -> %s" % (rig.get("name") or rig_id, label))
     return jsonify({"success": True, "message": "Saved (%s)" % label})
 
 @app.route('/api/ha/share', methods=['POST'])

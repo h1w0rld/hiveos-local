@@ -97,6 +97,7 @@
                                 <i class="bi bi-question-circle guard-info-icon" id="haInfoIcon" tabindex="0"
                                    data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true"
                                    title="Automated recovery through Home Assistant.&lt;br&gt;&lt;b&gt;Powercycle:&lt;/b&gt; rigs marked К (boiler) or Д (house) that stay unreachable &ge;5 min get their smart plug turned OFF for 30 s and back ON. Rigs marked &laquo;&mdash;&raquo; (lived-in house) are never touched.&lt;br&gt;&lt;b&gt;Fan assist:&lt;/b&gt; any К-rig card &gt;62&nbsp;&deg;C turns the boiler room fan on, К-rig average &lt;57&nbsp;&deg;C turns it off. Freeze protection outranks cooling: outdoor &lt;0 or room &lt;+5 (or both sensors dead) = the fan is never started.&lt;br&gt;&lt;b&gt;Share&lt;/b&gt; sends the HA connection to all cluster panels."></i>
+                                <i class="bi bi-gear3 ha-settings-icon ms-auto" id="haSettingsBtn" role="button" tabindex="0" title="Open HA settings (connection + per-rig rooms and plugs)"></i>
                             </h6>
                             <div class="small mt-1" id="haConnStatus">&nbsp;</div>
                         </div>
@@ -105,8 +106,8 @@
                         </div>
                         <div id="haFanSection" class="ha-fan-section d-none"></div>
                         <div class="ha-menu-actions d-flex gap-2">
-                            <button type="button" class="btn btn-sm btn-outline-primary flex-fill" id="haConnectBtn" title="Configure the Home Assistant connection (URL, token, entities)">
-                                <i class="bi bi-plug me-1"></i>Connect
+                            <button type="button" class="btn btn-sm btn-outline-primary flex-fill" id="haConnectBtn" title="HA settings: connection (URL, token, entities) + per-rig room marks and smart plugs">
+                                <i class="bi bi-gear me-1"></i>Settings
                             </button>
                             <button type="button" class="btn btn-sm btn-outline-info flex-fill" id="haShareBtn" title="Push this HA connection (incl. token) to all cluster rigs">
                                 <i class="bi bi-arrow-repeat me-1"></i>Share
@@ -2376,7 +2377,7 @@
             <div class="modal-content glass-modal border border-secondary-subtle">
                 <div class="modal-header">
                     <h5 class="modal-title fw-bold">
-                        <i class="bi bi-house-gear text-primary me-2"></i>Home Assistant connection
+                        <i class="bi bi-house-gear text-primary me-2"></i>Home Assistant settings
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
@@ -2430,6 +2431,15 @@
                             </div>
                             <div class="form-text small mt-2 mb-0">Note: enable at least one temperature sensor (room or outdoor) — with both sensors dark the worker never starts the fan (freeze fail-safe).</div>
                         </div>
+                        <div class="col-md-12"><hr class="hr-row-gap border-secondary-subtle my-1"></div>
+                        <div class="col-md-12">
+                            <h6 class="fw-bold small text-secondary text-uppercase mb-2">Per-rig: room mark + smart plug</h6>
+                            <div id="haRigSettings" class="ha-rig-settings">
+                                <div class="small text-muted py-2">Loading rigs…</div>
+                            </div>
+                            <div class="form-text small mt-2 mb-0">К = boiler room (К), Д = house (Д), «—» = lived-in house — such a rig is never power cycled. The switch in the dropdown enables/disables auto powercycle per rig.</div>
+                        </div>
+                        <div class="col-md-12" id="haPlugDatalistHost"></div>
                     </div>
                 </div>
                 <div class="modal-footer">

@@ -1982,14 +1982,33 @@ hr {
 .ha-rig-list {
     max-height: 46vh;
     overflow-y: auto;
-    padding: 0.4rem 0.75rem;
+    padding: 0.25rem 0;
 }
 
 .ha-rig-row {
-    padding: 0.45rem 0.25rem;
-    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 0.45rem 1rem;
+}
+.ha-rig-row:hover {
+    background: rgba(255, 255, 255, 0.04);
 }
 .ha-rig-row:last-child { border-bottom: none; }
+.ha-rig-row .ha-rig-status {
+    flex: 0 0 100%;
+}
+
+/* Gear in the menu head opens the HA settings modal */
+.ha-settings-icon {
+    cursor: pointer;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+}
+.ha-settings-icon:hover {
+    color: var(--text-primary);
+}
 
 .ha-rig-name {
     min-width: 0;
@@ -2012,6 +2031,17 @@ hr {
 .ha-plug-input {
     flex: 0 0 200px;
     background: rgba(255, 255, 255, 0.04);
+}
+
+/* Settings modal: per-rig room mark + plug row */
+.ha-rig-settings .ha-rig-row {
+    padding: 0.35rem 0;
+}
+.ha-settings-name {
+    flex: 0 0 150px;
+    min-width: 0;
+    font-size: 0.88rem;
+    font-weight: 600;
 }
 
 .ha-rig-status {

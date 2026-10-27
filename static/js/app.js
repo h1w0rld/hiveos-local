@@ -451,9 +451,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const haDropdownEl = document.getElementById('haDropdown');
     if (haDropdownEl) {
         haDropdownEl.addEventListener('show.bs.dropdown', () => refreshHaMenu(false));
+        haDropdownEl.addEventListener('shown.bs.dropdown', alignHaColumns);
         const haInfoIcon = document.getElementById('haInfoIcon');
         if (haInfoIcon && window.bootstrap) {
             new bootstrap.Tooltip(haInfoIcon, { customClass: 'guard-tip', html: true });
+        }
+        const haSettingsBtn = document.getElementById('haSettingsBtn');
+        if (haSettingsBtn) {
+            haSettingsBtn.addEventListener('click', (e) => { e.stopPropagation(); openHaConnectModal(); });
+            haSettingsBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHaConnectModal(); } });
         }
         const haConnectBtn = document.getElementById('haConnectBtn');
         if (haConnectBtn) haConnectBtn.addEventListener('click', openHaConnectModal);
@@ -1618,10 +1624,11 @@ function renderHaMenu() {
         return;
     }
     if (!haData.configured) {
-        conn.innerHTML = '<span class="text-warning"><i class="bi bi-plug me-1"></i>Not connected — press Connect and add the HA URL + token</span>';
+        conn.innerHTML = '<span class="text-warning"><i class="bi bi-plug me-1"></i>Not connected — open Settings and add the HA URL + token</span>';
         icon.className = 'bi bi-house-gear text-muted';
-        list.innerHTML = '<div class="small text-muted px-2 py-2">Connect first: this menu maps every rig to its room (К / Д / —) and smart plug.</div>';
+        list.innerHTML = '<div class="small text-muted px-3 py-2">Not configured yet: open Settings (gear) to add the HA connection and mark every rig with its room (К / Д / —) and smart plug.</div>';
         fanSec.classList.add('d-none');
+        renderHaRigsTable();
         return;
     }
     if (haData.connected) {
@@ -1632,40 +1639,49 @@ function renderHaMenu() {
         conn.innerHTML = '<span class="text-danger"><i class="bi bi-plug me-1"></i>Unreachable: ' + escapeHtml(haData.connect_err || 'no connection') + '</span>';
     }
 
-    // Per-rig rows: room mark (К/Д/—) + smart plug entity
-    const rigs = (haData.rigs || []).slice();
+    // Per-rig rows in the same visual language as the Config Source menu:
+    // name | status badges | auto-powercycle switch (вкл/выкл)
+    const locChip = {
+        boiler: '<span class="badge bg-warning bg-opacity-25 border border-warning text-warning" title="К — boiler room">К</span>',
+        house: '<span class="badge bg-info bg-opacity-25 border border-info text-info" title="Д — house">Д</span>',
+        none: '<span class="badge bg-secondary bg-opacity-25 border border-secondary text-secondary-emphasis" title="— — lived-in house, never touched">—</span>'
+    };
+    const rigs = (haData.rigs || []).slice().sort(naturalRigCompare);
     let rowsHtml = '';
     for (const rig of rigs) {
         const rec = (haData.power || {})[rig.id] || {};
-        const loc = rig.location || '';
+        const on = rig.ha_enabled !== false;
+        const swDis = !!rig.is_self;
+        const canCycle = !rig.is_self && rig.location && rig.location !== 'none' && rig.ha_plug;
+        let badge = rig.is_self
+            ? '<span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>'
+            : (rig.online
+                ? '<span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
+                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
+        if (locChip[rig.location || '']) badge += ' ' + locChip[rig.location];
         rowsHtml += '<div class="ha-rig-row" data-rig="' + escapeHtml(rig.id) + '">' +
-            '<div class="d-flex align-items-center gap-2 flex-wrap">' +
-              '<div class="ha-rig-name flex-grow-1">' + escapeHtml(rig.name || rig.id) +
-                (rig.is_self ? ' <span class="badge bg-primary bg-opacity-25 text-primary border border-primary fs-10px">THIS RIG</span>' : '') +
-              '</div>' +
-              '<select class="form-select form-select-sm ha-loc-select" onchange="saveHaRig(\'' + rig.id + '\', this)">' +
-                [ '', 'boiler', 'house', 'none' ].map(v =>
-                    '<option value="' + v + '"' + (loc === v ? ' selected' : '') + '>' + haLocationLabel(v) + '</option>').join('') +
-              '</select>' +
-              '<input type="text" class="form-control form-control-sm ha-plug-input" list="haPlugList" ' +
-                'placeholder="switch.plug_rig" title="Smart plug entity controlling this rig\'s power" ' +
-                'value="' + escapeHtml(rig.ha_plug || '') + '" onchange="saveHaRig(\'' + rig.id + '\', this)">' +
+            '<div class="guard-rig-name">' + escapeHtml(rig.name || rig.id) + '</div>' +
+            '<div class="guard-rig-badges">' + badge + '</div>' +
+            '<div class="guard-switch-wrap">' +
+                '<i class="bi bi-slash-circle guard-side-icon text-muted" title="Auto powercycle OFF"></i>' +
+                '<div class="form-check form-switch mb-0">' +
+                    '<input class="form-check-input" type="checkbox" role="switch" ' + (on ? 'checked' : '') +
+                    ' title="' + (swDis ? 'This rig powercycles itself via its own watchdogs' : 'Switch auto powercycle ON / OFF for this rig') + '"' +
+                    ' onchange="haRigToggle(\'' + rig.id + '\', this)"' + (swDis ? ' disabled' : '') + '>' +
+                '</div>' +
+                '<i class="bi bi-lightning-charge guard-side-icon' + (on ? ' text-success' : ' text-muted') + '" title="Auto powercycle ON"></i>' +
+                (canCycle ? '<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Manual plug powercycle (OFF 30 s -> ON)" onclick="haPowercycleManual(\'' + rig.id + '\')"><i class="bi bi-power"></i></button>' : '') +
             '</div>' +
             (function () {
                 const st = haPowerStatusText(rig, rec);
-                const canCycle = rig.location && rig.location !== 'none' && rig.ha_plug;
-                return (st || canCycle) ?
-                    '<div class="ha-rig-status mt-1 d-flex align-items-center gap-2">' +
-                      (canCycle ? '<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Manual plug powercycle (OFF 30 s -> ON)" onclick="haPowercycleManual(\'' + rig.id + '\')"><i class="bi bi-power"></i></button>' : '') +
-                      (st ? '<i class="bi bi-lightning-charge me-1"></i>' + st : '') +
-                    '</div>' : '';
+                return st ? '<div class="ha-rig-status mt-1">' +
+                  '<i class="bi bi-lightning-charge me-1"></i>' + st + '</div>' : '';
             })() +
         '</div>';
     }
-    list.innerHTML = rowsHtml + '<datalist id="haPlugList">' +
-        haEntities.filter(e => e.entity_id.startsWith('switch.') || e.entity_id.startsWith('fan.'))
-            .slice(0, 200).map(e => '<option value="' + escapeHtml(e.entity_id) + '">' + escapeHtml(e.name) + '</option>').join('') +
-        '</datalist>';
+    list.innerHTML = rowsHtml;
+    alignHaColumns();
+    renderHaRigsTable();
 
     // Fan assist card (needs the master plug entity)
     const fw = haData.fan_worker || {};
@@ -1709,7 +1725,93 @@ async function loadHaEntities(showModalStatus) {
         if (statusEl) statusEl.textContent = 'network error';
     }
     fillHaEntitySelects();
+    fillHaPlugDatalist();
     if (!showModalStatus) document.getElementById('haEntitiesStatus')?.blur();
+}
+
+// Datalist of all switch/fan entities for the per-rig plug inputs in Settings
+function fillHaPlugDatalist() {
+    const host = document.getElementById('haPlugDatalistHost');
+    if (!host) return;
+    host.innerHTML = '<datalist id="haPlugList">' +
+        haEntities.filter(e => e.entity_id.startsWith('switch.') || e.entity_id.startsWith('fan.'))
+            .slice(0, 200).map(e => '<option value="' + escapeHtml(e.entity_id) + '">' + escapeHtml(e.name) + '</option>').join('') +
+        '</datalist>';
+}
+
+// Per-rig editing (room mark + smart plug) lives in the Settings modal so the
+// dropdown itself stays a clean switch list like the Config Source menu.
+function renderHaRigsTable() {
+    const host = document.getElementById('haRigSettings');
+    if (!host) return;
+    fillHaPlugDatalist();
+    const rigs = (haData && haData.rigs ? haData.rigs : []).slice().sort(naturalRigCompare);
+    if (!rigs.length) {
+        host.innerHTML = '<div class="small text-muted py-2">No rigs in the cluster yet.</div>';
+        return;
+    }
+    const loc = '';
+    host.innerHTML = rigs.map(r => {
+        const loc = r.location || '';
+        return '<div class="ha-rig-row d-flex align-items-center gap-2" data-rig="' + escapeHtml(r.id) + '">' +
+            '<div class="ha-settings-name text-truncate" title="' + escapeHtml(r.name || r.id) + '">' +
+                escapeHtml(r.name || r.id) + (r.is_self ? ' <span class="badge bg-primary bg-opacity-25 text-primary border border-primary fs-10px">THIS RIG</span>' : '') +
+            '</div>' +
+            '<select class="form-select form-select-sm ha-loc-select" onchange="saveHaRig(\'' + r.id + '\', this)">' +
+                [ '', 'boiler', 'house', 'none' ].map(v =>
+                    '<option value="' + v + '"' + (loc === v ? ' selected' : '') + '>' + haLocationLabel(v) + '</option>').join('') +
+            '</select>' +
+            '<input type="text" class="form-control form-control-sm ha-plug-input" list="haPlugList" ' +
+                'placeholder="switch.plug_rig" title="Smart plug entity controlling this rig\'s power" ' +
+                'value="' + escapeHtml(r.ha_plug || '') + '" onchange="saveHaRig(\'' + r.id + '\', this)">' +
+        '</div>';
+    }).join('');
+}
+
+// Column geometry identical to the Config Source menu: fix every name cell to
+// the widest name so badges line up in a column, then size the badge column.
+// Needs real geometry — skipped while the dropdown is hidden (shown.bs.* runs).
+function alignHaColumns() {
+    const menu = document.getElementById('haMenu');
+    if (menu && !menu.classList.contains('show')) return;
+    const list = document.getElementById('haRigList');
+    if (!list) return;
+    const names = list.querySelectorAll('.guard-rig-name');
+    if (!names.length) return;
+    let maxNameW = 0;
+    names.forEach(n => { maxNameW = Math.max(maxNameW, n.offsetWidth); });
+    if (!maxNameW) return;
+    names.forEach(n => { n.style.minWidth = maxNameW + 'px'; });
+    const badgeCols = list.querySelectorAll('.guard-rig-badges');
+    let maxBadgeW = 0;
+    badgeCols.forEach(b => { maxBadgeW = Math.max(maxBadgeW, b.scrollWidth); });
+    badgeCols.forEach(b => { b.style.width = maxBadgeW + 'px'; });
+}
+
+// Per-rig auto powercycle switch (вкл/выкл). Location + plug are sent along
+// (the API updates the whole rig row) so the switch never resets them.
+async function haRigToggle(rigId, el) {
+    const rig = (haData && haData.rigs || []).find(r => r.id === rigId);
+    try {
+        const res = await haApiPost('api/ha/location', {
+            rig_id: rigId,
+            location: rig ? (rig.location || '') : '',
+            ha_plug: rig ? (rig.ha_plug || '') : '',
+            enabled: el.checked
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            if (rig) rig.ha_enabled = el.checked;
+            showToast(el.checked ? 'Auto powercycle ON' : 'Auto powercycle OFF', true);
+            renderHaMenu();
+        } else {
+            el.checked = !el.checked;
+            showToast(data.message || 'Failed to save', false);
+        }
+    } catch (e) {
+        el.checked = !el.checked;
+        showToast('Network error saving rig settings.', false);
+    }
 }
 
 function fillHaEntitySelects() {
@@ -1742,6 +1844,7 @@ async function openHaConnectModal() {
     document.getElementById('haTokenInput').value = '';   // empty = keep saved
     document.getElementById('haEnabledSwitch').checked = haData ? haData.enabled : true;
     fillHaEntitySelects();
+    renderHaRigsTable();
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
     if (haData && haData.connected) loadHaEntities(true);
 }
