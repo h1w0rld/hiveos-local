@@ -2033,8 +2033,6 @@ hr {
     border-top: 1px solid var(--border-color);
 }
 
-.guard-dropdown-head {
-
 .guard-info-icon {
     cursor: help;
     font-size: 0.85rem;
