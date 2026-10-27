@@ -2051,6 +2051,11 @@ GUARD_CHECK_INTERVAL = 600    # periodic enforcement pass (10 min)
 # pull its config a few minutes into the boot, so check twice early, then
 # settle into the periodic 10-min loop.
 GUARD_BOOT_DELAYS = (90, 300)
+# The cloud agent may pull its config at ANY point in the first minutes (RIG2
+# 27 Oct: 3 min after the panel's first check) - poll every minute while the
+# rig is young so a foreign config never runs for long.
+GUARD_EARLY_INTERVAL = 60
+GUARD_EARLY_WINDOW = 1500
 
 _guard_state_lock = threading.Lock()
 _GUARD_STATE = {"loaded": False, "data": None}
@@ -2133,18 +2138,39 @@ def _guard_write_file(name, content):
         logging.error(f"Local guard: failed to restore {name}: {e}")
         return False
 
-def guard_capture_snapshot():
-    """Capture the CURRENT config files as the protected state (enable / refresh)."""
+def guard_capture_snapshot(names=None):
+    """Capture the CURRENT config files as the protected state. names=None:
+    every guarded file (enable / explicit refresh). names=[...]: ONLY those
+    files - a local write to one file must never silently adopt foreign
+    (cloud-pulled) changes sitting in the others."""
     st = _guard_load()
-    snap = {}
-    for name in GUARD_FILES:
+    snap = dict(st.get("snapshot") or {}) if names else {}
+    for name in (names or GUARD_FILES):
+        if name not in GUARD_FILES:
+            continue
         content = _guard_read_file(name)
         if content is not None:
             snap[name] = content
     st["snapshot"] = snap
-    st["since"] = int(time.time())
+    if not names:
+        st["since"] = int(time.time())
     _guard_save(st)
     return st
+
+def _guard_file_drifted(name):
+    """True when Local mode is on and the live file differs (semantically)
+    from the protected snapshot, i.e. the guard is about to revert it."""
+    try:
+        st = _guard_load()
+        if not st.get("enabled") or st.get("suspended"):
+            return False
+        snap = (st.get("snapshot") or {}).get(name)
+        if snap is None:
+            return False
+        cur = _guard_read_file(name)
+        return cur != snap and not _conf_semantically_equal(cur, snap)
+    except Exception:
+        return False
 
 def _guard_merge_save(st, fields):
     """Save only the given pass-owned fields over the FRESH on-disk/in-memory
@@ -2155,15 +2181,15 @@ def _guard_merge_save(st, fields):
         fresh[k] = st.get(k)
     _guard_save(fresh)
 
-def guard_note_config_change():
+def guard_note_config_change(names=None):
     """Hook fired after every config write made through this panel: refresh the
-    protected snapshot so the guard enforces the rig's newest settings, not a
-    stale copy. Cheap no-op while guard is disabled."""
+    protected snapshot for the written file(s) so the guard enforces the rig's
+    newest settings, not a stale copy. Cheap no-op while guard is disabled."""
     try:
         st = _guard_load()
         if not st.get("enabled"):
             return
-        guard_capture_snapshot()
+        guard_capture_snapshot(names)
         logging.info("Local guard: snapshot refreshed after local config change")
     except Exception as e:
         logging.error(f"Local guard: snapshot refresh failed: {e}")
@@ -2278,8 +2304,10 @@ def _guard_worker():
             guard_run_check(apply=True)
         except Exception as e:
             logging.error(f"Local guard boot check failed: {e}")
+    started = time.time()
     while True:
-        time.sleep(GUARD_CHECK_INTERVAL)
+        young = time.time() - started < GUARD_EARLY_WINDOW + sum(GUARD_BOOT_DELAYS)
+        time.sleep(GUARD_EARLY_INTERVAL if young else GUARD_CHECK_INTERVAL)
         try:
             guard_run_check(apply=True)
         except Exception as e:
@@ -2518,7 +2546,7 @@ def _heal_check_api_host(st, report):
             report["notes"].append("HIVE_HOST_URL not found in rig.conf")
             return
         _atomic_write_file(RIG_CONF_PATH, new_content, mode=0o644)
-        guard_note_config_change()
+        guard_note_config_change(["rig.conf"])
         run_command("sudo systemctl restart hive")
         st["last_host_fix"] = now
         st["last_action"] = "api host fixed to %s (was %s)" % (majority, our_host)
@@ -2670,7 +2698,7 @@ def _heal_check_rig_id(st, report):
             if nw != 1:
                 worker = ""  # WORKER_NAME line absent - leave the file as parsed
         _atomic_write_file(RIG_CONF_PATH, new_content, mode=0o644)
-        guard_note_config_change()
+        guard_note_config_change(["rig.conf"])
         st["last_rigid_fix"] = now
         st["rig_id_ok"] = {"rig_id": new_id, "worker_name": worker, "ts": now}
         st["last_action"] = "RIG_ID restored to %s (was '%s')" % (new_id, rid)
@@ -4891,7 +4919,9 @@ def write_shell_config(filepath, config):
                         f.write(f'{k}="{v}"\n')
             # Every panel-side write to a config file is a legitimate local change:
             # keep the local-guard snapshot in sync so it never fights the user
-            guard_note_config_change()
+            # (only for THIS file: other files may hold cloud-pulled changes
+            # that the guard has yet to revert)
+            guard_note_config_change([os.path.basename(filepath)])
             return True
         except Exception as e:
             logging.error(f"Error writing config file {filepath}: {e}")
@@ -6414,7 +6444,7 @@ def revert_overclock():
         if os.path.exists(amd_bak):
             run_amd_oc()
         # Reverted state becomes the locally protected state (guard hook)
-        guard_note_config_change()
+        guard_note_config_change(["nvidia-oc.conf", "amd-oc.conf"])
 
         logging.info(f"Configurations successfully reverted by request from {request.remote_addr}")
         return jsonify({"success": True, "message": "Overclock settings reverted to previous configuration!"})
@@ -6776,6 +6806,12 @@ def _heal_check_wd_intent(st, report):
     starts defending the armed values instead of the wiped ones)."""
     intent = _wd_intent_load()
     if not intent or str(intent.get("enabled", "0")) != "1":
+        return
+    if _guard_file_drifted("rig.conf"):
+        # rig.conf was just overwritten from the cloud and Local mode will
+        # revert it: rewriting it now would make the guard ADOPT the cloud
+        # config (RIG2 27 Oct: wrong miner after boot). Guard goes first.
+        report["notes"].append("watchdog intent check deferred (guard is reverting rig.conf)")
         return
     rig_conf = parse_shell_config(RIG_CONF_PATH)
     maps = _wd_threshold_maps(rig_conf)
