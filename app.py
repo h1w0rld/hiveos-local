@@ -2313,9 +2313,65 @@ def _guard_worker():
         except Exception as e:
             logging.error(f"Local guard check failed: {e}")
 
+# Fast reaction: hive's `hello` rewrites rig.conf / wallet.conf / nvidia-oc.conf
+# from the cloud a few minutes into every boot and starts the miner right after.
+# Waiting for the next periodic pass left the rig on the CLOUD flight sheet for
+# up to a minute (RIG2 27 Oct). In Local mode a cheap 2 s mtime watch notices
+# any change to the guarded files, waits for the writes to finish (hello writes
+# three files, with a driver check between them) and runs the guard at once.
+GUARD_FAST_POLL = 2
+GUARD_FAST_QUIET = 6      # files must stay unchanged this long before the check
+GUARD_FAST_MAX_WAIT = 90  # ...but never defer a pending check longer than this
+
+def _guard_files_sig():
+    sig = []
+    for name in GUARD_FILES:
+        try:
+            stt = os.stat(os.path.join(HIVE_CONFIG_DIR, name))
+            sig.append((name, stt.st_mtime_ns, stt.st_size))
+        except OSError:
+            sig.append((name, 0, 0))
+    return tuple(sig)
+
+def _guard_fast_tick(ctx, now=None):
+    """One watch step. Returns the guard report when a check was run."""
+    now = time.time() if now is None else now
+    st = _guard_load()
+    if not st.get("enabled") or st.get("suspended"):
+        ctx["sig"] = None
+        ctx["dirty"] = ctx["first_dirty"] = 0
+        return None
+    sig = _guard_files_sig()
+    if ctx.get("sig") is None:
+        ctx["sig"] = sig
+        return None
+    if sig != ctx["sig"]:
+        ctx["sig"] = sig
+        ctx["dirty"] = now
+        ctx["first_dirty"] = ctx.get("first_dirty") or now
+    dirty = ctx.get("dirty") or 0
+    if dirty and (now - dirty >= GUARD_FAST_QUIET or now - ctx.get("first_dirty", now) >= GUARD_FAST_MAX_WAIT):
+        ctx["dirty"] = ctx["first_dirty"] = 0
+        rep = guard_run_check(apply=True)
+        ctx["sig"] = _guard_files_sig()   # the guard's own restores are not a new change
+        return rep
+    return None
+
+def _guard_fast_watch():
+    ctx = {}
+    while True:
+        time.sleep(GUARD_FAST_POLL)
+        try:
+            rep = _guard_fast_tick(ctx)
+            if rep and rep.get("drifted"):
+                logging.warning("Local guard (fast watch): reverted %s", ", ".join(rep["drifted"]))
+        except Exception as e:
+            logging.error(f"Local guard fast watch failed: {e}")
+
 def start_guard_worker():
     t = threading.Thread(target=_guard_worker, daemon=True, name="local-guard")
     t.start()
+    threading.Thread(target=_guard_fast_watch, daemon=True, name="local-guard-fast").start()
     logging.info("Local guard worker started")
 
 def _guard_public(st):
