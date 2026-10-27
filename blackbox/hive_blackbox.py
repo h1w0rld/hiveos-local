@@ -718,8 +718,34 @@ def build_report(boot_ref="prev", minutes=15):
                 except Exception:
                     pass
 
+    # A reboot requested by hive-watchdog / sreboot / net-heal goes through sysrq
+    # (remount ro + reset): no SIGTERM and no more writes, so it looks "unclean".
+    req = None
+    req_re = re.compile(r"low hashrate .*rebooting|LA is more than .*rebooting|Rebooting after|GPU are lost, rebooting|"
+                        r"reboot issued|sreboot|> Rebooting|Reached target Reboot|danger.*rebooting", re.I)
+    for line in reversed(log_lines[-400:]):
+        if req_re.search(line) and "FILE:hiveos-local" not in line:
+            try:
+                rt = time.mktime(time.strptime(line[:19], "%Y-%m-%dT%H:%M:%S"))
+            except Exception:
+                continue
+            if end_t - rt <= 90:
+                req = (rt, line)
+            break
+    next_start = nxt_meta.get("boot_wall")
     if is_current:
         verdict.append("This is the CURRENT boot (still running); use --boot prev for the previous one.")
+    elif req and not clean:
+        verdict.append("REBOOT WAS REQUESTED at %s: %s" % (time.strftime("%H:%M:%S", time.localtime(req[0])),
+                                                           req[1][24:200].strip()))
+        gap = (next_start - end_t) if next_start else None
+        if gap is not None and gap > 300:
+            verdict.append("...but the next boot started %d min later: the reboot did NOT complete - the machine hung "
+                           "during the reboot (typically a wedged GPU/driver in the shutdown path; the hardware "
+                           "watchdog is switched off by the kernel during a reboot) and stayed down until it was "
+                           "power-cycled." % (gap // 60))
+        else:
+            verdict.append("The reboot completed normally (sysrq reboot: no clean-stop mark is expected).")
     elif clean:
         verdict.append("Clean stop: the blackbox received SIGTERM, i.e. a normal shutdown/reboot "
                        "(sreboot, panel, net-heal, wd action, manual). See 'shutdown hints' below for who asked.")
