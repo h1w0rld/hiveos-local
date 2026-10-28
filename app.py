@@ -5908,20 +5908,38 @@ def get_extra_fans_summary():
     return None
 
 def get_miner_hashrate():
-    """Returns (total_mh, per_gpu dict, algo) from local miner stats API, log fallback."""
+    """Returns (total_mh, per_gpu dict, algo).
+
+    Universal hashrate source order:
+      0. HiveOS agent file /run/hive/khs  — works with ANY miner (onezerominer,
+         srbminer, custom, etc.) because the agent computes it independently.
+      1. Miner HTTP stats API — for per-GPU breakdown + algo when available.
+      2. Miner log fallback — rigel/srbminer-style parsing as last resort."""
     total_mh = 0.0
     per_gpu = {}
     algo = ""
 
+    # 0. Universal: agent-reported total hashrate (kH/s -> MH/s).
+    #    Works regardless of miner type/port/API; the agent writes it itself.
+    agent_khs = _oc_read_khs()
+    if agent_khs > 0:
+        total_mh = agent_khs / 1000.0
+
     # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068,
-    #    lolminer 4028, srbminer 21373/21473)
+    #    lolminer 4028, srbminer 21373/21473, ...)
     for port in (5000, 4067, 4068, 4028, 21373, 21473):
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 data = json.loads(resp.read().decode(errors="ignore"))
-            total_mh, per_gpu, algo = _extract_api_hashrate(data)
-            if total_mh > 0 or per_gpu:
+            api_total, api_per_gpu, api_algo = _extract_api_hashrate(data)
+            if api_per_gpu:
+                per_gpu = api_per_gpu
+            if api_algo:
+                algo = api_algo
+            if total_mh <= 0 and api_total > 0:
+                total_mh = api_total
+            if per_gpu or total_mh > 0:
                 return total_mh, per_gpu, algo
         except Exception:
             continue
@@ -5929,7 +5947,7 @@ def get_miner_hashrate():
     # 2. Fallback: parse rigel-style miner log. Only valid while the miner screen is alive,
     #    otherwise stale log entries keep reporting hashrate after the miner stops.
     if not is_miner_screen_running():
-        return 0.0, {}, algo
+        return total_mh if total_mh > 0 else 0.0, per_gpu, algo
 
     miner_name = parse_shell_config(RIG_CONF_PATH).get("MINER", "").strip().lower()
     if miner_name and miner_name != "none":
