@@ -1999,16 +1999,7 @@ hr {
     text-overflow: ellipsis;
 }
 
-.ha-loc-select,
-.ha-plug-input {
-    font-size: 0.8rem;
-}
-
-.ha-loc-select {
-    flex: 0 0 118px;
-}
-
-/* Settings modal: per-rig room mark + plug row */
+/* Settings modal: read-only per-rig rows (rooms/plugs pulled from HA) */
 .ha-rig-row {
     display: flex;
     align-items: center;
@@ -2023,17 +2014,22 @@ hr {
     font-size: 0.88rem;
     font-weight: 600;
 }
-.ha-plug-input {
+.ha-loc-chip {
+    flex: 0 0 34px;
+    text-align: center;
+}
+.ha-plug-text {
     flex: 1 1 120px;
     min-width: 0;
-    background: rgba(255, 255, 255, 0.04);
+    font-size: 0.78rem;
+    font-family: var(--bs-font-monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .ha-cycle-btn {
     flex: 0 0 auto;
     line-height: 1.1;
-}
-.ha-cycle-spacer {
-    flex: 0 0 29px;   /* keeps the plug inputs of rows without the button aligned */
 }
 
 .guard-info-icon {

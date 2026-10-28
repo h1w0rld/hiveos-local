@@ -2389,38 +2389,30 @@
                             <button type="button" id="haTestBtn" class="btn btn-sm btn-outline-info ms-auto">Test</button>
                         </div>
                         <div class="col-12"><hr class="my-2"></div>
-                        <div class="col-6">
-                            <label class="form-label small fw-semibold mb-1" for="haFanPowerSelect">Fan plug (ON/OFF)</label>
-                            <select id="haFanPowerSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label small fw-semibold mb-1" for="haFanChannelSelect">Fan speed channel
-                                <i class="bi bi-info-circle text-secondary" title="Optional speed plug switched together with the master plug. Leave empty if HA automations pick the speed."></i>
-                            </label>
-                            <select id="haFanChannelSelect" class="form-select form-select-sm bg-dark-input"><option value="">— none —</option></select>
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label small fw-semibold mb-1" for="haBoilerSensorSelect">Room temp sensor</label>
-                            <select id="haBoilerSensorSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label small fw-semibold mb-1" for="haOutdoorSensorSelect">Outdoor sensor
-                                <i class="bi bi-info-circle text-secondary" title="Freeze fallback: outdoor &lt;0 (or room &lt;+5) = the fan never starts. Both sensors dark = fan never starts."></i>
-                            </label>
-                            <select id="haOutdoorSensorSelect" class="form-select form-select-sm bg-dark-input"><option value="">— not configured —</option></select>
-                        </div>
-                        <div class="col-12 d-flex gap-2 justify-content-end">
-                            <button type="button" class="btn btn-sm btn-outline-success" onclick="haFanManual('on')" title="Fan plug ON (freeze protection may refuse)"><i class="bi bi-fan me-1"></i>Fan ON</button>
-                            <button type="button" class="btn btn-sm btn-outline-danger" onclick="haFanManual('off')" title="Fan plug OFF"><i class="bi bi-fan me-1"></i>Fan OFF</button>
+                        <div class="col-12">
+                            <div class="d-flex align-items-center gap-3 small">
+                                <div class="text-truncate" title="Fan master plug is pulled from Home Assistant: the switch named 'Вентилятор' (ON powers the whole fan, OFF cuts it)">
+                                    <span class="text-secondary">Fan&nbsp;</span><span id="haAutoFanPlug" class="text-info">…</span>
+                                </div>
+                                <div class="text-truncate" title="Room sensor watch: while it shows a temperature the HA automations manage the fan themselves; when it goes dark the panel holds the cards in the 57-62°C band">
+                                    <span class="text-secondary">Room&nbsp;</span><span id="haAutoRoom" class="text-info">…</span>
+                                </div>
+                                <span class="ms-auto d-flex gap-2 flex-nowrap">
+                                    <button type="button" class="btn btn-sm btn-outline-success text-nowrap" onclick="haFanManual('on')" title="Fan plug ON (explicit override of the worker)"><i class="bi bi-fan me-1"></i>Fan ON</button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" onclick="haFanManual('off')" title="Fan plug OFF"><i class="bi bi-fan me-1"></i>Fan OFF</button>
+                                </span>
+                            </div>
                         </div>
                         <div class="col-12"><hr class="my-2"></div>
                         <div class="col-12">
-                            <h6 class="fw-bold small text-secondary text-uppercase mb-2">Per-rig: room + plug</h6>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="fw-bold small text-secondary text-uppercase mb-0">Rigs — pulled from Home Assistant</h6>
+                                <span class="small text-secondary" title="Rooms come from input_select.rig_N (К = кочегарка, Д = дом, — = never touched), plugs from switches named 'RIG N'. Re-pulled every minute and when this window opens.">auto</span>
+                            </div>
                             <div id="haRigSettings" class="ha-rig-settings">
                                 <div class="small text-muted py-2">Loading rigs…</div>
                             </div>
                         </div>
-                        <div class="col-12" id="haPlugDatalistHost"></div>
                     </div>
                 </div>
                 <div class="modal-footer">

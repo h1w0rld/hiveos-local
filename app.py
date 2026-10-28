@@ -9368,8 +9368,15 @@ HA_FAN_MAX_ON = 1800        # continuous run cap -> forced off
 HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
 HA_FAN_OFF_FRESH = 600      # stale-but-not-too-stale temps may still turn the fan off
 HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day
-HA_FREEZE_ROOM = 5.0        # room sensor below this -> fan stays off
-HA_FREEZE_OUT = 0.0         # outdoor sensor below this (room dead) -> fan stays off
+# Layout discovery - the farm arrangement lives in the user's Home Assistant
+# (requested 28 Oct: "риги расставлены уже в Home Assistant, просто надо
+# брать инфу оттуда"): room marks sit in input_select.rig_<N> (k/d/-),
+# per-rig plugs are switches named 'RIG <N>', the fan master plug is the
+# switch named 'Вентилятор', the room temperature watch is the sensor named
+# 'Кочегарка ... Temperature'.
+HA_FAN_MASTER_LABEL = "вентилятор"      # exact switch friendly_name (lowercase)
+HA_ROOM_LABEL_PREFIX = "кочегарка"      # sensor friendly_name prefix (lowercase)
+HA_ROOM_LABEL_SUBSTR = "temperature"    # ... and required substring
 HA_FAN_ON_CHANNEL = ""      # optional channel entity to lift with the assist
 HA_FAN_ON_MASTER = ""       # (set below in _ha_load_conf defaults)
 
@@ -9507,6 +9514,83 @@ def _ha_sensor_temp(conf, entity_id):
         return None, "unavailable"
     return _ha_entity_value(state), ""
 
+def _ha_pull_layout(conf, state):
+    """Pull the farm layout from Home Assistant (28 Oct redesign: the rigs are
+    arranged over THERE, the panel never marks them by hand):
+      rooms:  input_select.rig_<N> with state k/d/-  -> rig.location boiler/house/none
+      plugs:  switch named 'RIG <N>'                 -> rig.ha_plug
+      fan:    switch named 'Вентилятор'              -> fan master plug (power the WHOLE fan)
+      room:   sensor named 'Кочегарка ... Temperature' -> room temp watch:
+              alive  -> the user's HA automations manage the fan themselves
+              dark   -> the panel holds the cards in the 57-62°C band
+    Changed rig fields are written through to the persisted cluster state.
+    Returns {"ok", "rigs": {rid: {...}}, "master_plug", "room_sensor",
+             "room_value", "room_state", "err"}."""
+    try:
+        ok_st, data, code, err = _ha_api(conf, "GET", "/api/states", timeout=HA_CALL_TIMEOUT)
+        if not ok_st or not isinstance(data, list):
+            return {"ok": False, "err": err or code or "HA /api/states failed"}
+        byid = {}
+        for e in data:
+            if isinstance(e, dict) and e.get("entity_id"):
+                byid[str(e["entity_id"])] = e
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+
+    def fname(e):
+        return str((e.get("attributes") or {}).get("friendly_name") or "").strip().lower()
+
+    switch_ids = sorted(e for e in byid if e.startswith("switch."))
+    master = ""
+    for eid in switch_ids:
+        if fname(byid[eid]) == HA_FAN_MASTER_LABEL:
+            master = eid
+            break
+    room_sensor = ""
+    room_value = None
+    for eid in sorted(e for e in byid if e.startswith("sensor.")):
+        fn = fname(byid[eid])
+        if fn.startswith(HA_ROOM_LABEL_PREFIX) and HA_ROOM_LABEL_SUBSTR in fn:
+            room_sensor = eid
+            room_value = _ha_entity_value(byid[eid])
+            break
+    room_state = str(byid[room_sensor].get("state") or "") if room_sensor else ""
+
+    rigmap = {}
+    changed = False
+    for rig in state.get("rigs", []):
+        m = re.search(r'(\d+)\s*$', str(rig.get("name") or ""))
+        if not m:
+            continue
+        n = m.group(1)
+        loc = ""
+        sel = byid.get("input_select.rig_%s" % n)
+        if sel is not None:
+            loc = {"k": "boiler", "d": "house", "-": "none"}.get(
+                str(sel.get("state") or "").strip().lower(), "")
+        plug = ""
+        for eid in switch_ids:
+            if fname(byid[eid]) == "rig %s" % n:
+                plug = eid
+                break
+        if not loc and not plug:
+            continue
+        rid = rig.get("id")
+        rigmap[rid] = {"location": loc, "ha_plug": plug}
+        if loc and rig.get("location", "") != loc:
+            rig["location"] = loc
+            rig["updated_at"] = int(time.time())
+            changed = True
+        if plug and rig.get("ha_plug", "") != plug:
+            rig["ha_plug"] = plug
+            rig["updated_at"] = int(time.time())
+            changed = True
+    if changed:
+        save_cluster_state(state)
+    return {"ok": True, "rigs": rigmap, "master_plug": master,
+            "room_sensor": room_sensor, "room_value": room_value,
+            "room_state": room_state, "err": ""}
+
 def _ha_reachable(rig):
     """True when ANY configured SSH route opens a TCP connection.
     This is the 'is the machine up at all' signal of the plug powercycle.
@@ -9565,20 +9649,12 @@ def _ha_rig_temps(state, cache, fresh_ttl):
                 values.append(t)
     return values, freshest_ok, any_rig
 
-def _ha_freeze_ok(room_t, out_t):
-    """Freeze protection verdict. room_t/out_t are floats or None (dead sensor).
-    Conservative on any doubt: 'unknown' is treated as unsafe (no fan)."""
-    if room_t is not None:
-        return room_t >= HA_FREEZE_ROOM
-    if out_t is not None:
-        return out_t >= HA_FREEZE_OUT
-    return None  # both sensors dark: cannot prove safety
-
 def _ha_powercycle_tick():
     conf = _ha_load_conf()
     if not _ha_conf_valid(conf):
         return
     state, cache = _ha_cluster_rigs()
+    _ha_pull_layout(conf, state)   # rooms + plugs are pulled from Home Assistant
     self_id = state.get("self_id")
     st = _ha_load_state()
     power = st.setdefault("power", {})
@@ -9682,14 +9758,6 @@ def _ha_fan_tick():
         return
     if not conf.get("enabled", True):
         return
-    master = conf.get("fan_power_entity")
-    if not master:
-        # Touch the state so the UI can show WHY the fan section is inert.
-        st = _ha_load_state()
-        f = st.setdefault("fan", {})
-        f["last_reason"] = "not configured"
-        _ha_save_state(st)
-        return
     now = time.time()
     st = _ha_load_state()
     fan = st.setdefault("fan", {})
@@ -9701,29 +9769,50 @@ def _ha_fan_tick():
     if not ok:
         _ha_save_state(st)
         return
+    state, cache = _ha_cluster_rigs()
+    layout = _ha_pull_layout(conf, state)
+    if not layout.get("ok"):
+        fan["last_reason"] = layout.get("err") or "HA entities unreadable"
+        _ha_save_state(st)
+        return
+    master = layout.get("master_plug") or ""
+    fan["master_plug"] = master
+    fan["room_sensor"] = layout.get("room_sensor") or ""
+    if not master:
+        fan["last_reason"] = "fan plug not found in HA (switch 'Вентилятор')"
+        _ha_save_state(st)
+        return
     plug_state, age, ent_err = _ha_fan_power_state_for_entity(conf, master)
     if plug_state not in ("on", "off"):
         fan["last_reason"] = "plug state unknown%s" % (": " + ent_err if ent_err else "")
         _ha_save_state(st)
         return
-    state, cache = _ha_cluster_rigs()
     temp_on, fresh_on, _n1 = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
     temp_off, fresh_off, n_boiler = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
     if n_boiler == 0:
-        fan["last_reason"] = "no rigs marked boiler room (К)"
+        fan["last_reason"] = "no rigs marked boiler room (К) in Home Assistant"
         _ha_save_state(st)
         return
     any_hot = bool(temp_on) and max(temp_on) > HA_FAN_ON_TEMP
     avg = (sum(temp_off) / len(temp_off)) if temp_off else None
 
-    room_t, room_err = _ha_sensor_temp(conf, conf.get("boiler_sensor_entity"))
-    out_t, out_err = _ha_sensor_temp(conf, conf.get("outdoor_sensor_entity"))
-    freeze = _ha_freeze_ok(room_t, out_t)
-
+    room_val = layout.get("room_value")
+    room_state = layout.get("room_state") or ""
     fan.update({"avg_temp": round(avg, 1) if avg is not None else None,
                 "max_temp": round(max(temp_on), 1) if temp_on else None,
-                "room_temp": room_t, "outdoor_temp": out_t,
-                "room_err": room_err, "out_err": out_err})
+                "room_temp": round(room_val, 1) if room_val is not None else None,
+                "room_err": "" if room_val is not None else (room_state or "dark")})
+    # Decision (28 Oct redesign): while the room temperature sensor shows a
+    # value the user's HA automations own the fan completely - the panel must
+    # not fight them. Only a DARK room sensor hands the fan over to the panel,
+    # which then holds the cards in the 57-62°C band: ON above 62, OFF below
+    # 57, never running longer than the cap. Outdoor temperature is ignored
+    # by design ("не важно какая температура на улице").
+    if room_val is not None:
+        fan["last_reason"] = ("room sensor alive (%.1f°C) - HA automations manage the fan"
+                              % room_val)
+        _ha_save_state(st)
+        return
     # Rate limiting: count automatic ON starts per calendar day
     day = time.strftime("%Y%m%d", time.localtime(now))
     if fan.get("day") != day:
@@ -9733,23 +9822,14 @@ def _ha_fan_tick():
     reason = ""
     action = None
     if plug_state == "on":
-        if freeze is not True:
+        if age >= HA_FAN_MAX_ON:
             action = "off"
-            reason = "freeze protection (room %s°C, outdoor %s°C)" % (
-                ("%.1f" % room_t) if room_t is not None else "n/a",
-                ("%.1f" % out_t) if out_t is not None else "n/a")
-        elif age >= HA_FAN_MAX_ON:
-            action = "off"
-            reason = "run cap %d min reached" % int(HA_FAN_MAX_ON / 60)
+            reason = "run cap %d min reached (room sensor dark, panel holds the band)" % int(HA_FAN_MAX_ON / 60)
         elif avg is not None and fresh_off and avg < HA_FAN_OFF_TEMP:
             action = "off"
-            reason = "avg %.1f°C < %.0f°C" % (avg, HA_FAN_OFF_TEMP)
+            reason = "avg %.1f°C < %.0f°C - cards cooled down" % (avg, HA_FAN_OFF_TEMP)
     else:
-        if freeze is not True:
-            reason = "fan stays off - freeze protection (room %s, outdoor %s)" % (
-                room_err or (("%.1f" % room_t) if room_t is not None else "n/a"),
-                out_err or (("%.1f" % out_t) if out_t is not None else "n/a"))
-        elif not any_hot:
+        if not any_hot:
             reason = "asleep: cards ≤ %.0f°C" % HA_FAN_ON_TEMP
         elif not fresh_on:
             reason = "waiting: no fresh temperature data from К-rigs"
@@ -9759,11 +9839,11 @@ def _ha_fan_tick():
             reason = "daily cycle cap reached"
         else:
             action = "on"
-            reason = ("hot cards detected: max %.1f°C > %.0f°C" %
+            reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - cooling to the band" %
                       (max(temp_on), HA_FAN_ON_TEMP))
 
     if action:
-        ok_act, act_err = _ha_fan_apply(conf, action == "on")
+        ok_act, act_err = _ha_fan_apply(conf, action == "on", master)
         fan["last_action"] = action
         fan["last_ts"] = int(now)
         fan["last_reason"] = reason
@@ -9779,9 +9859,9 @@ def _ha_fan_tick():
         fan["last_reason"] = reason
     _ha_save_state(st)
 
-def _ha_fan_apply(conf, turn_on):
-    """Master plug + optional assist channel. Returns (ok, err)."""
-    master = conf.get("fan_power_entity")
+def _ha_fan_apply(conf, turn_on, master=None):
+    """Master plug (+ legacy stored channel). Returns (ok, err)."""
+    master = master or conf.get("fan_power_entity")
     channel = conf.get("fan_on_channel") or ""
     errs = []
     if turn_on:
@@ -9860,6 +9940,10 @@ def _ha_public():
 
 @app.route('/api/ha', methods=['GET'])
 def api_ha():
+    return jsonify({"success": True, "ha": _ha_public_full()})
+
+
+def _ha_public_full():
     pub = _ha_public()
     state, cache = _ha_cluster_rigs()
     rigs = []
@@ -9873,7 +9957,35 @@ def api_ha():
             "online": bool(cache.get("rigs", {}).get(r.get("id"), {}).get("online")) if not r["id"] == state["self_id"] else True,
         })
     pub["rigs"] = rigs
-    return jsonify({"success": True, "ha": pub})
+    return pub
+
+
+@app.route('/api/ha/refresh', methods=['POST'])
+def api_ha_refresh():
+    """On-demand layout re-pull (the settings modal calls it when opened):
+    probe HA, pull rooms/plugs/fan entities, return the fresh public view."""
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        return jsonify({"success": False, "message": "Home Assistant is not configured",
+                        "ha": _ha_public_full()}), 200
+    ok, err = _ha_probe_state(conf)
+    st = _ha_load_state()
+    st["last_probe"] = {"ts": int(time.time()), "ok": bool(ok), "err": "" if ok else err}
+    fan = st.setdefault("fan", {})
+    fan["last_check"] = int(time.time())
+    if ok:
+        state, _cache = _ha_cluster_rigs()
+        layout = _ha_pull_layout(conf, state)
+        if layout.get("ok"):
+            fan["master_plug"] = layout.get("master_plug") or ""
+            fan["room_sensor"] = layout.get("room_sensor") or ""
+            room_val = layout.get("room_value")
+            fan["room_temp"] = round(room_val, 1) if room_val is not None else None
+            fan["room_err"] = "" if room_val is not None else (layout.get("room_state") or "dark")
+        else:
+            fan["last_reason"] = layout.get("err") or "HA entities unreadable"
+    _ha_save_state(st)
+    return jsonify({"success": True, "ha": _ha_public_full()})
 
 @app.route('/api/ha/test', methods=['POST'])
 def api_ha_test():
@@ -9985,6 +10097,28 @@ def api_ha_location():
     record_metrics_event("info", "HA: %s -> %s" % (rig.get("name") or rig_id, label))
     return jsonify({"success": True, "message": "Saved (%s)" % label})
 
+
+@app.route('/api/ha/enabled', methods=['POST'])
+def api_ha_enabled():
+    """Per-rig auto-powercycle switch only. Rooms and plugs are pulled from
+    Home Assistant - the panel never edits them by hand (28 Oct redesign)."""
+    data = request.get_json(silent=True) or {}
+    rig_id = str(data.get("rig_id") or "")
+    if not rig_id:
+        return jsonify({"success": False, "message": "rig_id required"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    rig = _find_rig(state, rig_id)
+    if rig is None:
+        return jsonify({"success": False, "message": "Rig not found"}), 404
+    rig["ha_enabled"] = bool(data.get("enabled"))
+    rig["updated_at"] = int(time.time())
+    save_cluster_state(state)
+    record_metrics_event("info", "HA powercycle %s for %s" %
+                         ("ON" if rig["ha_enabled"] else "OFF", rig.get("name") or rig_id))
+    return jsonify({"success": True, "message": "Auto powercycle %s" %
+                    ("ON" if rig["ha_enabled"] else "OFF")})
+
 @app.route('/api/ha/share', methods=['POST'])
 def api_ha_share():
     cfg = _ha_load_conf()
@@ -10043,8 +10177,8 @@ def api_ha_powercycle():
 
 @app.route('/api/ha/fan', methods=['POST'])
 def api_ha_fan():
-    """Manual fan assist on/off. Freeze protection is NOT bypassable: if room
-    or outdoor temperature says 'cold', turning the fan ON is refused."""
+    """Manual fan on/off - an explicit user override of the worker. The master
+    plug is pulled from Home Assistant (the switch named 'Вентилятор')."""
     data = request.get_json(silent=True) or {}
     action = data.get("action")
     if action not in ("on", "off"):
@@ -10052,20 +10186,15 @@ def api_ha_fan():
     conf = _ha_load_conf()
     if not _ha_conf_valid(conf):
         return jsonify({"success": False, "message": "Home Assistant is not configured"}), 400
-    if not conf.get("fan_power_entity"):
-        return jsonify({"success": False, "message": "Fan master plug is not configured"}), 400
-    if action == "on":
-        room_t, _er = _ha_sensor_temp(conf, conf.get("boiler_sensor_entity"))
-        out_t, _eo = _ha_sensor_temp(conf, conf.get("outdoor_sensor_entity"))
-        freeze = _ha_freeze_ok(room_t, out_t)
-        if freeze is not True:
-            return jsonify({"success": False,
-                            "message": "Blocked by freeze protection (room %s°C, outdoor %s°C) - turn the fan on from HA if you are sure" %
-                                       (("n/a" if room_t is None else round(room_t, 1)),
-                                        ("n/a" if out_t is None else round(out_t, 1)))}), 409
-    ok, err = _ha_fan_apply(conf, action == "on")
+    state, _cache = _ha_cluster_rigs()
+    layout = _ha_pull_layout(conf, state)
+    master = layout.get("master_plug") or conf.get("fan_power_entity") or ""
+    if not master:
+        return jsonify({"success": False,
+                        "message": "Fan plug not found in Home Assistant (switch 'Вентилятор')"}), 400
+    ok, err = _ha_fan_apply(conf, action == "on", master)
     record_metrics_event("info" if ok else "danger",
-                         "Boiler room fan assist manual: %s%s" % (action.upper(), (" failed: " + err) if not ok else ""))
+                         "Boiler room fan manual: %s%s" % (action.upper(), (" failed: " + err) if not ok else ""))
     return jsonify({"success": ok, "message": ("Fan turned %s" % action.upper()) if ok else err})
 
 # ---------------- Cluster API (UI + peer exchange) ----------------
