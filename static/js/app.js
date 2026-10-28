@@ -1626,13 +1626,13 @@ function renderHaMenu() {
     }
     list.innerHTML = rigs.map(rig => {
         const on = rig.ha_enabled !== false;
-        const swDis = !!rig.is_self;
-        const badge = rig.is_self
+        const swDis = false;   // переключатель авто-powercycle доступен для ВСЕХ ригов, включая THIS RIG
+        const badgeBase = rig.is_self
             ? '<span class="badge bg-success-glow border border-success text-success small">THIS RIG</span>'
             : (rig.online
                 ? '<span class="badge bg-success-glow border border-success text-success small"><span class="pulse-indicator"></span>ONLINE</span>'
-                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>') +
-              (rig.location ? ' ' + haLocChipHtml(rig.location) : '');
+                : '<span class="badge bg-danger-glow border border-danger text-danger small">OFFLINE</span>');
+        const badge = badgeBase + (rig.location ? ' ' + haLocChipHtml(rig.location) : '');
         return '<div class="guard-rig-row" data-rig="' + escapeHtml(rig.id) + '">' +
             '<div class="guard-rig-name">' + escapeHtml(rig.name || rig.id) + '</div>' +
             '<div class="guard-rig-badges">' + badge + '</div>' +
