@@ -4929,7 +4929,12 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at",
                     # Home Assistant integration: room mark (boiler/house/none) + smart
                     # plug entity mapped to this rig (synced with the cluster state)
-                    "location", "ha_plug", "ha_enabled"]
+                    "location", "ha_plug", "ha_enabled",
+                    # shared powercycle escalation counter (consecutive failed plug
+                    # cycles for this rig; >=3 triggers the "physical attention"
+                    # state and the 6h slow-retry cadence; lives in the cluster
+                    # state ON PURPOSE: any acting panel must see the same ladder)
+                    "pc_fail"]
 ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
                        "jump_id", "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
 
@@ -9377,6 +9382,11 @@ HA_POWER_DOWN = 300         # rig fully unreachable this long -> plug cycle
 HA_POWER_DWELL = 30         # plug stays OFF this long (guaranteed power cycle)
 HA_POWER_GAP = 3600         # min time between plug cycles per rig
 HA_POWER_TCP_TIMEOUT = 3    # per-route reachability probe
+HA_PC_ESCALATED_DWELL = 150 # failed rigs get a LONG power cut (2.5 min)
+HA_PC_ESCALATE_AFTER = 3    # cycle N in a row without recovery -> physical attention
+HA_PC_EXHAUSTED_GAP = 21600 # after "physical attention": retry only every 6 h
+HA_PC_LEADER_GRACE = 900    # if the elected panel is silent this long, the next one acts
+HA_PC_TICK_WARN = 10        # tick slower than this -> write into the persistent log
 
 HA_FAN_INTERVAL = 60
 HA_FAN_ON_TEMP = 62.0       # any K-rig card above this -> fan needed
@@ -9612,18 +9622,37 @@ def _ha_pull_layout(conf, state):
 def _ha_reachable(rig):
     """True when ANY configured SSH route opens a TCP connection.
     This is the 'is the machine up at all' signal of the plug powercycle.
-    (_probe_tcp lives further down the module - resolved at runtime.)"""
+    Routes are probed IN PARALLEL (a fully dead rig answered 3 s, not
+    3 x timeout) so the 60 s worker round cannot stretch by minutes when
+    several peers are offline. (_probe_tcp lives further down the module
+    - resolved at runtime.)"""
     try:
-        for access in _ordered_rig_accesses(rig):
-            host = access.get("host")
-            port = int(access.get("port") or 22)
-            if not host:
-                continue
-            if _probe_tcp(host, port, timeout=HA_POWER_TCP_TIMEOUT):
-                return True
+        accesses = [a for a in _ordered_rig_accesses(rig) if a.get("host")]
     except Exception:
-        pass
-    return False
+        accesses = []
+    if not accesses:
+        return False
+    if len(accesses) == 1:
+        a0 = accesses[0]
+        return _probe_tcp(a0.get("host"), int(a0.get("port") or 22),
+                          timeout=HA_POWER_TCP_TIMEOUT)
+    results = [False] * len(accesses)
+
+    def _try(idx, access):
+        try:
+            results[idx] = _probe_tcp(access.get("host"),
+                                      int(access.get("port") or 22),
+                                      timeout=HA_POWER_TCP_TIMEOUT)
+        except Exception:
+            pass
+    th = [threading.Thread(target=_try, args=(i, a)) for i, a in enumerate(accesses)]
+    for t in th:
+        t.daemon = True
+        t.start()
+    deadline = HA_POWER_TCP_TIMEOUT + 1.0
+    for t in th:
+        t.join(deadline)
+    return any(results)
 
 def _ha_is_powercycle_rig(rig):
     """К (boiler) and Д (house) rigs may be power cycled; a rig in a lived-in
@@ -9667,16 +9696,64 @@ def _ha_rig_temps(state, cache, fresh_ttl):
                 values.append(t)
     return values, freshest_ok, any_rig
 
+_HA_PC_TICK_LOCK = threading.Lock()
+_HA_PC_LOG_NAME = "ha_powercycle.log"   # persistent (ext4 under /hive-config, survives reboot)
+
+
+def _ha_pc_log(msg):
+    """Append to /hive-config/ha_powercycle.log (NOT /var/log - that is tmpfs
+    on HiveOS and every reboot destroys the forensics we need for the
+    'why did the first cycle take an hour' class of questions)."""
+    try:
+        path = os.path.join(HIVE_CONFIG_DIR, _HA_PC_LOG_NAME)
+        try:
+            if os.path.getsize(path) > 524288:   # cap ~512KB
+                os.remove(path)
+        except OSError:
+            pass
+        with open(path, "a") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ"), msg))
+    except Exception:
+        pass
+
+
 def _ha_powercycle_tick():
     conf = _ha_load_conf()
     if not _ha_conf_valid(conf):
         return
+    if not _HA_PC_TICK_LOCK.acquire(blocking=False):
+        _ha_pc_log("tick skipped: previous tick round still running")
+        return
+    t0 = time.time()
+    try:
+        _ha_powercycle_tick_body(conf)
+    except Exception as e:
+        _ha_pc_log("tick error: %r" % (e,))
+        logging.error("HA powercycle worker error: %s" % e)
+    finally:
+        dt = time.time() - t0
+        if dt > HA_PC_TICK_WARN:
+            _ha_pc_log("tick took %.1f s (watch this: slow rounds delay detection)" % dt)
+        _HA_PC_TICK_LOCK.release()
+
+
+def _ha_powercycle_tick_body(conf):
     state, cache = _ha_cluster_rigs()
     _ha_pull_layout(conf, state)   # rooms + plugs are pulled from Home Assistant
     self_id = state.get("self_id")
     st = _ha_load_state()
     power = st.setdefault("power", {})
     now = time.time()
+    # One reachability probe per rig per tick (used both for the leader
+    # election and for down-window detection) - alive panels sorted by id.
+    reach = {}
+    for rig in state.get("rigs", []):
+        rid = rig.get("id")
+        if rid and rid != self_id:
+            reach[rid] = _ha_reachable(rig)
+    panels = sorted(set([self_id] + [rid for rid, ok in reach.items() if ok]))
+    leader = panels[0] if panels else self_id
+    im_leader = (leader == self_id)
     for rig in state.get("rigs", []):
         rid = rig.get("id")
         if not rid or rid == self_id:
@@ -9686,21 +9763,40 @@ def _ha_powercycle_tick():
             rec.pop("down_since", None)
             continue
         name = rig.get("name") or rid
-        if _ha_reachable(rig):
+        alive = reach.get(rid)
+        if alive is None:
+            alive = _ha_reachable(rig)
+            reach[rid] = alive
+        if alive:
             if rec.get("down_since") or rec.get("warned"):
+                pc_fail = int(rig.get("pc_fail") or 0)
+                if rec.get("down_since"):
+                    _ha_pc_log("%s is reachable again (down window %d s, failed cycles on record: %d)"
+                               % (name, max(1, int(now - rec["down_since"])), pc_fail))
+                    record_metrics_event("success",
+                        ("HA powercycle: %s is reachable again after %d failed plug cycle(s)"
+                         " - automation state reset" % (name, pc_fail)) if pc_fail else
+                        "HA powercycle: %s is reachable again - plug cycle cancelled" % name)
                 rec["down_since"] = None
                 rec.pop("warned", None)
                 rec.pop("last_result", None)
+                rec.pop("attention_noted", None)
+                if pc_fail:
+                    rig["pc_fail"] = 0                    # reset the shared escalation ladder
+                    rig["updated_at"] = int(now)
+                    save_cluster_state(state)
+                    _ha_pc_log("%s escalation ladder reset (pc_fail=0)" % name)
                 _ha_save_state(st)
-                record_metrics_event("success",
-                    "HA powercycle: %s is reachable again - plug cycle cancelled" % name)
             continue
         if not rec.get("down_since"):
             rec["down_since"] = int(now)
+            rec.pop("attention_noted", None)
             _ha_save_state(st)
+            _ha_pc_log("down window armed for %s (first unreachable observation)" % name)
         if now - int(rec.get("down_since") or 0) < HA_POWER_DOWN:
             continue
-        if now - float(rec.get("last_cycle") or 0) < HA_POWER_GAP:
+        gap = HA_PC_EXHAUSTED_GAP if int(rig.get("pc_fail") or 0) >= HA_PC_ESCALATE_AFTER else HA_POWER_GAP
+        if now - float(rec.get("last_cycle") or 0) < gap:
             rec["last_result"] = "waiting rate limit"
             _ha_save_state(st)
             continue
@@ -9708,7 +9804,7 @@ def _ha_powercycle_tick():
         # Final gate right before acting: read the plug from HA and confirm it
         # is ON. off/unavailable = someone else is already cycling it or the
         # entity is dead; either way touching it would make things worse.
-        plug_state, _age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
+        plug_state, age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
         st["last_probe"] = {"ts": int(now), "ok": bool(plug_state), "err": err or ""}
         if plug_state != "on":
             rec["last_result"] = "plug not on (%s%s) - skipped" % (plug_state or "?",
@@ -9720,6 +9816,14 @@ def _ha_powercycle_tick():
                     "HA powercycle skipped for %s: smart plug is not ON%s" % (name, (" (%s)" % err) if err else ""))
             _ha_save_state(st)
             continue
+        # One actor at a time: the lowest-id ALIVE panel holds the right to
+        # cycle. A non-leader takes over only when the plug state has been
+        # untouched for HA_PC_LEADER_GRACE (leader down/frozen mid-incident).
+        can_act = im_leader or (age >= HA_PC_LEADER_GRACE and leader in panels)
+        if not can_act:
+            rec["last_result"] = "peer-led: waiting for %s (leader)" % leader
+            _ha_save_state(st)
+            continue
         # Reachability re-check immediately before the command (rig may have
         # recovered during the 5 min window / the HA round trip)
         if _ha_reachable(rig):
@@ -9728,8 +9832,13 @@ def _ha_powercycle_tick():
             _ha_save_state(st)
             logging.info(f"HA powercycle: rig '{name}' recovered before the plug cycle, aborted")
             continue
+        failed_before = int(rig.get("pc_fail") or 0)
+        dwell = HA_PC_ESCALATED_DWELL if failed_before >= HA_PC_ESCALATE_AFTER else HA_POWER_DWELL
+        fc = failed_before + 1
         record_metrics_event("danger",
-            f"Rig {name} unreachable for {down_min} min - power cycle via Home Assistant plug ({rig.get('ha_plug')})")
+            f"Rig {name} unreachable for {down_min} min - power cycle attempt {fc} via Home Assistant plug ({rig.get('ha_plug')})")
+        _ha_pc_log("%s cycle attempt %d (dwell %ds, down %d min, leader %s)"
+                   % (name, fc, dwell, down_min, leader))
         rec["last_cycle"] = int(now)
         rec["last_result"] = "cycling..."
         _ha_save_state(st)
@@ -9739,7 +9848,7 @@ def _ha_powercycle_tick():
             record_metrics_event("danger", f"HA powercycle {name}: turn OFF failed ({err_off})")
             _ha_save_state(st)
             continue
-        time.sleep(HA_POWER_DWELL)
+        time.sleep(dwell)
         # Verify the plug really went off, then power back up
         plug_state, _age, _e2 = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
         if plug_state == "on":
@@ -9748,11 +9857,26 @@ def _ha_powercycle_tick():
                 time.sleep(5)
         ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
         if ok_on:
-            rec["last_result"] = "power cycled (off %ds -> on)" % HA_POWER_DWELL
+            # Shared escalation ladder: the counter survives panel restarts and
+            # syncs across the farm, so ANY acting panel walks the same ladder.
+            if int(rig.get("pc_fail") or 0) != fc:
+                rig["pc_fail"] = fc
+                rig["updated_at"] = int(now)
+                save_cluster_state(state)
+            if fc >= HA_PC_ESCALATE_AFTER:
+                if not rec.get("attention_noted"):
+                    rec["attention_noted"] = True
+                    record_metrics_event("danger",
+                        "HA powercycle %s: %d plug cycle(s) in a row did not bring the rig back"
+                        " - PHYSICAL ATTENTION REQUIRED (check the machine is wired to the plug"
+                        " / PSU / POST). Retrying every %d h."
+                        % (name, fc, HA_PC_EXHAUSTED_GAP // 3600))
+                    _ha_pc_log("%s PHYSICAL ATTENTION REQUIRED after %d failed cycles" % (name, fc))
+            rec["last_result"] = "power cycled (off %ds -> on)" % dwell
             rec["down_since"] = None
             rec.pop("warned", None)
             record_metrics_event("success",
-                f"HA powercycle {name}: plug off {HA_POWER_DWELL}s -> on. Rig should boot in 1-3 min.")
+                f"HA powercycle {name}: plug off for {dwell}s (attempt {fc}) -> on. Rig should boot in 1-3 min.")
         else:
             rec["last_result"] = "plug off ok, turn ON failed (%s)" % err_on
             record_metrics_event("danger",
