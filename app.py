@@ -9843,9 +9843,9 @@ def _ha_fan_tick():
         if age >= HA_FAN_MAX_ON:
             action = "off"
             reason = "run cap %d min reached (room sensor dark, panel holds the band)" % int(HA_FAN_MAX_ON / 60)
-        elif temp_off and fresh_off and max(temp_off) < HA_FAN_OFF_TEMP:
+        elif avg is not None and fresh_off and avg < HA_FAN_OFF_TEMP:
             action = "off"
-            reason = "all К cards < %.0f°C - cooled down" % HA_FAN_OFF_TEMP
+            reason = "avg %.1f°C < %.0f°C - cards cooled down" % (avg, HA_FAN_OFF_TEMP)
     else:
         if not any_hot:
             reason = "asleep: cards ≤ %.0f°C" % HA_FAN_ON_TEMP
