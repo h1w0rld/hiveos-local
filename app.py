@@ -5773,6 +5773,26 @@ def _extract_api_hashrate(data):
     if not isinstance(data, dict):
         return total, per_gpu, algo
 
+    # onezerominer (OneZero_PRL & co, API port from CUSTOM_API_PORT=63002):
+    # {"algos":[{"name":"pearlhash","split":false,"session":{"active":true},
+    #   "hashrates":[H/s per device, indexed by device id],
+    #   "total_hashrate":H/s}], "devices":[{"id":0,...}]}
+    algos = data.get("algos")
+    if isinstance(algos, list) and algos:
+        active = [a for a in algos if isinstance(a, dict)
+                  and bool((a.get("session") or {}).get("active"))]
+        if not active:
+            # no active session info (older builds): count algos with a real total
+            active = [a for a in algos if isinstance(a, dict) and _to_mh(a.get("total_hashrate")) > 0]
+        if active:
+            for a in active:
+                total += _to_mh(a.get("total_hashrate"))
+            for a in active:
+                for idx, v in enumerate(a.get("hashrates") or []):
+                    per_gpu[idx] = per_gpu.get(idx, 0.0) + _to_mh(v)
+            algo = str(active[0].get("name") or "")
+            return total, per_gpu, algo
+
     # SRBMiner-Multi: {"algorithms":[{"name":"pearlhash","hashrate":{"1min":H/s,
     #   "gpu":{"gpu0":H/s,...,"total":H/s}}}], "gpu_devices":[{"id":0,...}]}
     algorithms = data.get("algorithms")
@@ -6015,8 +6035,8 @@ def get_miner_hashrate():
         total_mh = agent_khs / 1000.0
 
     # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068,
-    #    lolminer 4028, srbminer 21373/21473, ...)
-    for port in (5000, 4067, 4068, 4028, 21373, 21473):
+    #    lolminer 4028, srbminer 21373/21473, onezerominer 63002 = CUSTOM_API_PORT)
+    for port in (5000, 4067, 4068, 4028, 21373, 21473, 63002):
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:

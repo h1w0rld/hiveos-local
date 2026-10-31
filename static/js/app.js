@@ -112,10 +112,17 @@ function updateHardwareStatBoxes(data) {
         const igpuCount = (data.igpus || []).length;
         gpuCountEl.textContent = igpuCount + ' iGPU' + (igpuCount === 1 ? '' : 's');
 
+        // cpu.hashrate is raw H/s (xmrig log); show it in H/s / kH/s, matching the CPU card badge
         const cpuHash = (data.system.cpu && data.system.cpu.hashrate) || 0;
-        speedEl.textContent = fmtSpeed(cpuHash / 1000.0);
+        speedEl.textContent = cpuHash > 1e6 ? fmtSpeed(cpuHash / 1e6)
+            : cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' kH/s'
+            : cpuHash.toFixed(0) + ' H/s';
     } else {
-        const totalHashrate = data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
+        // total from the miner/agent source of truth; sum per-GPU only as fallback
+        // (some miners expose no per-GPU breakdown, e.g. onezerominer via API)
+        const totalHashrate = (data.total_hashrate_mh > 0)
+            ? data.total_hashrate_mh
+            : data.gpus.reduce((sum, g) => sum + (g.hashrate || 0), 0);
         gpuCountEl.textContent = data.gpus.length + ' GPU';
         speedEl.innerHTML = fmtSpeedHtml(totalHashrate);
     }
@@ -2059,7 +2066,7 @@ async function fetchStats() {
         }
         
         const hashrate = parseFloat((data.system.cpu || {}).hashrate) || 0;
-        const formattedHash = hashrate > 1000 ? (hashrate / 1000).toFixed(2) + ' KH/s' : hashrate.toFixed(0) + ' H/s';
+        const formattedHash = hashrate > 1000 ? (hashrate / 1000).toFixed(2) + ' kH/s' : hashrate.toFixed(0) + ' H/s';
         document.getElementById('cpuHashrateBadge').textContent = formattedHash;
         lastHugepagesEnabled = !!data.system.cpu.hugepages;
 
@@ -2243,7 +2250,7 @@ function renderIgpus(igpus, system) {
     const cpu = system && system.cpu ? system.cpu : null;
     if (cpu) {
         const cpuHash = cpu.hashrate || 0;
-        const cpuHashStr = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' KH/s' : cpuHash.toFixed(0) + ' H/s';
+        const cpuHashStr = cpuHash > 1000 ? (cpuHash / 1000).toFixed(2) + ' kH/s' : cpuHash.toFixed(0) + ' H/s';
         const cpuTempClass = cpu.temp > 85 ? 'red' : (cpu.temp > 70 ? 'primary' : 'green');
         
         const cpuCol = document.createElement('div');
@@ -3728,7 +3735,8 @@ function renderCluster() {
     sortedRigs.forEach(rig => {
         const stats = rig.stats;
         if (!stats || !rig.online) return;
-        totalMh += (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1000 : 0);
+        // cpu.hashrate is H/s -> MH/s is /1e6 (was /1000 = kH/s, 1000x overstated)
+        totalMh += (stats.total_hashrate_mh || 0) + (stats.system && stats.system.cpu ? stats.system.cpu.hashrate / 1e6 : 0);
         (stats.gpus || []).forEach(g => {
             totalPower += g.power || 0;
             tempSum += g.temp || 0;
@@ -3942,7 +3950,8 @@ function buildRigCard(rig) {
     const system = stats && stats.system ? stats.system : {};
     const isOnline = !!rig.online;
     const gpuCount = stats && stats.gpus ? stats.gpus.length : null;
-    const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1000 : 0)) : 0;
+    // cpu.hashrate is H/s -> MH/s is /1e6 (was /1000 = kH/s, 1000x overstated)
+    const totalHashMh = stats ? ((stats.total_hashrate_mh || 0) + (system.cpu ? system.cpu.hashrate / 1e6 : 0)) : 0;
     const totalHash = !stats ? 'n/a' : (isOnline ? fmtSpeed(totalHashMh) : '—');
     const power = stats ? (isOnline ? (stats.gpus || []).reduce((s, g) => s + (g.power || 0), 0).toFixed(1) + ' W' : '—') : 'n/a';
     const temps = stats && stats.gpus && stats.gpus.length
