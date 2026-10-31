@@ -2456,6 +2456,7 @@ HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
 HEAL_WD_GAP = 3600             # min seconds between watchdog-intent re-asserts
 HEAL_ZOMBIE_ESCALATE_STREAK = 3  # zombie restarts without recovery -> try a reboot
 HEAL_ZOMBIE_ESCALATE_ZERO = 10800  # ...and the miner must have been dead at least this long
+HEAL_GPU_RESET_CONFIRM = 600   # '[GPU requires reset]' observed this long -> reboot the machine
 HEAL_RIGID_ESCALATE = 180      # wait this long after an id fix before restarting the agent
 HEAL_RIGID_RESTART_GAP = 3600  # min seconds between hive agent restarts after an id fix
 HEAL_CHUNK = 1024 * 1024       # peer transfer chunk size (bytes)
@@ -2478,7 +2479,7 @@ def _heal_state_load():
         st = {"last_check": 0, "last_action": "", "last_host_fix": 0, "last_miner_heal": 0,
               "last_transfer": "", "last_rigid_fix": 0, "last_rigid_restart": 0,
               "last_wd_fix": 0, "zombie_streak": 0, "zombie_series_since": 0,
-              "rig_id_ok": None}
+              "rig_id_ok": None, "gpu_reset_since": 0, "gpu_reset_buses": []}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -2957,6 +2958,84 @@ def _heal_check_miner(st, report):
     logging.warning("Self-heal: %s", st["last_action"])
     record_metrics_event("warning", "Self-heal: miner was not running - started it (flight sheet is active)")
 
+def _gpu_reset_affected():
+    """[(index, bus)] cards the driver marked '[GPU requires reset]'.
+
+    That state is set by the driver after a GSP heartbeat hang (Xid 154,
+    'GPU recovery action changed ... to GPU Reset Required'). The cards
+    physically sit in the rig (temps/mem stay readable) but hash nothing
+    and never recover on their own: per-GPU reset is Not Supported on
+    this hardware and a module reload fails while the miner holds
+    nvidia_uvm - observed cure is a machine reboot (RIG2 31 Oct 2026:
+    two cards sat dead for hours at ~445 TH/s because khs>0 fooled every
+    other health check)."""
+    out, _, code = run_command(
+        "nvidia-smi --query-gpu=index,pci.bus_id,power.draw,fan.speed "
+        "--format=csv,noheader 2>/dev/null")
+    if code != 0 or "GPU requires reset" not in (out or ""):
+        return []
+    bad = []
+    for line in (out or "").splitlines():
+        if "GPU requires reset" not in line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2:
+            bad.append((parts[0], parts[1]))
+    return bad
+
+
+def _heal_check_gpu_reset(st, report):
+    """Reboot the machine when cards are marked '[GPU requires reset]'.
+
+    Detection is independent of khs (the miner keeps hashing on the
+    remaining cards). To survive a mid-boot/JIT false positive the state
+    must persist HEAL_GPU_RESET_CONFIRM (two heal passes) before the
+    reboot fires; issue goes through _net_heal_try_reboot (quiet hours,
+    rate limit) so it never storms alongside the net-heal ladder."""
+    now = int(time.time())
+    if os.path.exists(MINER_STOP_FLAG) or not os.path.exists(MINER_RUN_FLAG):
+        # miner stopped or owned by something else (boot, MAINTENANCE):
+        # no mining is intended - do not reboot the machine
+        st["gpu_reset_since"] = 0
+        st["gpu_reset_buses"] = []
+        return
+    try:
+        if (_oc_state_load() or {}).get("active"):
+            return  # oc_recovery is walking clocks - do not fight its tests
+    except Exception:
+        pass
+    bad = _gpu_reset_affected()
+    if not bad:
+        if st.get("gpu_reset_since"):
+            st["gpu_reset_since"] = 0
+            st["gpu_reset_buses"] = []
+        return
+    buses = [b for _, b in bad]
+    st["gpu_reset_buses"] = buses
+    since = int(st.get("gpu_reset_since") or 0)
+    if not since:
+        st["gpu_reset_since"] = now
+        report["notes"].append("GPU reset required on %s (confirming)" % ", ".join(buses))
+        return
+    waited = now - since
+    if waited < HEAL_GPU_RESET_CONFIRM:
+        report["notes"].append("GPU reset required on %s for %d min - confirming before reboot" %
+                               (", ".join(buses), waited // 60))
+        return
+    nst = _net_heal_state_load()
+    issued, desc = _net_heal_try_reboot(nst, "GPU cards hung (%s)" % ", ".join(buses))
+    _net_heal_state_save(nst)
+    st["gpu_reset_since"] = 0
+    st["gpu_reset_buses"] = []
+    if issued:
+        st["last_action"] = "GPU cards hung - %s" % desc
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("danger", "Self-heal: " + st["last_action"])
+    else:
+        report["notes"].append("GPU reset reboot deferred (%s)" % desc)
+
+
 def _heal_check_zombie(st, report):
     """Miner process alive but zero hashrate for a long time (zombie workers:
     seen after Xid faults or live OC changes - SRBMiner keeps the process and
@@ -3050,6 +3129,11 @@ def heal_run_check():
     except Exception as e:
         logging.error("Self-heal: miner check failed: %s", e)
         report["notes"].append("miner check failed: %s" % e)
+    try:
+        _heal_check_gpu_reset(st, report)
+    except Exception as e:
+        logging.error("Self-heal: gpu reset check failed: %s", e)
+        report["notes"].append("gpu reset check failed: %s" % e)
     try:
         _heal_check_zombie(st, report)
     except Exception as e:
