@@ -2968,19 +2968,34 @@ def _gpu_reset_affected():
     this hardware and a module reload fails while the miner holds
     nvidia_uvm - observed cure is a machine reboot (RIG2 31 Oct 2026:
     two cards sat dead for hours at ~445 TH/s because khs>0 fooled every
-    other health check)."""
+    other health check).
+
+    Detection also catches CSV rows where power.draw/fan.speed show
+    ERR! or N/A (observed on RIG1/RIG2 Nov 2026: 'Unable to determine
+    the device handle' / 'ERR!' in nvidia-smi output)."""
     out, _, code = run_command(
         "nvidia-smi --query-gpu=index,pci.bus_id,power.draw,fan.speed "
         "--format=csv,noheader 2>/dev/null")
-    if code != 0 or "GPU requires reset" not in (out or ""):
+    if code != 0:
         return []
+    out = out or ""
     bad = []
-    for line in (out or "").splitlines():
-        if "GPU requires reset" not in line:
+    for line in out.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
             continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 2:
-            bad.append((parts[0], parts[1]))
+        # Direct "GPU requires reset" marker
+        if "GPU requires reset" in line_stripped:
+            parts = [p.strip() for p in line_stripped.split(",")]
+            if len(parts) >= 2:
+                bad.append((parts[0], parts[1]))
+            continue
+        # CSV rows with ERR! or N/A in power/fan columns (driver can't query)
+        parts = [p.strip() for p in line_stripped.split(",")]
+        if len(parts) >= 4:
+            # parts[2] = power.draw, parts[3] = fan.speed
+            if parts[2] in ("ERR!", "N/A", "[N/A]") or parts[3] in ("ERR!", "N/A", "[N/A]"):
+                bad.append((parts[0], parts[1]))
     return bad
 
 
