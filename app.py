@@ -2457,6 +2457,7 @@ HEAL_WD_GAP = 3600             # min seconds between watchdog-intent re-asserts
 HEAL_ZOMBIE_ESCALATE_STREAK = 3  # zombie restarts without recovery -> try a reboot
 HEAL_ZOMBIE_ESCALATE_ZERO = 10800  # ...and the miner must have been dead at least this long
 HEAL_GPU_RESET_CONFIRM = 600   # '[GPU requires reset]' observed this long -> reboot the machine
+HEAL_GPU_COUNT_CONFIRM = 600   # GPU count deficit observed this long -> reboot the machine
 HEAL_RIGID_ESCALATE = 180      # wait this long after an id fix before restarting the agent
 HEAL_RIGID_RESTART_GAP = 3600  # min seconds between hive agent restarts after an id fix
 HEAL_CHUNK = 1024 * 1024       # peer transfer chunk size (bytes)
@@ -2479,7 +2480,8 @@ def _heal_state_load():
         st = {"last_check": 0, "last_action": "", "last_host_fix": 0, "last_miner_heal": 0,
               "last_transfer": "", "last_rigid_fix": 0, "last_rigid_restart": 0,
               "last_wd_fix": 0, "zombie_streak": 0, "zombie_series_since": 0,
-              "rig_id_ok": None, "gpu_reset_since": 0, "gpu_reset_buses": []}
+              "rig_id_ok": None, "gpu_reset_since": 0, "gpu_reset_buses": [],
+              "expected_gpu_count": 0, "gpu_count_since": 0, "gpu_count_deficit": 0}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -2959,7 +2961,7 @@ def _heal_check_miner(st, report):
     record_metrics_event("warning", "Self-heal: miner was not running - started it (flight sheet is active)")
 
 def _gpu_reset_affected():
-    """[(index, bus)] cards the driver marked '[GPU requires reset]'.
+    """[(index, bus), current_gpu_count] cards the driver marked '[GPU requires reset]'.
 
     That state is set by the driver after a GSP heartbeat hang (Xid 154,
     'GPU recovery action changed ... to GPU Reset Required'). The cards
@@ -2972,18 +2974,22 @@ def _gpu_reset_affected():
 
     Detection also catches CSV rows where power.draw/fan.speed show
     ERR! or N/A (observed on RIG1/RIG2 Nov 2026: 'Unable to determine
-    the device handle' / 'ERR!' in nvidia-smi output)."""
+    the device handle' / 'ERR!' in nvidia-smi output).
+
+    Also returns the total GPU count visible to nvidia-smi for deficit tracking."""
     out, _, code = run_command(
         "nvidia-smi --query-gpu=index,pci.bus_id,power.draw,fan.speed "
         "--format=csv,noheader 2>/dev/null")
     if code != 0:
-        return []
+        return [], 0
     out = out or ""
     bad = []
+    gpu_count = 0
     for line in out.splitlines():
         line_stripped = line.strip()
         if not line_stripped:
             continue
+        gpu_count += 1
         # Direct "GPU requires reset" marker
         if "GPU requires reset" in line_stripped:
             parts = [p.strip() for p in line_stripped.split(",")]
@@ -2996,30 +3002,94 @@ def _gpu_reset_affected():
             # parts[2] = power.draw, parts[3] = fan.speed
             if parts[2] in ("ERR!", "N/A", "[N/A]") or parts[3] in ("ERR!", "N/A", "[N/A]"):
                 bad.append((parts[0], parts[1]))
-    return bad
+    return bad, gpu_count
 
 
 def _heal_check_gpu_reset(st, report):
-    """Reboot the machine when cards are marked '[GPU requires reset]'.
-
-    Detection is independent of khs (the miner keeps hashing on the
-    remaining cards). To survive a mid-boot/JIT false positive the state
-    must persist HEAL_GPU_RESET_CONFIRM (two heal passes) before the
-    reboot fires; issue goes through _net_heal_try_reboot (quiet hours,
-    rate limit) so it never storms alongside the net-heal ladder."""
+    """Reboot the machine when cards are marked '[GPU requires reset]' OR
+    when GPU count drops below the expected count (cards failed to initialize
+    at boot or fell off the bus). Both detections are independent of khs
+    (the miner keeps hashing on the remaining cards). To survive a mid-boot/JIT
+    false positive the state must persist HEAL_GPU_RESET_CONFIRM /
+    HEAL_GPU_COUNT_CONFIRM (two heal passes) before the reboot fires;
+    issue goes through _net_heal_try_reboot (quiet hours, rate limit) so it
+    never storms alongside the net-heal ladder."""
     now = int(time.time())
     if os.path.exists(MINER_STOP_FLAG) or not os.path.exists(MINER_RUN_FLAG):
         # miner stopped or owned by something else (boot, MAINTENANCE):
         # no mining is intended - do not reboot the machine
         st["gpu_reset_since"] = 0
         st["gpu_reset_buses"] = []
+        st["gpu_count_since"] = 0
+        st["gpu_count_deficit"] = 0
         return
     try:
         if (_oc_state_load() or {}).get("active"):
             return  # oc_recovery is walking clocks - do not fight its tests
     except Exception:
         pass
-    bad = _gpu_reset_affected()
+    bad, gpu_count = _gpu_reset_affected()
+
+    # --- GPU count deficit detection ---
+    # Priority: cluster.json (user-set, synced across farm) > heal state (learned fallback)
+    expected = 0
+    try:
+        cs = load_cluster_state()
+        self_id = cs.get("self_id")
+        for rig in cs.get("rigs", []):
+            if rig.get("id") == self_id:
+                expected = int(rig.get("expected_gpu_count") or 0)
+                break
+    except Exception:
+        pass
+    if expected == 0:
+        expected = int(st.get("expected_gpu_count") or 0)
+    # Learn expected count ONLY when nvidia-smi output is clean (no "GPU requires reset",
+    # no ERR!/N/A in power/fan) AND neither cluster.json nor heal state has a value.
+    # This prevents learning a broken state (e.g. GPUs missing at boot).
+    clean_smi = (len(bad) == 0 and gpu_count > 0)
+    if expected == 0 and clean_smi:
+        # First successful CLEAN observation - learn the expected count
+        st["expected_gpu_count"] = gpu_count
+        expected = gpu_count
+        report["notes"].append("Learned expected GPU count: %d" % gpu_count)
+    # Sync learned value back to heal state if cluster.json has a value
+    elif expected > 0 and expected != int(st.get("expected_gpu_count") or 0):
+        st["expected_gpu_count"] = expected
+
+    if expected > 0 and gpu_count > 0 and gpu_count < expected:
+        deficit = expected - gpu_count
+        st["gpu_count_deficit"] = deficit
+        since = int(st.get("gpu_count_since") or 0)
+        if not since:
+            st["gpu_count_since"] = now
+            report["notes"].append("GPU count deficit: %d/%d missing (confirming)" % (deficit, expected))
+            return
+        waited = now - since
+        if waited < HEAL_GPU_COUNT_CONFIRM:
+            report["notes"].append("GPU count deficit: %d/%d missing for %d min - confirming before power cycle" %
+                                   (deficit, expected, waited // 60))
+            return
+        # GPU deficit confirmed - try HA powercycle (hard power off/on) if configured,
+        # otherwise fall back to sreboot.
+        issued, desc = _heal_try_powercycle("GPU count deficit: %d of %d GPUs missing" % (deficit, expected))
+        st["gpu_count_since"] = 0
+        st["gpu_count_deficit"] = 0
+        if issued:
+            st["last_action"] = "GPU count deficit - %s" % desc
+            report["fixed"].append(st["last_action"])
+            logging.warning("Self-heal: %s", st["last_action"])
+            record_metrics_event("danger", "Self-heal: " + st["last_action"])
+        else:
+            report["notes"].append("GPU count deficit power cycle deferred (%s)" % desc)
+        return
+    else:
+        # No deficit - clear the deficit timer
+        if st.get("gpu_count_since"):
+            st["gpu_count_since"] = 0
+            st["gpu_count_deficit"] = 0
+
+    # --- Original "GPU requires reset" detection ---
     if not bad:
         if st.get("gpu_reset_since"):
             st["gpu_reset_since"] = 0
@@ -3049,6 +3119,49 @@ def _heal_check_gpu_reset(st, report):
         record_metrics_event("danger", "Self-heal: " + st["last_action"])
     else:
         report["notes"].append("GPU reset reboot deferred (%s)" % desc)
+
+
+def _heal_try_powercycle(reason):
+    """Try to power cycle the rig via HA smart plug. Falls back to sreboot.
+    Returns (issued, description)."""
+    # Load HA config
+    conf = _ha_load_conf()
+    if not _ha_conf_valid(conf):
+        # No HA config - fall back to sreboot
+        nst = _net_heal_state_load()
+        issued, desc = _net_heal_try_reboot(nst, reason + " (fallback: no HA)")
+        _net_heal_state_save(nst)
+        return issued, desc
+    # Get self rig's HA plug
+    cs = load_cluster_state()
+    self_id = cs.get("self_id")
+    ha_plug = None
+    for rig in cs.get("rigs", []):
+        if rig.get("id") == self_id:
+            ha_plug = rig.get("ha_plug")
+            break
+    if not ha_plug:
+        # No plug configured for this rig - fall back to sreboot
+        nst = _net_heal_state_load()
+        issued, desc = _net_heal_try_reboot(nst, reason + " (fallback: no plug)")
+        _net_heal_state_save(nst)
+        return issued, desc
+    # Check plug state first
+    plug_state, age, err = _ha_fan_power_state_for_entity(conf, ha_plug)
+    if plug_state != "on":
+        return False, "plug not ON (%s%s)" % (plug_state or "?", (": " + err) if err else "")
+    # Turn off
+    ok_off, err_off = _ha_service(conf, "turn_off", ha_plug)
+    if not ok_off:
+        return False, "turn off failed: %s" % err_off
+    # Dwell
+    time.sleep(HA_POWER_DWELL)
+    # Turn on
+    ok_on, err_on = _ha_service(conf, "turn_on", ha_plug)
+    if ok_on:
+        return True, "HA power cycle (off %ds -> on) - %s" % (HA_POWER_DWELL, reason)
+    else:
+        return False, "turn on failed: %s" % err_on
 
 
 def _heal_check_zombie(st, report):
@@ -5033,7 +5146,10 @@ RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses
                     # cycles for this rig; >=3 triggers the "physical attention"
                     # state and the 6h slow-retry cadence; lives in the cluster
                     # state ON PURPOSE: any acting panel must see the same ladder)
-                    "pc_fail"]
+                    "pc_fail",
+                    # expected GPU count for this rig (0 = unknown/auto-learn from clean nvidia-smi).
+                    # Used by self-heal to detect GPU count deficit (cards missing at boot or fallen off bus).
+                    "expected_gpu_count"]
 ACCESS_ENTRY_FIELDS = ["id", "name", "type", "host", "port", "user", "auth", "password", "key_path",
                        "jump_id", "jump_host", "jump_port", "jump_user", "jump_auth", "jump_password", "jump_key_path"]
 
@@ -10631,6 +10747,10 @@ def api_cluster_rig_save():
                         return jsonify({"success": False, "message": "Dashboard password of the remote rig is required."}), 400
                 else:
                     existing["password"] = password
+        # Optional fields that can be updated
+        for field in ("location", "ha_plug", "ha_enabled", "expected_gpu_count"):
+            if field in data:
+                existing[field] = data[field]
         existing["updated_at"] = now
         action = "updated"
 
