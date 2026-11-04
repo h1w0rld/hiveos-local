@@ -5139,7 +5139,7 @@ app.config['ACCESS_PASSWORD'] = ACCESS_PASSWORD
 # ---------------- Cluster (multi-rig) state management ----------------
 
 RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses", "updated_at", "added_at",
-                    # Home Assistant integration: room mark (boiler/house/none) + smart
+                    # Home Assistant integration: room mark (stokehole/house/none) + smart
                     # plug entity mapped to this rig (synced with the cluster state)
                     "location", "ha_plug", "ha_enabled",
                     # shared powercycle escalation counter (consecutive failed plug
@@ -9580,13 +9580,13 @@ def api_metrics_export():
 
 # ---------------- Home Assistant integration --------------------------------
 # Panel <-> Home Assistant bridge for two assisted operations:
-#   (1) Smart-plug power cycling: a rig marked as "boiler room" (К) or "house"
+#   (1) Smart-plug power cycling: a rig marked as "stokehole" (К) or "house"
 #       (Д) that is COMPLETELY unreachable (no SSH route answers) for several
 #       minutes gets its smart plug toggled off/on through the HA REST API.
 #       The 13h POST-hang case (RIG2, 27 Oct) and the 11h "alive but dark"
 #       case (RIG1, 25 Oct) are exactly the states no in-OS mechanism can
 #       get out of - the plug is the external actor.
-#   (2) Fan assist in the boiler room: GPU temps of the rigs marked К drive
+#   (2) Fan assist in the stokehole: GPU temps of the rigs marked К drive
 #       one fan (a smart plug + optional channel switches that pick the
 #       speed). Target band 57-62 °C: any card > 62 -> fan on; average < 57
 #       -> fan off. The freeze protection ALWAYS outranks cooling: outdoor
@@ -9780,7 +9780,7 @@ def _ha_sensor_temp(conf, entity_id):
 def _ha_pull_layout(conf, state):
     """Pull the farm layout from Home Assistant (28 Oct redesign: the rigs are
     arranged over THERE, the panel never marks them by hand):
-      rooms:  input_select.rig_<N> with state k/d/-  -> rig.location boiler/house/none
+      rooms:  input_select.rig_<N> with state k/d/-  -> rig.location stokehole/house/none
       plugs:  switch named 'RIG <N>'                 -> rig.ha_plug
       fan:    switch named 'Вентилятор'              -> fan master plug (power the WHOLE fan)
       room:   sensor named 'Кочегарка ... Temperature' -> room temp watch:
@@ -9829,7 +9829,7 @@ def _ha_pull_layout(conf, state):
         loc = ""
         sel = byid.get("input_select.rig_%s" % n)
         if sel is not None:
-            loc = {"k": "boiler", "d": "house", "-": "none"}.get(
+            loc = {"k": "stokehole", "d": "house", "-": "none"}.get(
                 str(sel.get("state") or "").strip().lower(), "")
         plug = ""
         for eid in switch_ids:
@@ -9889,14 +9889,14 @@ def _ha_reachable(rig):
     return any(results)
 
 def _ha_is_powercycle_rig(rig):
-    """К (boiler) and Д (house) rigs may be power cycled; a rig in a lived-in
+    """К (stokehole) and Д (house) rigs may be power cycled; a rig in a lived-in
     house (location 'none'/empty) is NEVER touched - a night reboot there
     would wake people up. The per-rig HA switch (ha_enabled False, the
     вкл/выкл toggle in the HA menu) additionally suppresses the automation;
     manual powercycle does not check this (an explicit user action)."""
     if rig.get("ha_enabled", True) is False:
         return False
-    return (rig.get("location") in ("boiler", "house")) and bool(rig.get("ha_plug"))
+    return (rig.get("location") in ("stokehole", "house")) and bool(rig.get("ha_plug"))
 
 def _ha_cluster_rigs():
     state = load_cluster_state()
@@ -9905,14 +9905,14 @@ def _ha_cluster_rigs():
     return state, cache
 
 def _ha_rig_temps(state, cache, fresh_ttl):
-    """GPU temps of all rigs marked 'boiler': returns (values[], any_stale, names).
+    """GPU temps of all rigs marked 'stokehole': returns (values[], any_stale, names).
     Temps come from the cluster stats cache, so they keep flowing even when
     the SSH routes to a rig are broken (only staleness is visible)."""
     values = []
     freshest_ok = True
     any_rig = False
     for rig in state.get("rigs", []):
-        if rig.get("location") != "boiler":
+        if rig.get("location") != "stokehole":
             continue
         any_rig = True
         entry = cache.get("rigs", {}).get(rig.get("id"), {})
@@ -10164,9 +10164,9 @@ def _ha_fan_tick():
         _ha_save_state(st)
         return
     temp_on, fresh_on, _n1 = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
-    temp_off, fresh_off, n_boiler = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
-    if n_boiler == 0:
-        fan["last_reason"] = "no rigs marked boiler room (К) in Home Assistant"
+    temp_off, fresh_off, n_stokehole = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
+    if n_stokehole == 0:
+        fan["last_reason"] = "no rigs marked stokehole (К) in Home Assistant"
         _ha_save_state(st)
         return
     any_hot = bool(temp_on) and max(temp_on) > HA_FAN_ON_TEMP
@@ -10304,7 +10304,7 @@ def _ha_public():
         "token_masked": ("********" if token else ""),
         "fan_power_entity": cfg.get("fan_power_entity", ""),
         "fan_on_channel": cfg.get("fan_on_channel", ""),
-        "boiler_sensor_entity": cfg.get("boiler_sensor_entity", ""),
+        "stokehole_sensor_entity": cfg.get("stokehole_sensor_entity", ""),
         "outdoor_sensor_entity": cfg.get("outdoor_sensor_entity", ""),
         "fan_channel_entities": cfg.get("fan_channel_entities", []),
         "connected": connected,
@@ -10389,7 +10389,7 @@ def api_ha_config():
             return jsonify({"success": False, "message": "Bad URL"}), 400
         cfg["url"] = u
     for key, label in (("fan_power_entity", "fan master plug"), ("fan_on_channel", "fan channel"),
-                       ("boiler_sensor_entity", "boiler room sensor"), ("outdoor_sensor_entity", "outdoor sensor")):
+                       ("stokehole_sensor_entity", "stokehole sensor"), ("outdoor_sensor_entity", "outdoor sensor")):
         if key in data:
             v = str(data.get(key) or "").strip()
             if v and not HA_ENTITY_ID_RE.match(v):
@@ -10450,7 +10450,7 @@ def api_ha_location():
     if not rig_id:
         return jsonify({"success": False, "message": "rig_id required"}), 400
     loc = str(data.get("location") or "")
-    if loc not in ("boiler", "house", "none", ""):
+    if loc not in ("stokehole", "house", "none", ""):
         return jsonify({"success": False, "message": "Bad location"}), 400
     plug = str(data.get("ha_plug") or "").strip()
     if plug and not HA_ENTITY_ID_RE.match(plug):
@@ -10467,7 +10467,7 @@ def api_ha_location():
         rig["ha_enabled"] = bool(data.get("enabled"))
     rig["updated_at"] = int(time.time())
     save_cluster_state(state)
-    label = {"boiler": "кочегарка (К)", "house": "дом (Д)", "none": "жилой дом (—)"}.get(loc, "—")
+    label = {"stokehole": "кочегарка (К)", "house": "дом (Д)", "none": "жилой дом (—)"}.get(loc, "—")
     if "enabled" in data and not loc:
         label = "HA powercycle %s" % ("ON" if rig.get("ha_enabled", True) else "OFF")
     record_metrics_event("info", "HA: %s -> %s" % (rig.get("name") or rig_id, label))
@@ -10529,7 +10529,7 @@ def api_ha_powercycle():
         return jsonify({"success": False, "message": "Rig not found"}), 404
     if rig.get("id") == state["self_id"]:
         return jsonify({"success": False, "message": "Cannot power cycle this own rig"}), 400
-    if rig.get("location") not in ("boiler", "house"):
+    if rig.get("location") not in ("stokehole", "house"):
         return jsonify({"success": False, "message": "Rig is marked as a lived-in place (—) - powercycle disabled"}), 403
     plug = rig.get("ha_plug")
     if not plug:

@@ -1556,7 +1556,7 @@ async function toggleGuardMode(rigId, checkbox) {
 window.toggleGuardMode = toggleGuardMode;
 
 // ===================== Home Assistant integration =====================
-// Smart-plug powercycle for К/Д rigs + boiler room fan assist. Rooms, plugs,
+// Smart-plug powercycle for К/Д rigs + stokehole fan assist. Rooms, plugs,
 // the fan master plug and the room-sensor watch are PULLED from Home
 // Assistant (input_select.rig_N, switches named 'RIG N', switch 'Вентилятор',
 // sensor 'Кочегарка … Temperature') — the panel never marks them by hand.
@@ -1588,7 +1588,7 @@ async function refreshHaMenu() {
 }
 
 function haLocChipHtml(loc) {
-    if (loc === 'boiler') return '<span class="badge bg-warning bg-opacity-25 border border-warning text-warning" title="К — boiler room">К</span>';
+    if (loc === 'stokehole') return '<span class="badge bg-warning bg-opacity-25 border border-warning text-warning" title="К — stokehole">К</span>';
     if (loc === 'house') return '<span class="badge bg-info bg-opacity-25 border border-info text-info" title="Д — house">Д</span>';
     if (loc === 'none') return '<span class="badge bg-secondary bg-opacity-25 border border-secondary text-secondary-emphasis" title="— — lived-in house, never touched">—</span>';
     return '<span class="badge bg-secondary bg-opacity-25 border border-secondary text-secondary-emphasis" title="Room unknown">?</span>';
