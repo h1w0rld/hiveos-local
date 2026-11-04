@@ -9855,36 +9855,35 @@ def _ha_pull_layout(conf, state):
             "room_state": room_state, "err": ""}
 
 def _ha_reachable(rig):
-    """True when ANY configured SSH route opens a TCP connection.
+    """True when ANY configured SSH route can execute a command on the target rig.
     This is the 'is the machine up at all' signal of the plug powercycle.
-    Routes are probed IN PARALLEL (a fully dead rig answered 3 s, not
-    3 x timeout) so the 60 s worker round cannot stretch by minutes when
-    several peers are offline. (_probe_tcp lives further down the module
-    - resolved at runtime.)"""
+    Uses the same SSH infrastructure as cluster_remote_api (run_ssh_command)
+    to verify we can actually reach the target rig, not just the jump host.
+    Routes are probed IN PARALLEL with a short timeout."""
     try:
         accesses = [a for a in _ordered_rig_accesses(rig) if a.get("host")]
     except Exception:
         accesses = []
     if not accesses:
         return False
-    if len(accesses) == 1:
-        a0 = accesses[0]
-        return _probe_tcp(a0.get("host"), int(a0.get("port") or 22),
-                          timeout=HA_POWER_TCP_TIMEOUT)
-    results = [False] * len(accesses)
 
-    def _try(idx, access):
+    # Use a very short timeout for the reachability probe
+    probe_timeout = HA_POWER_TCP_TIMEOUT
+
+    def _try_ssh(idx, access):
         try:
-            results[idx] = _probe_tcp(access.get("host"),
-                                      int(access.get("port") or 22),
-                                      timeout=HA_POWER_TCP_TIMEOUT)
+            # Simple command that succeeds instantly if SSH works
+            ok, out, err = run_ssh_command(access, "echo ok", timeout=probe_timeout)
+            results[idx] = ok
         except Exception:
-            pass
-    th = [threading.Thread(target=_try, args=(i, a)) for i, a in enumerate(accesses)]
+            results[idx] = False
+
+    results = [False] * len(accesses)
+    th = [threading.Thread(target=_try_ssh, args=(i, a)) for i, a in enumerate(accesses)]
     for t in th:
         t.daemon = True
         t.start()
-    deadline = HA_POWER_TCP_TIMEOUT + 1.0
+    deadline = probe_timeout + 2.0  # small buffer for thread overhead
     for t in th:
         t.join(deadline)
     return any(results)
