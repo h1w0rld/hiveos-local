@@ -3094,6 +3094,7 @@ def _heal_check_gpu_reset(st, report):
         if st.get("gpu_reset_since"):
             st["gpu_reset_since"] = 0
             st["gpu_reset_buses"] = []
+            st["gpu_reset_reboot_attempts"] = 0
         return
     buses = [b for _, b in bad]
     st["gpu_reset_buses"] = buses
@@ -3104,14 +3105,33 @@ def _heal_check_gpu_reset(st, report):
         return
     waited = now - since
     if waited < HEAL_GPU_RESET_CONFIRM:
-        report["notes"].append("GPU reset required on %s for %d min - confirming before reboot" %
+        report["notes"].append("GPU reset required on %s for %d min - confirming before action" %
                                (", ".join(buses), waited // 60))
         return
-    nst = _net_heal_state_load()
-    issued, desc = _net_heal_try_reboot(nst, "GPU cards hung (%s)" % ", ".join(buses))
-    _net_heal_state_save(nst)
-    st["gpu_reset_since"] = 0
-    st["gpu_reset_buses"] = []
+    # First attempt: software reboot. If GPU still requires reset after reboot,
+    # the state will persist (gpu_reset_since NOT cleared) and next check
+    # will immediately escalate to HA power cycle because waited >> CONFIRM.
+    reboot_attempts = int(st.get("gpu_reset_reboot_attempts") or 0)
+    if reboot_attempts == 0:
+        nst = _net_heal_state_load()
+        issued, desc = _net_heal_try_reboot(nst, "GPU cards hung (%s) - software reboot attempt 1" % ", ".join(buses))
+        _net_heal_state_save(nst)
+        if issued:
+            # Reboot actually issued - next check after reboot will escalate
+            st["gpu_reset_reboot_attempts"] = 1
+            # Do NOT clear gpu_reset_since / gpu_reset_buses - keep original
+            # timestamp so next check after reboot sees waited >> CONFIRM and escalates.
+        else:
+            # Reboot deferred (quiet hours, rate limit) - clear timer to re-arm
+            st["gpu_reset_since"] = 0
+            st["gpu_reset_buses"] = []
+            st["gpu_reset_reboot_attempts"] = 0
+    else:
+        # Already tried software reboot, escalate to HA power cycle
+        issued, desc = _heal_try_powercycle("GPU cards hung (%s) - HA power cycle after failed software reboot" % ", ".join(buses))
+        st["gpu_reset_reboot_attempts"] = 0
+        st["gpu_reset_since"] = 0
+        st["gpu_reset_buses"] = []
     if issued:
         st["last_action"] = "GPU cards hung - %s" % desc
         report["fixed"].append(st["last_action"])
@@ -3122,9 +3142,16 @@ def _heal_check_gpu_reset(st, report):
 
 
 def _heal_try_powercycle(reason):
-    """Try to power cycle the rig via HA smart plug. Falls back to sreboot.
+    """Power cycle this rig through its HA smart plug - DELEGATED to a peer panel.
+
+    The rig must never cut its own plug from inside this process: the machine
+    loses power at turn_off, so the turn_on scheduled 30 s later can never run
+    and the rig stays dark until a human flips the plug (RIG2, 8 Nov 2026:
+    heal saw 7/8 GPUs after boot, "power cycled" itself at 13:07 UTC and the
+    farm sat blind for 4 h because the worker refuses to touch an OFF plug).
+    We therefore drop a request into the cluster state and a peer runs the
+    off -> dwell -> on sequence. Falls back to sreboot when no peer can help.
     Returns (issued, description)."""
-    # Load HA config
     conf = _ha_load_conf()
     if not _ha_conf_valid(conf):
         # No HA config - fall back to sreboot
@@ -3132,36 +3159,144 @@ def _heal_try_powercycle(reason):
         issued, desc = _net_heal_try_reboot(nst, reason + " (fallback: no HA)")
         _net_heal_state_save(nst)
         return issued, desc
-    # Get self rig's HA plug
-    cs = load_cluster_state()
-    self_id = cs.get("self_id")
-    ha_plug = None
-    for rig in cs.get("rigs", []):
-        if rig.get("id") == self_id:
-            ha_plug = rig.get("ha_plug")
+    requested, detail = _ha_request_peer_powercycle(reason)
+    if requested:
+        return True, "peer power cycle requested (%s) - %s" % (detail, reason)
+    # No peer can run it (alone on the farm, no plug, lived-in room): sreboot
+    nst = _net_heal_state_load()
+    issued, desc = _net_heal_try_reboot(nst, reason + " (fallback: %s)" % detail)
+    _net_heal_state_save(nst)
+    return issued, desc
+
+
+def _ha_request_peer_powercycle(reason):
+    """Ask another panel to power cycle THIS rig (self-service power cycle).
+
+    Writes {"ts", "reason"} into our own rig entry in cluster.json; the peer
+    powercycle worker picks it up within a tick or two and runs the plug cycle.
+    Returns (requested, detail)."""
+    try:
+        state = load_cluster_state()
+    except Exception as e:
+        return False, "cluster state unreadable: %s" % (e,)
+    self_id = state.get("self_id")
+    rig = None
+    for r in state.get("rigs", []):
+        if r.get("id") == self_id:
+            rig = r
             break
-    if not ha_plug:
-        # No plug configured for this rig - fall back to sreboot
-        nst = _net_heal_state_load()
-        issued, desc = _net_heal_try_reboot(nst, reason + " (fallback: no plug)")
-        _net_heal_state_save(nst)
-        return issued, desc
-    # Check plug state first
-    plug_state, age, err = _ha_fan_power_state_for_entity(conf, ha_plug)
-    if plug_state != "on":
-        return False, "plug not ON (%s%s)" % (plug_state or "?", (": " + err) if err else "")
-    # Turn off
-    ok_off, err_off = _ha_service(conf, "turn_off", ha_plug)
-    if not ok_off:
-        return False, "turn off failed: %s" % err_off
-    # Dwell
-    time.sleep(HA_POWER_DWELL)
-    # Turn on
-    ok_on, err_on = _ha_service(conf, "turn_on", ha_plug)
-    if ok_on:
-        return True, "HA power cycle (off %ds -> on) - %s" % (HA_POWER_DWELL, reason)
+    if rig is None or not rig.get("ha_plug"):
+        return False, "no smart plug mapped for this rig"
+    if rig.get("ha_enabled", True) is False:
+        return False, "HA automation disabled for this rig"
+    if rig.get("location") not in ("stokehole", "house"):
+        return False, "rig is marked as a lived-in place"
+    alive = []
+    for other in state.get("rigs", []):
+        oid = other.get("id")
+        if not oid or oid == self_id:
+            continue
+        try:
+            if _ha_reachable(other):
+                alive.append(oid)
+        except Exception:
+            pass
+    if not alive:
+        return False, "no reachable peer to run the cycle"
+    now = int(time.time())
+    rig["pc_request"] = {"ts": now, "reason": str(reason)[:200]}
+    rig["updated_at"] = now
+    try:
+        save_cluster_state(state)
+    except Exception as e:
+        return False, "cluster state write failed: %s" % (e,)
+    logging.warning("Self-heal: asked peer panel(s) %s for a power cycle - %s",
+                    ", ".join(alive), reason)
+    return True, "peer %s" % alive[0]
+
+
+def _ha_pc_request_ts(rig):
+    """Epoch of a delegated powercycle request (0 = none)."""
+    req = rig.get("pc_request")
+    if isinstance(req, dict):
+        req = req.get("ts")
+    try:
+        return int(req or 0)
+    except Exception:
+        return 0
+
+
+def _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts):
+    """Run a plug cycle that ANOTHER panel requested for itself.
+    Returns True when the request was handled (or claimed by another actor)."""
+    rid = rig.get("id")
+    reason = ""
+    if isinstance(rig.get("pc_request"), dict):
+        reason = str(rig["pc_request"].get("reason") or "")
+    actor = next((p for p in panels if p != rid), None)
+    if actor is None:
+        # Only the requester is alive - nobody can run its cycle
+        rec["last_result"] = "request: no second panel alive"
+        _ha_save_state(st)
+        return True
+    if actor != state.get("self_id"):
+        rec["last_result"] = "request: waiting for %s" % actor
+        _ha_save_state(st)
+        return True
+    plug = rig.get("ha_plug")
+    age_min = max(0, int((now - req_ts) / 60))
+    _ha_pc_log("%s asked for a plug cycle (%d min ago, %s) - running it here"
+               % (name, age_min, reason or "no reason"))
+    record_metrics_event("danger",
+        "HA powercycle (requested by %s): plug cycle%s"
+        % (name, (": " + reason) if reason else ""))
+    plug_state, _age, err = _ha_fan_power_state_for_entity(conf, plug)
+    ok = False
+    if plug_state == "off":
+        # The plug is already cut (earlier self-cut or a manual off): restore power
+        ok, err_on = _ha_service(conf, "turn_on", plug)
+        if ok:
+            rec["last_result"] = "request: plug was OFF - power restored"
     else:
-        return False, "turn on failed: %s" % err_on
+        ok_off, err_off = _ha_service(conf, "turn_off", plug)
+        if not ok_off:
+            rec["last_result"] = "request: failed to turn plug off (%s)" % err_off
+            record_metrics_event("danger",
+                "HA powercycle %s (requested): turn OFF failed (%s)" % (name, err_off))
+            _ha_save_state(st)
+            return True
+        time.sleep(HA_POWER_DWELL)
+        # Verify it really went off, then power back up
+        plug_state, _a2, _e2 = _ha_fan_power_state_for_entity(conf, plug)
+        if plug_state == "on":
+            ok_off2, _e3 = _ha_service(conf, "turn_off", plug)
+            if ok_off2:
+                time.sleep(5)
+        ok, err_on = _ha_service(conf, "turn_on", plug)
+        if ok:
+            rec["last_result"] = "request: power cycled (off %ds -> on)" % HA_POWER_DWELL
+    if ok:
+        # Served: drop the request so no panel repeats it
+        rig["pc_request"] = None
+        rig["updated_at"] = int(now)
+        try:
+            save_cluster_state(state)
+        except Exception:
+            pass
+        rec["down_since"] = None
+        rec.pop("warned", None)
+        record_metrics_event("success",
+            "HA powercycle (requested by %s): plug off %ds -> on. Rig should boot in 1-3 min."
+            % (name, HA_POWER_DWELL))
+        _ha_pc_log("%s requested cycle served (off %ds -> on)" % (name, HA_POWER_DWELL))
+    else:
+        rec["last_result"] = "request: turn ON failed (%s)" % err_on
+        record_metrics_event("danger",
+            "HA powercycle %s (requested): turn ON failed (%s) - CHECK THE PLUG IN HA"
+            % (name, err_on))
+        _ha_pc_log("%s requested cycle FAILED at turn ON (%s)" % (name, err_on))
+    _ha_save_state(st)
+    return True
 
 
 def _heal_check_zombie(st, report):
@@ -5147,6 +5282,12 @@ RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses
                     # state and the 6h slow-retry cadence; lives in the cluster
                     # state ON PURPOSE: any acting panel must see the same ladder)
                     "pc_fail",
+                    # delegated self-powercycle: a rig that decides to power cycle
+                    # ITSELF writes {"ts": epoch, "reason": "..."} here and a PEER
+                    # panel runs the off->on sequence. A rig must never cut its own
+                    # plug in-process: it dies at turn_off and the scheduled turn_on
+                    # never runs (RIG2 stayed dark 4 h that way on 8 Nov 2026).
+                    "pc_request",
                     # expected GPU count for this rig (0 = unknown/auto-learn from clean nvidia-smi).
                     # Used by self-heal to detect GPU count deficit (cards missing at boot or fallen off bus).
                     "expected_gpu_count"]
@@ -9622,6 +9763,8 @@ HA_PC_ESCALATE_AFTER = 3    # cycle N in a row without recovery -> physical atte
 HA_PC_EXHAUSTED_GAP = 21600 # after "physical attention": retry only every 6 h
 HA_PC_LEADER_GRACE = 900    # if the elected panel is silent this long, the next one acts
 HA_PC_TICK_WARN = 10        # tick slower than this -> write into the persistent log
+HA_PC_REQUEST_TTL = 900     # a self-powercycle request must be served by a peer within this
+HA_PC_OFF_RESTORE = 1800    # plug found OFF + rig dark this long -> switch the power back on
 
 HA_FAN_INTERVAL = 60
 HA_FAN_ON_TEMP = 62.0       # any K-rig card above this -> fan needed
@@ -9990,13 +10133,43 @@ def _ha_powercycle_tick_body(conf):
     im_leader = (leader == self_id)
     for rig in state.get("rigs", []):
         rid = rig.get("id")
-        if not rid or rid == self_id:
-            continue  # self: this panel IS running, its own plug is not ours to cycle
+        if not rid:
+            continue
+        if rid == self_id:
+            # Our own entry: this panel IS running, its own plug is not ours to
+            # cycle. A request that survived our boot was already served by a
+            # peer - drop it so nobody cycles us twice.
+            own_req = _ha_pc_request_ts(rig)
+            if own_req and now - own_req > 120:
+                rig["pc_request"] = None
+                rig["updated_at"] = int(now)
+                try:
+                    save_cluster_state(state)
+                except Exception:
+                    pass
+                _ha_pc_log("own powercycle request cleared (already served before boot)")
+            continue
         rec = power.setdefault(rid, {})
         if not _ha_is_powercycle_rig(rig):
             rec.pop("down_since", None)
             continue
         name = rig.get("name") or rid
+        # A rig can ask a peer to power cycle it (self-heal: GPU count deficit /
+        # hung cards). Serve the request before the down-window logic: the rig is
+        # still ALIVE when it asks - it must not cut its own plug.
+        req_ts = _ha_pc_request_ts(rig)
+        if req_ts and now - req_ts <= HA_PC_REQUEST_TTL:
+            if _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts):
+                continue
+        elif req_ts:
+            rig["pc_request"] = None
+            rig["updated_at"] = int(now)
+            try:
+                save_cluster_state(state)
+            except Exception:
+                pass
+            _ha_pc_log("%s stale powercycle request dropped (older than %d s)"
+                       % (name, HA_PC_REQUEST_TTL))
         alive = reach.get(rid)
         if alive is None:
             alive = _ha_reachable(rig)
@@ -10036,11 +10209,41 @@ def _ha_powercycle_tick_body(conf):
             continue
         down_min = int((now - int(rec.get("down_since") or 0)) / 60)
         # Final gate right before acting: read the plug from HA and confirm it
-        # is ON. off/unavailable = someone else is already cycling it or the
-        # entity is dead; either way touching it would make things worse.
+        # is ON. A plug cycle ALWAYS ends with ON, so an OFF plug was left off by
+        # someone: either a human or a rig that tried to cut its own power and
+        # could never send the turn-on. Never blind-cycle in that state, but do
+        # restore power once the outage is real (that failure mode left RIG2 dark
+        # for hours on 8 Nov 2026).
         plug_state, age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
         st["last_probe"] = {"ts": int(now), "ok": bool(plug_state), "err": err or ""}
-        if plug_state != "on":
+        if plug_state == "on":
+            rec.pop("off_since", None)
+        else:
+            if plug_state == "off":
+                if not rec.get("off_since"):
+                    rec["off_since"] = int(now)
+                waited = max(int(now - int(rec.get("down_since") or now)),
+                             int(now - int(rec["off_since"])))
+                if (waited >= HA_PC_OFF_RESTORE
+                        and now - float(rec.get("last_cycle") or 0) >= HA_POWER_GAP):
+                    ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
+                    rec["last_cycle"] = int(now)
+                    if ok_on:
+                        rec["last_result"] = "plug was OFF - power restored"
+                        rec["down_since"] = None
+                        rec.pop("off_since", None)
+                        rec.pop("warned", None)
+                        record_metrics_event("warning",
+                            "HA: plug for %s was OFF while the rig stayed dark for %d min"
+                            " - power restored" % (name, waited // 60))
+                        _ha_pc_log("%s plug was OFF for %d min - turned it ON"
+                                   % (name, waited // 60))
+                        _ha_save_state(st)
+                        continue
+                    rec["last_result"] = "plug was OFF - turn ON failed (%s)" % err_on
+                    _ha_pc_log("%s plug was OFF - turn ON failed (%s)" % (name, err_on))
+                    _ha_save_state(st)
+                    continue
             rec["last_result"] = "plug not on (%s%s) - skipped" % (plug_state or "?",
                                  (": " + err) if err else "")
             rec["down_since"] = None  # restart the window: next tick re-awaits 5 min
