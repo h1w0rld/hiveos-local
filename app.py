@@ -2054,7 +2054,15 @@ def start_metrics_sampler():
 # pulled from the HiveOS cloud agent after a reboot, sometimes minutes or
 # hours later) is reverted and re-applied to the hardware. Cloud mode (the
 # default) changes nothing: no checks, no automatic applies - manual only.
-GUARD_CONF = os.path.join(HIVE_CONFIG_DIR, "local_guard.json")
+# 1.13.05: the state lives in guard_state.json - a *fresh* name. On RIG5 the
+# old local_guard.json inode got wedged inside ntfs-3g (/hive-config is
+# fuseblk): every rename over it, every in-place write and even unlink failed
+# with EIO, so the guard state silently froze on a 27 Oct snapshot and kept
+# reverting the rig to onezerominer 1.8.3 after each boot/panel restart. A new
+# filename sidesteps the dead inode without a risky remount; the first save
+# migrates the legacy state.
+GUARD_CONF = os.path.join(HIVE_CONFIG_DIR, "guard_state.json")
+GUARD_CONF_LEGACY_NAME = "local_guard.json"
 GUARD_FILES = ["rig.conf", "wallet.conf", "nvidia-oc.conf", "amd-oc.conf", "autofan.conf"]
 GUARD_CHECK_INTERVAL = 600    # periodic enforcement pass (10 min)
 # Early passes right after panel start (boot/reboot): hive's cloud agent may
@@ -2074,49 +2082,131 @@ def _guard_default_state():
     return {"enabled": False, "since": 0, "snapshot": {},
             "last_check": 0, "last_drift": 0, "last_fix": 0, "last_action": ""}
 
+def _guard_state_paths():
+    """(primary, legacy, fallback) guard state paths. Legacy/fallback names are
+    derived from the live GUARD_CONF so tests that redirect GUARD_CONF keep
+    working."""
+    base_dir = os.path.dirname(GUARD_CONF)
+    return (GUARD_CONF,
+            os.path.join(base_dir, GUARD_CONF_LEGACY_NAME),
+            GUARD_CONF + ".fallback")
+
+def _guard_read_state_file(path):
+    """Parse one guard state file, or None when it is missing/empty/broken."""
+    try:
+        with open(path, 'r') as f:
+            raw = f.read()
+        if not raw.strip():
+            return None
+        disk = json.loads(raw)
+        return disk if isinstance(disk, dict) else None
+    except Exception:
+        return None
+
+def _guard_apply_state(st, disk):
+    st["enabled"] = bool(disk.get("enabled"))
+    st["since"] = int(disk.get("since") or 0)
+    snap = disk.get("snapshot")
+    if isinstance(snap, dict):
+        st["snapshot"] = {str(k): str(v) for k, v in snap.items()}
+    st["last_check"] = int(disk.get("last_check") or 0)
+    st["last_drift"] = int(disk.get("last_drift") or 0)
+    st["last_fix"] = int(disk.get("last_fix") or 0)
+    st["last_action"] = str(disk.get("last_action") or "")
+    st["saved_at"] = int(disk.get("saved_at") or 0)
+    return st
+
 def _guard_load():
-    """In-memory cached guard state, seeded from /hive-config/local_guard.json."""
+    """In-memory cached guard state, seeded from /hive-config/guard_state.json.
+
+    Newest valid copy wins between the primary file, the legacy local_guard.json
+    (pre-1.13.05) and the `.fallback` file written when the primary inode is
+    wedged by ntfs-3g - a stale-but-readable file must never shadow the fresh
+    state (that is exactly how RIG5 stayed pinned to an old flight sheet)."""
     with _guard_state_lock:
         if _GUARD_STATE["loaded"]:
             return _GUARD_STATE["data"]
         st = _guard_default_state()
-        try:
-            with open(GUARD_CONF, 'r') as f:
-                disk = json.load(f)
-            if isinstance(disk, dict):
-                st["enabled"] = bool(disk.get("enabled"))
-                st["since"] = int(disk.get("since") or 0)
-                snap = disk.get("snapshot")
-                if isinstance(snap, dict):
-                    st["snapshot"] = {str(k): str(v) for k, v in snap.items()}
-                st["last_check"] = int(disk.get("last_check") or 0)
-                st["last_drift"] = int(disk.get("last_drift") or 0)
-                st["last_fix"] = int(disk.get("last_fix") or 0)
-                st["last_action"] = str(disk.get("last_action") or "")
-        except Exception:
-            pass
+        primary, legacy, fallback = _guard_state_paths()
+        candidates = []
+        for path in (primary, legacy, fallback):
+            disk = _guard_read_state_file(path)
+            if disk is not None:
+                cand = (int(disk.get("saved_at") or disk.get("last_check") or 0), path, disk)
+                candidates.append(cand)
+        chosen = max(candidates, key=lambda c: c[0]) if candidates else None
+        if chosen is not None:
+            _guard_apply_state(st, chosen[2])
         _GUARD_STATE["data"] = st
         _GUARD_STATE["loaded"] = True
+        if chosen is not None and chosen[1] != primary:
+            # Copy the winning state under the primary name right away so the
+            # next panel start reads it from there (best effort).
+            try:
+                with config_lock:
+                    if _guard_write_state_file(primary, st):
+                        logging.info("Local guard: migrated state from %s to %s",
+                                     chosen[1], primary)
+            except Exception as e:
+                logging.error("Local guard: state migration failed: %s", e)
         return st
 
+def _guard_write_state_file(path, st, mode=0o600):
+    """Write guard state to `path`: atomic tmp+rename first, then an in-place
+    truncate+write fallback. ntfs-3g on /hive-config can wedge a single filename
+    (RIG5 local_guard.json: rename AND in-place writes returned EIO), which used
+    to freeze the guard state silently. Caller holds config_lock."""
+    payload = json.dumps(st, indent=2)
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, 'w') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        try:
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return True
+    except Exception as e:
+        logging.warning("Local guard: atomic save of %s failed (%s) - retrying in place", path, e)
+    try:
+        with open(path, 'w') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(path, mode)
+        return True
+    except Exception as e:
+        logging.error("Local guard: in-place save of %s failed (%s)", path, e)
+        return False
+
 def _guard_save(st):
-    """Persist guard state atomically (local_guard.json, 0600) and refresh the cache."""
+    """Persist guard state (guard_state.json, 0600) and refresh the cache."""
     with _guard_state_lock:
         _GUARD_STATE["data"] = st
         _GUARD_STATE["loaded"] = True
+        st["saved_at"] = int(time.time())
+        primary, _legacy, fallback = _guard_state_paths()
         try:
             with config_lock:
-                tmp_path = GUARD_CONF + ".tmp"
-                with open(tmp_path, 'w') as f:
-                    json.dump(st, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.chmod(tmp_path, 0o600)
-                os.replace(tmp_path, GUARD_CONF)
-            return True
+                ok = _guard_write_state_file(primary, st)
+                if not ok:
+                    logging.error("Local guard: %s is unwritable - keeping the state "
+                                  "in %s instead", primary, fallback)
+                    ok = _guard_write_state_file(fallback, st)
+            if not ok:
+                logging.error("Failed to save local guard state")
+            return ok
         except Exception as e:
             logging.error(f"Failed to save local guard state: {e}")
             return False
+
+
 
 def _guard_reset_cache():
     """Drop the in-memory cache (tests / manual state reload)."""
