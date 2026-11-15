@@ -240,7 +240,10 @@ def load_cluster_state():
         "rigs": [],
         "removed": [],
         "jump_hosts": [],
-        "clusters": []
+        "clusters": [],
+        # Fan-assist quorum: {panel_key: {ts, key: 'off'|'on:N', step, hot, rig, id}}.
+        # Every panel writes its own entry every tick; the majority decides.
+        "fan_votes": {}
     }
     try:
         if os.path.exists(CLUSTER_CONF):
@@ -251,7 +254,8 @@ def load_cluster_state():
                 with open(CLUSTER_CONF, 'r') as f:
                     data = json.load(f)
             if isinstance(data, dict):
-                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed", "jump_hosts", "clusters"):
+                for k in ("cluster_name", "self_id", "sync_interval", "rigs", "removed",
+                          "jump_hosts", "clusters", "fan_votes"):
                     if k in data:
                         state[k] = data[k]
             else:
@@ -298,6 +302,7 @@ def load_cluster_state():
     # Named clusters: groups of rig ids ({id, name, rig_ids, updated_at})
     state["clusters"] = [c for c in state.get("clusters", [])
                          if isinstance(c, dict) and c.get("id")]
+    state["fan_votes"] = merge_fan_votes(state.get("fan_votes"), None)
     if not os.path.exists(CLUSTER_CONF):
         save_cluster_state(state)
     try:
@@ -5235,6 +5240,8 @@ def run_sync_cycle(triggered_by="auto"):
                     state.get("jump_hosts", []), data.get("jump_hosts"))
                 state["clusters"] = merge_clusters(
                     state.get("clusters", []), data.get("clusters", []), state.get("removed", []))
+                state["fan_votes"] = merge_fan_votes(
+                    state.get("fan_votes"), data.get("fan_votes"))
                 if data.get("cluster_name") and not state.get("cluster_name"):
                     state["cluster_name"] = data["cluster_name"]
                 entry["online"] = True
@@ -5250,6 +5257,7 @@ def run_sync_cycle(triggered_by="auto"):
                       "rigs": state["rigs"], "removed": state.get("removed", []),
                       "jump_hosts": state.get("jump_hosts", []),
                       "clusters": state.get("clusters", []),
+                      "fan_votes": state.get("fan_votes", {}),
                       "from_id": state["self_id"]},
                 timeout=45)
             if not push_ok and not entry.get("online"):
@@ -5280,6 +5288,8 @@ def run_sync_cycle(triggered_by="auto"):
                     fresh.get("jump_hosts", []), state.get("jump_hosts", []))
                 state["clusters"] = merge_clusters(
                     fresh.get("clusters", []), state.get("clusters", []), state.get("removed", []))
+                state["fan_votes"] = merge_fan_votes(
+                    fresh.get("fan_votes"), state.get("fan_votes"))
                 if fresh.get("sync_interval"):
                     state["sync_interval"] = fresh["sync_interval"]
         except Exception as e:
@@ -9871,7 +9881,29 @@ HA_FAN_MIN_ON = 1200        # once cooling starts it runs at least this long (re
                             # boiler room itself cools far slower than the GPUs do)
 HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
                             # and the anti-flap dwell never block cooling for real heat
-HA_FAN_LEADER_GRACE = 900   # non-leader takes over only when the plug sat untouched this long
+# --- speed ladder -------------------------------------------------------------
+# Transcribed from the user's own Home Assistant automation 'Управление
+# скоростью вентилятора (Адаптивный PID)' so the panel behaves like the setup
+# the user already trusts: PID <10% -> off, 10-30% -> speed 1, 30-55 -> 2,
+# 55-80 -> 3, >=80 -> speed 4, and no switch until hold_time (600 s) passes.
+# The PID percentage is approximated from the hottest К-card: HA_FAN_OFF_TEMP
+# (62°C) = 0%, HA_FAN_STEP_TEMP_MAX (75°C) = 100%  ->  the step boundaries land
+# at 63.3 / 65.9 / 69.2 / 72.4 °C.
+HA_FAN_STEPS = 4            # speed channels 1..4 of the fan (both plugs must be ON)
+HA_FAN_STEP_TEMP_MAX = 75.0 # temperature that counts as "PID 100%"
+HA_FAN_STEP_DWELL = 600     # hold_time: no speed change before this (HA parity)
+HA_FAN_MASTER_SETTLE = 3    # s between master ON and the channel ON (HA waits 2 s;
+                            # the speed channels read 'unavailable' while the master
+                            # is off, so the channel command must come second)
+# --- cluster quorum -----------------------------------------------------------
+# No single rig owns the fan (user, 15 Nov: "никакой риг не должен принимать
+# решение, это всё работа кластера"). Every panel votes every tick, the votes
+# travel with the cluster state, the MAJORITY decides and only the lowest-id
+# panel among the winning voters executes. Votes of dead panels expire, so an
+# unreachable rig (the previous 'leader' included) shrinks the voter set instead
+# of freezing the cooling.
+HA_FAN_VOTE_TTL = 300       # a panel's vote older than this is not counted
+HA_FAN_ACTOR_GRACE = 240    # elected actor silent this long -> next voter acts
 # Layout discovery - the farm arrangement lives in the user's Home Assistant
 # (requested 28 Oct: "риги расставлены уже в Home Assistant, просто надо
 # брать инфу оттуда"): room marks sit in input_select.rig_<N> (k/d/-),
@@ -10050,6 +10082,16 @@ def _ha_pull_layout(conf, state):
         if fname(byid[eid]) == HA_FAN_MASTER_LABEL:
             master = eid
             break
+    # Speed channels (1..4). Both plugs are required for the fan to blow, so the
+    # panel needs the channels as well: master 'Вентилятор' + switch_N.
+    channels = _ha_fan_channel_map(byid)
+    channel_states = {}
+    channel_ts = 0.0
+    for n, eid in channels.items():
+        channel_states[n] = str(byid[eid].get("state") or "unknown")
+        channel_ts = max(channel_ts, _ha_state_ts(byid[eid]))
+    master_state = str(byid[master].get("state") or "unknown") if master else ""
+    master_ts = _ha_state_ts(byid[master]) if master else 0.0
     room_sensor = ""
     room_value = None
     for eid in sorted(e for e in byid if e.startswith("sensor.")):
@@ -10092,8 +10134,38 @@ def _ha_pull_layout(conf, state):
     if changed:
         save_cluster_state(state)
     return {"ok": True, "rigs": rigmap, "master_plug": master,
+            "master_state": master_state, "master_ts": master_ts,
+            "channels": channels, "channel_states": channel_states,
+            "channel_ts": channel_ts,
+            "last_switch_ts": max(master_ts, channel_ts),
             "room_sensor": room_sensor, "room_value": room_value,
             "room_state": room_state, "err": ""}
+
+
+def _ha_fan_channel_map(byid):
+    """Speed channels of the boiler-room fan: a 4-gang smart plug whose entities
+    are switch.<base>_1.._4 (the user's HA has switch.sonoff_10014f062a_1..4,
+    all named 'Скорость вентилятора'). Any complete 1..4 group is accepted; a
+    group whose friendly names mention the fan wins over an unrelated 4-gang
+    relay. Returns {step: entity_id}."""
+    groups = {}
+    for eid in byid:
+        m = re.match(r'^(switch\.[A-Za-z0-9_]+)_([1-4])$', eid)
+        if m:
+            groups.setdefault(m.group(1), {})[int(m.group(2))] = eid
+    best = None
+    for base in sorted(groups):
+        grp = groups[base]
+        if not all(i in grp for i in range(1, HA_FAN_STEPS + 1)):
+            continue
+        names = " ".join(str(((byid[grp[i]] or {}).get("attributes") or {})
+                             .get("friendly_name") or "").lower()
+                         for i in sorted(grp))
+        score = 1 if any(k in names for k in ("вент", "fan", "скорост", "speed")) else 0
+        if best is None or score > best[0]:
+            best = (score, base, dict(grp))
+    return best[2] if best else {}
+
 
 def _ha_reachable(rig):
     """True when ANY configured SSH route can execute a command on the target rig.
@@ -10150,19 +10222,142 @@ def _ha_fan_norm(name):
     return "".join(ch for ch in str(name or "").upper() if ch.isalnum())
 
 
-def _ha_fan_leader(state, cache):
-    """Panel that owns the fan decision: the lowest id among ONLINE rigs
-    (self always counts - this process is alive by definition).
-    Returns (leader_id, panels[]). All panels run the fan worker; without a
-    single owner they fight over the plug (HA logbook, 15 Nov: on/off pairs
-    8-9 seconds apart at 07:41, 08:54, 10:18, 11:08)."""
-    self_id = state.get("self_id")
-    panels = [self_id] if self_id else []
-    for rid, ent in (cache.get("rigs") or {}).items():
-        if rid != self_id and ent.get("online"):
-            panels.append(rid)
-    panels = sorted(set(p for p in panels if p))
-    return (panels[0] if panels else self_id), panels
+def _ha_fan_step_for_temp(hot):
+    """Speed channel that fits this card temperature. Mirrors the step mapping
+    of the user's HA PID automation (10-30% -> 1, 30-55 -> 2, 55-80 -> 3,
+    >=80% -> 4) with the PID percentage approximated from the hottest К-card
+    between HA_FAN_OFF_TEMP (0%) and HA_FAN_STEP_TEMP_MAX (100%)."""
+    if hot is None:
+        return 1
+    try:
+        span = max(1.0, HA_FAN_STEP_TEMP_MAX - HA_FAN_OFF_TEMP)
+        pct = (float(hot) - HA_FAN_OFF_TEMP) / span * 100.0
+    except (TypeError, ValueError):
+        return 1
+    if pct >= 80.0:
+        return 4
+    if pct >= 55.0:
+        return 3
+    if pct >= 30.0:
+        return 2
+    return 1
+
+
+def _ha_fan_vote_owner(self_id, self_name):
+    """Stable key of this panel's vote. The rig NAME is the identity the whole
+    farm agrees on (a panel's self_id may differ from the cluster entry it owns:
+    RIG7 on 15 Nov), self_id is only the fallback for a nameless rig."""
+    return _ha_fan_norm(self_name) or ("id:" + str(self_id or ""))
+
+
+def _ha_fan_vote_key(target):
+    """Vote payload: 'off' or 'on:<speed>'."""
+    target = str(target or "")
+    return target if target.startswith("on:") else "off"
+
+
+def _ha_fan_publish_vote(state, self_id, self_name, target, hot):
+    """Store this panel's vote in the SHARED cluster state (top level
+    `fan_votes`, synced with the rig list like pc_fail/pc_request). Called every
+    tick, so a panel that dies stops voting and its stale vote expires."""
+    votes = state.get("fan_votes")
+    if not isinstance(votes, dict):
+        votes = {}
+        state["fan_votes"] = votes
+    owner = _ha_fan_vote_owner(self_id, self_name)
+    key = _ha_fan_vote_key(target)
+    try:
+        step = int(key.split(":", 1)[1]) if key.startswith("on:") else 0
+    except (IndexError, ValueError):
+        step = 0
+    votes[owner] = {"ts": int(time.time()), "key": key, "step": step,
+                    "hot": (round(float(hot), 1) if hot is not None else None),
+                    "rig": self_name or "", "id": self_id or ""}
+    return owner
+
+
+def merge_fan_votes(base_votes, incoming_votes, keep_secs=86400):
+    """Newest vote per panel wins (every panel rewrites only its own entry).
+    Votes older than keep_secs are dropped so the dict cannot grow forever."""
+    out = {}
+    now = int(time.time())
+    for src in (base_votes, incoming_votes):
+        if not isinstance(src, dict):
+            continue
+        for owner, vote in src.items():
+            if not isinstance(vote, dict):
+                continue
+            try:
+                ts = int(vote.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ts and (now - ts) > keep_secs:
+                continue
+            prev = out.get(owner)
+            if prev is None or ts >= int(prev.get("ts") or 0):
+                try:
+                    step = int(vote.get("step") or 0)
+                except (TypeError, ValueError):
+                    step = 0
+                out[owner] = {"ts": ts, "key": _ha_fan_vote_key(vote.get("key")),
+                              "step": step, "hot": vote.get("hot"),
+                              "rig": str(vote.get("rig") or ""),
+                              "id": str(vote.get("id") or "")}
+    return out
+
+
+def _ha_fan_quorum(state, now):
+    """Majority vote of the panels that voted within HA_FAN_VOTE_TTL.
+    Returns {winner, counts, voters, actor(vote), actor_ts, newest_ts}.
+    The winner is the most-voted target; on a tie the SAFER one wins (on beats
+    off, a higher speed beats a lower one), so a split farm never undercools.
+    The actor is the lowest-id panel among the winning voters - a panel that
+    died keeps no fresh vote, so the next one inherits the job."""
+    votes = state.get("fan_votes") or {}
+    fresh = []
+    for owner, vote in votes.items():
+        if not isinstance(vote, dict):
+            continue
+        try:
+            ts = int(vote.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ts or (now - ts) > HA_FAN_VOTE_TTL:
+            continue
+        key = _ha_fan_vote_key(vote.get("key"))
+        fresh.append((ts, owner, key, vote))
+    if not fresh:
+        return {"winner": None, "counts": {}, "voters": 0, "actor": None,
+                "actor_ts": 0, "newest_ts": 0}
+    counts = {}
+    for _ts, _owner, key, _v in fresh:
+        counts[key] = counts.get(key, 0) + 1
+
+    def _rank(key):
+        # safety bias: 'on:4' > 'on:1' > 'off'
+        try:
+            return (1, int(key.split(":", 1)[1]))
+        except (IndexError, ValueError):
+            return (0, 0)
+
+    winner = max(sorted(counts), key=lambda k: (counts[k], _rank(k)))
+    winners = [f for f in fresh if f[2] == winner]
+    actor = min(winners, key=lambda f: (str((f[3] or {}).get("id") or ""),
+                                        str((f[3] or {}).get("rig") or "")))
+    return {"winner": winner, "counts": counts, "voters": len(fresh),
+            "actor": actor[3], "actor_ts": actor[0],
+            "newest_ts": max(f[0] for f in fresh)}
+
+
+def _ha_fan_identity_match(vote, rig_id, rig_name):
+    """Is this vote MINE? Compares the panel id and, because a panel's self_id
+    may differ from the cluster entry it owns (RIG7), the rig name too."""
+    if not isinstance(vote, dict):
+        return False
+    if vote.get("id") and rig_id and vote.get("id") == rig_id:
+        return True
+    return bool(rig_name) and _ha_fan_norm(vote.get("rig")) == _ha_fan_norm(rig_name)
+
 
 
 def _ha_rig_temps(state, cache, fresh_ttl, stale_last_max_age=1800):
@@ -10497,17 +10692,39 @@ def _ha_fan_tick():
         _ha_save_state(st)
         return
     master = layout.get("master_plug") or ""
+    channels = layout.get("channels") or {}
+    ch_states = layout.get("channel_states") or {}
     fan["master_plug"] = master
     fan["room_sensor"] = layout.get("room_sensor") or ""
+    fan["channels"] = channels
     if not master:
         fan["last_reason"] = "fan plug not found in HA (switch 'Вентилятор')"
         _ha_save_state(st)
         return
-    plug_state, age, ent_err = _ha_fan_power_state_for_entity(conf, master)
-    if plug_state not in ("on", "off"):
-        fan["last_reason"] = "plug state unknown%s" % (": " + ent_err if ent_err else "")
+    master_state = str(layout.get("master_state") or "unknown")
+    if master_state not in ("on", "off"):
+        fan["last_reason"] = "master plug state unknown (%s)" % master_state
         _ha_save_state(st)
         return
+    self_id = state.get("self_id")
+    names = {r.get("id"): (r.get("name") or "") for r in state.get("rigs", [])}
+    self_name = names.get(self_id) or ""
+    if not self_name:
+        try:
+            self_name = _resolve_worker_name()
+        except Exception:
+            self_name = ""
+    # Physical state of the fan: the master relay alone does nothing, a speed
+    # channel alone does nothing either - both must be ON. The current speed is
+    # therefore "which channel is on", and it is read from HA (the single source
+    # of truth all panels share), not from any panel's memory.
+    step_now = max([int(n) for n, s in ch_states.items() if s == "on"] or [0])
+    fan["step"] = int(step_now)
+    last_switch = float(layout.get("last_switch_ts") or 0) or now
+    switch_age = max(0.0, now - last_switch)
+    master_ts = float(layout.get("master_ts") or 0)
+    master_age = max(0.0, now - master_ts) if master_ts else switch_age
+
     temp_on, fresh_on, _n1, stale_on, stale_hot = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
     temp_off, fresh_off, n_stokehole, stale_off, _sh2 = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
     if n_stokehole == 0:
@@ -10534,58 +10751,15 @@ def _ha_fan_tick():
                 "room_temp": round(room_val, 1) if room_val is not None else None,
                 "room_err": "" if room_val is not None else (room_state or "dark")})
 
-    # ---------------- one decision maker per farm ----------------
-    # All panels run this worker; before 1.13.06 they fought over the plug and
-    # the HA logbook shows on/off pairs 8 seconds apart (15 Nov 07:41, 08:54,
-    # 10:18, 11:08). The lowest online rig id decides, everyone else just
-    # reports. The next panel takes over only when the leader's own stats went
-    # stale (panel dead or frozen) - a mining leader keeps its temps fresh.
-    leader, panels = _ha_fan_leader(state, cache)
-    self_id = state.get("self_id")
-    names = {r.get("id"): (r.get("name") or "") for r in state.get("rigs", [])}
-    self_name = names.get(self_id) or ""
-    if not self_name:
-        try:
-            self_name = _resolve_worker_name()
-        except Exception:
-            self_name = ""
-
-    def _is_me(rid):
-        # Identity mismatch guard: a panel may carry a self_id that is NOT the
-        # id the rest of the farm knows it by (RIG7 on 15 Nov: own id
-        # 48beae4d..., cluster entry 0d6a6cea..., so the elected leader id
-        # never matched "me" and the fan had no owner at all). The rig NAME is
-        # the stable identity, so compare that as well.
-        if rid == self_id:
-            return True
-        return bool(self_name) and _ha_fan_norm(names.get(rid)) == _ha_fan_norm(self_name)
-
-    can_act = _is_me(leader)
-    if not can_act and len(panels) > 1 and _is_me(panels[1]):
-        ent = (cache.get("rigs") or {}).get(leader, {})
-        lts = int(ent.get("fetched_at") or 0)
-        if not ent.get("online") or not lts or (now - lts) > HA_FAN_LEADER_GRACE:
-            can_act = True
-            fan["takeover"] = True
-    fan["leader"] = leader
-    if not can_act:
-        fan["last_reason"] = "peer-led: waiting for %s (leader panel)" % (
-            names.get(leader) or leader)
-        _ha_save_state(st)
-        return
-
-    # Decision (28 Oct redesign, hardened 15 Nov): while the room temperature
-    # sensor shows a value the user's HA automations own the fan completely -
-    # the panel must not fight them. Only a DARK room sensor hands the fan over
-    # to the panel, which then holds the cards below HA_FAN_ON_TEMP:
-    #   ON  when ANY fresh К-card is above 65°C
-    #   OFF only when EVERY fresh К-card is below 62°C AND no online К-rig is
-    #       missing fresh temps (a dead panel/route must never cool us down)
-    # The old 30-minute run cap and the average-based OFF are gone: they shut
-    # the fan off at 11:28 on 15 Nov while a RIG2 card was at 75°C.
+    # While the room sensor shows a value the user's HA automations own the fan
+    # completely - the panel must not fight them (and withdraws its vote).
     if room_val is not None:
         fan["last_reason"] = ("room sensor alive (%.1f°C) - HA automations manage the fan"
                               % room_val)
+        fan["vote"] = None
+        _ha_fan_publish_vote(state, self_id, self_name, "", None)
+        state.get("fan_votes", {}).pop(_ha_fan_vote_owner(self_id, self_name), None)
+        save_cluster_state(state)
         _ha_save_state(st)
         return
     # Rate limiting: count automatic ON starts per calendar day
@@ -10594,118 +10768,228 @@ def _ha_fan_tick():
         fan["day"] = day
         fan["cycles"] = 0
 
+    # ---------------- desired state (this panel's proposal) ----------------
+    # OFF is "no channel on" (the master alone never moves air).
+    current = ("off" if (master_state == "off" and step_now == 0)
+               else ("on:%d" % step_now if step_now else "on:0"))
+    desired = current if master_state == "on" else "off"
     reason = ""
-    action = None
-    if plug_state == "on":
-        if hot_max is not None and hot_max >= HA_FAN_OFF_TEMP:
+
+    frozen = False
+    outdoor_ent = str(conf.get("outdoor_sensor_entity") or "")
+    if outdoor_ent:
+        outdoor_val, _oerr = _ha_sensor_temp(conf, outdoor_ent)
+        if outdoor_val is not None and outdoor_val <= 0.0:
+            frozen = True
+            fan["outdoor_temp"] = round(outdoor_val, 1)
+
+    if frozen:
+        # Anti-freeze wins over cooling (outside air below 0°C must not be
+        # pumped into a boiler room full of pipes).
+        desired = "off"
+        reason = "anti-freeze: outdoor %.1f°C ≤ 0°C - fan stays OFF" % outdoor_val
+    elif master_state == "off":
+        if hot_peak is None:
+            reason = ("asleep: no fresh temperature data from К-rigs (%s)"
+                      % ", ".join(stale_on[:4])) if stale_on else \
+                     "asleep: no temperature data from К-rigs"
+        elif hot_peak <= HA_FAN_ON_TEMP:
+            reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_peak, HA_FAN_ON_TEMP)
+        elif hot_peak < HA_FAN_CRITICAL_TEMP and switch_age < HA_FAN_MIN_DWELL:
+            reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(switch_age), HA_FAN_MIN_DWELL)
+        elif hot_peak < HA_FAN_CRITICAL_TEMP and int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
+            reason = "daily cycle cap reached"
+        else:
+            # Always start cooling at the LOWEST speed - it may well be enough
+            # (user, 15 Nov). Real heat (>=70°C) goes straight to the top speed:
+            # the ladder would need 3 x 600 s of hold time to climb there and a
+            # card at 75°C does not have those minutes.
+            step = HA_FAN_STEPS if hot_peak >= HA_FAN_CRITICAL_TEMP else 1
+            desired = "on:%d" % step
+            if hot_peak >= HA_FAN_CRITICAL_TEMP:
+                reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling at speed %d now"
+                          " (dwell/cycle cap skipped)%s"
+                          % (hot_peak, HA_FAN_CRITICAL_TEMP, step,
+                             " [last reading of %s]" % ", ".join(stale_on[:3])
+                             if stale_peak is not None and (hot_max is None or stale_peak > hot_max) else ""))
+            else:
+                reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - starting at"
+                          " the lowest speed %d" % (hot_peak, HA_FAN_ON_TEMP, step))
+    else:
+        # master ON: the ladder holds the hottest card in its band
+        if step_now == 0:
+            desired = "on:1"
+            reason = "master is ON but no speed channel is on - repairing at speed 1"
+        elif hot_max is not None and hot_max >= HA_FAN_OFF_TEMP:
             fan["cool_since"] = 0
-            reason = ("holding ON: max %.1f°C ≥ %.0f°C (run cap no longer cuts cooling)"
-                      % (hot_max, HA_FAN_OFF_TEMP))
+            want = min(HA_FAN_STEPS, _ha_fan_step_for_temp(hot_max))
+            if want != step_now and switch_age >= HA_FAN_STEP_DWELL:
+                desired = "on:%d" % want
+                reason = ("speed %d -> %d: max %.1f°C (hold time %ds passed)"
+                          % (step_now, want, hot_max, int(switch_age)))
+            else:
+                desired = "on:%d" % step_now
+                if want != step_now:
+                    reason = ("holding speed %d: max %.1f°C wants %d but the hold time"
+                              " has %ds left" % (step_now, hot_max, want,
+                                                 int(HA_FAN_STEP_DWELL - switch_age)))
+                else:
+                    reason = "holding speed %d: max %.1f°C (run cap no longer cuts cooling)" % (
+                        step_now, hot_max)
         elif not fresh_off:
-            fan["cool_since"] = 0
-            reason = ("holding ON: no fresh temps from %s" % ", ".join(stale_off[:4]))
+            desired = "on:%d" % step_now
+            reason = ("holding speed %d: no fresh temps from %s"
+                      % (step_now, ", ".join(stale_off[:4])))
         elif cool_max is not None and cool_max < HA_FAN_OFF_TEMP:
             # Debounce: a rig whose miner restarts drops to 45-50°C for a couple
-            # of minutes and heats back to 70+ (RIG2 does this every ~10 min on
-            # 15 Nov). Turning the fan off on the first cool sample flapped the
-            # relay and ate the daily cycle budget, so cool must last - and the
-            # fan itself stays on for a minimum run anyway.
+            # of minutes and heats back to 70+ (RIG2 does this every ~10 min).
             since = int(fan.get("cool_since") or 0)
             if not since:
                 since = int(now)
                 fan["cool_since"] = since
             held = int(now - since)
-            on_since = int(fan.get("on_since") or 0)
-            if not on_since and fan.get("last_action") == "on":
-                on_since = int(fan.get("last_ts") or 0)
+            on_since = int(master_ts or fan.get("on_since") or 0)
             ran = int(now - on_since) if on_since else HA_FAN_MIN_ON
+            desired = "on:%d" % step_now
             if held < HA_FAN_OFF_CONFIRM:
-                reason = ("holding ON: max %.1f°C < %.0f°C for %ds/%ds - waiting for the room to"
-                          " stay cool (miner restarts cool cards for minutes only)"
-                          % (cool_max, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
+                reason = ("holding speed %d: max %.1f°C < %.0f°C for %ds/%ds - waiting for"
+                          " the room to stay cool (miner restarts cool cards for minutes only)"
+                          % (step_now, cool_max, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
             elif ran < HA_FAN_MIN_ON:
-                reason = ("holding ON: maximum %.1f°C < %.0f°C but the fan ran only %ds/%ds"
-                          % (cool_max, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
+                reason = ("holding speed %d: maximum %.1f°C < %.0f°C but the fan ran only %ds/%ds"
+                          % (step_now, cool_max, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
             else:
-                action = "off"
+                desired = "off"
                 fan["cool_since"] = 0
                 fan.pop("on_since", None)
                 reason = ("max %.1f°C < %.0f°C for %ds - every К card stayed cool"
                           % (cool_max, HA_FAN_OFF_TEMP, held))
         else:
+            desired = "on:%d" % step_now
             fan["cool_since"] = 0
-            reason = "holding ON: max %.1f°C inside the %.0f-%.0f°C band" % (
-                cool_max if cool_max is not None else 0, HA_FAN_OFF_TEMP, HA_FAN_ON_TEMP)
-    else:
-        if hot_peak is None:
-            if stale_on:
-                reason = "asleep: no fresh temperature data from К-rigs (%s)" % ", ".join(stale_on[:4])
-            else:
-                reason = "asleep: no temperature data from К-rigs"
-        elif hot_peak <= HA_FAN_ON_TEMP:
-            reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_peak, HA_FAN_ON_TEMP)
-        elif hot_peak >= HA_FAN_CRITICAL_TEMP:
-            # Cooling is never rationed: the anti-flap dwell and the daily cycle
-            # cap only throttle the warm 65-70°C band, not real heat.
-            action = "on"
-            fan["cool_since"] = 0
-            reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling now (dwell/cycle cap skipped)%s"
-                      % (hot_peak, HA_FAN_CRITICAL_TEMP,
-                         " [last reading of %s]" % ", ".join(stale_on[:3]) if stale_peak is not None
-                         and (hot_max is None or stale_peak > hot_max) else ""))
-        elif age < HA_FAN_MIN_DWELL:
-            reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(age), HA_FAN_MIN_DWELL)
-        elif int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
-            reason = "daily cycle cap reached"
-        else:
-            action = "on"
-            fan["cool_since"] = 0
-            reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - cooling" %
-                      (hot_peak, HA_FAN_ON_TEMP))
+            reason = "holding speed %d: max %.1f°C inside the %.0f-%.0f°C band" % (
+                step_now, cool_max if cool_max is not None else 0,
+                HA_FAN_OFF_TEMP, HA_FAN_ON_TEMP)
 
-    if action:
-        ok_act, act_err = _ha_fan_apply(conf, action == "on", master)
-        fan["last_action"] = action
+    # ---------------- cluster quorum ----------------
+    # No rig decides alone: publish the vote, then act only when the majority
+    # agrees AND this panel is the elected executor (lowest id among the
+    # winning voters). Missing rigs simply do not vote.
+    _ha_fan_publish_vote(state, self_id, self_name, desired, hot_peak)
+    try:
+        save_cluster_state(state)
+    except Exception as e:
+        logging.error(f"HA fan: failed to publish the vote: {e}")
+    q = _ha_fan_quorum(state, now)
+    fan["vote"] = {"key": desired, "hot": round(hot_peak, 1) if hot_peak is not None else None}
+    fan["quorum"] = {"winner": q.get("winner"), "counts": q.get("counts"),
+                     "voters": q.get("voters"),
+                     "actor": (q.get("actor") or {}).get("rig")
+                              or (q.get("actor") or {}).get("id") or ""}
+    winner = q.get("winner")
+    if winner and winner != desired:
+        fan["last_reason"] = ("%s | quorum: %s wins %d/%d panel vote(s)"
+                              % (reason, winner, q["counts"].get(winner, 0), q.get("voters")))
+        _ha_save_state(st)
+        return
+    actor_vote = q.get("actor") or {}
+    im_actor = _ha_fan_identity_match(actor_vote, self_id, self_name)
+    took_over = False
+    if not im_actor and winner and (now - float(q.get("actor_ts") or now)) > HA_FAN_ACTOR_GRACE:
+        # The elected executor went silent (frozen panel): the next winning
+        # voter takes the job so the cooling never stalls. The action is
+        # idempotent, so a slow sync cannot make two panels fight.
+        im_actor = True
+        took_over = True
+    if not im_actor:
+        fan.pop("takeover", None)
+        fan["last_reason"] = ("%s | quorum %s, waiting for %s (elected panel)"
+                              % (reason, winner or "-",
+                                 actor_vote.get("rig") or actor_vote.get("id") or "?"))
+        _ha_save_state(st)
+        return
+    # Record WHY this panel acted (diagnostics): 'takeover' stays in the fan
+    # state while the elected panel is silent, so the UI can show it.
+    if took_over:
+        fan["takeover"] = True
+    else:
+        fan.pop("takeover", None)
+
+    fan["last_reason"] = reason
+    if desired != current:
+        ok_act, act_err = _ha_fan_apply(conf, desired, master, channels)
+        fan["last_action"] = "off" if desired == "off" else "on"
         fan["last_ts"] = int(now)
-        fan["last_reason"] = reason
-        if action == "on":
-            fan["cycles"] = int(fan.get("cycles") or 0) + 1
-            fan["on_since"] = int(now)
+        if desired == "off":
+            fan["cool_since"] = 0
+        else:
+            if master_state == "off":
+                fan["cycles"] = int(fan.get("cycles") or 0) + 1
+            fan["on_since"] = int(now) if master_state == "off" else int(fan.get("on_since") or now)
         if ok_act:
-            record_metrics_event("info" if action == "on" else "success",
-                                 "Boiler room fan assist: turned %s (%s)" % (action.upper(), reason))
+            record_metrics_event("info" if desired != "off" else "success",
+                                 "Boiler room fan assist: %s (%s)"
+                                 % (("speed %s" % desired.split(":", 1)[1]) if desired != "off"
+                                    else "turned OFF", reason))
         else:
             record_metrics_event("danger",
-                                 "Boiler room fan assist: failed to turn %s (%s)" % (action.upper(), act_err))
-    else:
-        fan["last_reason"] = reason
+                                 "Boiler room fan assist: failed to reach %s (%s)"
+                                 % (desired, act_err))
     _ha_save_state(st)
 
-def _ha_fan_apply(conf, turn_on, master=None):
-    """Master plug (+ legacy stored channel). Returns (ok, err)."""
-    master = master or conf.get("fan_power_entity")
-    channel = conf.get("fan_on_channel") or ""
-    errs = []
-    if turn_on:
-        ok, err = _ha_service(conf, "turn_on", master)
-        if not ok:
-            return False, err
-        if channel:
-            ok2, err2 = _ha_service(conf, "turn_on", channel)
-            if not ok2:
-                errs.append("channel: " + err2)
-    else:
-        ok, err = _ha_service(conf, "turn_off", master)
-        if not ok:
-            return False, err
-        if channel:
-            ok2, err2 = _ha_service(conf, "turn_off", channel)
-            if not ok2:
-                errs.append("channel: " + err2)
-    if errs:
-        return False, "; ".join(errs)
-    return True, ""
 
+def _ha_fan_apply(conf, target, master=None, channels=None):
+    """Bring the fan to `target` ('off' or 'on:<speed>').
+    The fan physically blows only when the MASTER relay AND one speed channel
+    are ON (user, 15 Nov), so ON is two-staged: master first, settle, then the
+    channel - the speed channels read 'unavailable' while the master is off.
+    OFF is the reverse order (channels first, master last). A speed change
+    touches the channels only, the master stays on."""
+    master = master or conf.get("fan_power_entity")
+    if not master:
+        return False, "fan master plug not configured"
+    chans = channels or {}
+    errs = []
+    if str(target).startswith("on:"):
+        try:
+            step = max(1, min(HA_FAN_STEPS, int(str(target).split(":", 1)[1])))
+        except (IndexError, ValueError):
+            step = 1
+        if not chans:
+            return False, "no speed channels 1-4 found in Home Assistant"
+        st, _age, err = _ha_fan_power_state_for_entity(conf, master)
+        if st != "on":
+            ok, err = _ha_service(conf, "turn_on", master)
+            if not ok:
+                return False, "master: " + err
+            if HA_FAN_MASTER_SETTLE > 0:
+                time.sleep(HA_FAN_MASTER_SETTLE)
+        ent = chans.get(step) or ""
+        if not ent:
+            return False, "speed channel %d not found in Home Assistant" % step
+        ok, err = _ha_service(conf, "turn_on", ent)
+        if not ok:
+            # the channel entity may still be waking up right after the master
+            time.sleep(2)
+            ok, err = _ha_service(conf, "turn_on", ent)
+        if not ok:
+            errs.append("speed %d: %s" % (step, err))
+        # exactly one speed at a time
+        for n in sorted(chans):
+            if n == step:
+                continue
+            ok2, err2 = _ha_service(conf, "turn_off", chans[n])
+            if not ok2:
+                errs.append("speed %d off: %s" % (n, err2))
+        return (not errs), "; ".join(errs)
+    for n in sorted(chans):
+        ok, err = _ha_service(conf, "turn_off", chans[n])
+        if not ok:
+            errs.append("speed %d off: %s" % (n, err))
+    ok, err = _ha_service(conf, "turn_off", master)
+    if not ok:
+        errs.append("master: " + err)
+    return (not errs), "; ".join(errs)
 def _ha_worker_loop(interval, tick, name):
     time.sleep(HA_BOOT_DELAY)
     while True:
@@ -10999,22 +11283,32 @@ def api_ha_powercycle():
 
 @app.route('/api/ha/fan', methods=['POST'])
 def api_ha_fan():
-    """Manual fan on/off - an explicit user override of the worker. The master
-    plug is pulled from Home Assistant (the switch named 'Вентилятор')."""
+    """Manual fan on/off/speed - an explicit user override of the worker. The
+    master plug and the 1-4 speed channels are pulled from Home Assistant
+    (switch 'Вентилятор' + a 4-gang switch named 'Скорость вентилятора')."""
     data = request.get_json(silent=True) or {}
     action = data.get("action")
     if action not in ("on", "off"):
         return jsonify({"success": False, "message": "action must be on|off"}), 400
+    try:
+        step = int(data.get("step") or 1)
+    except (TypeError, ValueError):
+        step = 1
+    if action == "on" and not (1 <= step <= HA_FAN_STEPS):
+        return jsonify({"success": False,
+                        "message": "step must be 1..%d" % HA_FAN_STEPS}), 400
     conf = _ha_load_conf()
     if not _ha_conf_valid(conf):
         return jsonify({"success": False, "message": "Home Assistant is not configured"}), 400
     state, _cache = _ha_cluster_rigs()
     layout = _ha_pull_layout(conf, state)
     master = layout.get("master_plug") or conf.get("fan_power_entity") or ""
+    channels = layout.get("channels") or {}
     if not master:
         return jsonify({"success": False,
                         "message": "Fan plug not found in Home Assistant (switch 'Вентилятор')"}), 400
-    ok, err = _ha_fan_apply(conf, action == "on", master)
+    target = "off" if action == "off" else "on:%d" % step
+    ok, err = _ha_fan_apply(conf, target, master, channels)
     if ok:
         st = _ha_load_state()
         fan = st.setdefault("fan", {})
@@ -11024,9 +11318,10 @@ def api_ha_fan():
             fan["on_since"] = int(time.time())
             fan["cool_since"] = 0
         _ha_save_state(st)
+    what = "OFF" if action == "off" else ("ON (speed %d)" % step)
     record_metrics_event("info" if ok else "danger",
-                         "Boiler room fan manual: %s%s" % (action.upper(), (" failed: " + err) if not ok else ""))
-    return jsonify({"success": ok, "message": ("Fan turned %s" % action.upper()) if ok else err})
+                         "Boiler room fan manual: %s%s" % (what, (" failed: " + err) if not ok else ""))
+    return jsonify({"success": ok, "message": ("Fan turned %s" % what) if ok else err})
 
 # ---------------- Cluster API (UI + peer exchange) ----------------
 
@@ -11668,7 +11963,8 @@ def api_cluster_state():
         "rigs": state["rigs"],
         "removed": state.get("removed", []),
         "jump_hosts": state.get("jump_hosts", []),
-        "clusters": state.get("clusters", [])
+        "clusters": state.get("clusters", []),
+        "fan_votes": state.get("fan_votes", {})
     })
 
 @app.route('/api/cluster/sync', methods=['POST'])
@@ -11684,6 +11980,7 @@ def api_cluster_sync_push():
         incoming_removed=data.get("removed"))
     state["jump_hosts"] = merge_jump_hosts(state.get("jump_hosts", []), data.get("jump_hosts"))
     state["clusters"] = merge_clusters(state.get("clusters", []), data.get("clusters", []), state.get("removed", []))
+    state["fan_votes"] = merge_fan_votes(state.get("fan_votes"), data.get("fan_votes"))
     if data.get("cluster_name") and not state.get("cluster_name"):
         state["cluster_name"] = str(data["cluster_name"])
     saved = save_cluster_state(state)

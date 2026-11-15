@@ -1664,16 +1664,30 @@ function refreshHaAutoLine() {
     const fw = (haData && haData.fan_worker) || {};
     const plugEl = document.getElementById('haAutoFanPlug');
     const roomEl = document.getElementById('haAutoRoom');
-    if (plugEl) plugEl.textContent = fw.master_plug
-        ? fw.master_plug + ' (Вентилятор)'
-        : 'not found in HA';
+    const q = fw.quorum || {};
+    if (plugEl) {
+        let txt = fw.master_plug ? fw.master_plug + ' (Вентилятор)' : 'not found in HA';
+        // The fan blows only with the master AND a speed channel: show the live speed
+        if (fw.master_plug && fw.step !== undefined && fw.step !== null) {
+            txt += ' · speed ' + (fw.step || 0);
+        }
+        if (fw.vote && fw.vote.key) {
+            txt += ' · vote ' + fw.vote.key.replace('on:', 'speed ');
+        }
+        if (q.winner) {
+            txt += ' · quorum ' + q.winner.replace('on:', 'speed ')
+                + ' (' + ((q.counts || {})[q.winner] || 0) + '/' + (q.voters || 0) + ')';
+        }
+        plugEl.textContent = txt;
+        plugEl.className = fw.last_action === 'on' ? 'text-success' : 'text-info';
+    }
     if (roomEl) {
         if (fw.room_temp !== null && fw.room_temp !== undefined) {
             roomEl.textContent = fw.room_sensor + ' · ' + fw.room_temp + '°C — HA automations manage the fan';
             roomEl.className = 'text-success';
         } else {
             roomEl.textContent = (fw.room_sensor || 'sensor not found') +
-                ' · dark — panel holds the 57-62°C band';
+                ' · dark — panel holds the cards cool (speed ladder 1-4, cluster quorum)';
             roomEl.className = 'text-warning';
         }
     }
@@ -1846,8 +1860,10 @@ async function shareHaConfig() {
 }
 
 async function haFanManual(action) {
+    const stepEl = document.getElementById('haFanStep');
+    const step = stepEl ? parseInt(stepEl.value || '1', 10) || 1 : 1;
     try {
-        const res = await haApiPost('api/ha/fan', { action });
+        const res = await haApiPost('api/ha/fan', { action, step });
         const data = await res.json().catch(() => ({}));
         showToast(data.message || (data.success ? 'Done' : 'Failed'), data.success, data.success === false && res.status === 409);
         await refreshHaMenu();

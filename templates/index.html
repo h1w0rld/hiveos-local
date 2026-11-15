@@ -2397,9 +2397,15 @@
                                 <div class="text-truncate" title="Room sensor watch: while it shows a temperature the HA automations manage the fan themselves; when it goes dark the panel holds the cards in the 57-62°C band">
                                     <span class="text-secondary">Room&nbsp;</span><span id="haAutoRoom" class="text-info">…</span>
                                 </div>
-                                <span class="ms-auto d-flex gap-2 flex-nowrap">
-                                    <button type="button" class="btn btn-sm btn-outline-success text-nowrap" onclick="haFanManual('on')" title="Fan plug ON (explicit override of the worker)"><i class="bi bi-fan me-1"></i>Fan ON</button>
-                                    <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" onclick="haFanManual('off')" title="Fan plug OFF"><i class="bi bi-fan me-1"></i>Fan OFF</button>
+                                <span class="ms-auto d-flex gap-2 flex-nowrap align-items-center">
+                                    <select id="haFanStep" class="form-select form-select-sm w-auto" title="Speed channel 1-4. The fan blows only with BOTH plugs: master 'Вентилятор' and one speed channel">
+                                        <option value="1">Speed 1</option>
+                                        <option value="2">Speed 2</option>
+                                        <option value="3">Speed 3</option>
+                                        <option value="4">Speed 4</option>
+                                    </select>
+                                    <button type="button" class="btn btn-sm btn-outline-success text-nowrap" onclick="haFanManual('on')" title="Fan ON at the selected speed (explicit override of the worker)"><i class="bi bi-fan me-1"></i>Fan ON</button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" onclick="haFanManual('off')" title="Fan OFF (all speed channels, then the master plug)"><i class="bi bi-fan me-1"></i>Fan OFF</button>
                                 </span>
                             </div>
                         </div>
