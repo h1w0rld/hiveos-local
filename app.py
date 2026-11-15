@@ -9863,7 +9863,12 @@ HA_FAN_MIN_DWELL = 600      # min time in the CURRENT plug state (anti-flapping)
 HA_FAN_MAX_ON = 1800        # legacy constant, no longer forces the fan off while cards are hot
 HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
 HA_FAN_OFF_FRESH = 180      # stale stats can never prove "cool" - the fan is held ON instead
-HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day
+HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day (safety valve below can override)
+HA_FAN_OFF_CONFIRM = 300    # every card must stay below 62°C this long before the fan leaves -
+                            # a rig whose miner restarts cools for 1-3 min and heats right back,
+                            # so an instant OFF just flaps the relay every 10 minutes
+HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
+                            # and the anti-flap dwell never block cooling for real heat
 HA_FAN_LEADER_GRACE = 900   # non-leader takes over only when the plug sat untouched this long
 # Layout discovery - the farm arrangement lives in the user's Home Assistant
 # (requested 28 Oct: "риги расставлены уже в Home Assistant, просто надо
@@ -10573,15 +10578,33 @@ def _ha_fan_tick():
     action = None
     if plug_state == "on":
         if hot_max is not None and hot_max >= HA_FAN_OFF_TEMP:
+            fan["cool_since"] = 0
             reason = ("holding ON: max %.1f°C ≥ %.0f°C (run cap no longer cuts cooling)"
                       % (hot_max, HA_FAN_OFF_TEMP))
         elif not fresh_off:
+            fan["cool_since"] = 0
             reason = ("holding ON: no fresh temps from %s" % ", ".join(stale_off[:4]))
         elif cool_max is not None and cool_max < HA_FAN_OFF_TEMP:
-            action = "off"
-            reason = ("max %.1f°C < %.0f°C - every К card cooled down"
-                      % (cool_max, HA_FAN_OFF_TEMP))
+            # Debounce: a rig whose miner restarts drops to 45-50°C for a couple
+            # of minutes and heats back to 70+ (RIG2 does this every ~10 min on
+            # 15 Nov). Turning the fan off on the first cool sample flapped the
+            # relay and ate the daily cycle budget, so cool must last.
+            since = int(fan.get("cool_since") or 0)
+            if not since:
+                since = int(now)
+                fan["cool_since"] = since
+            held = int(now - since)
+            if held < HA_FAN_OFF_CONFIRM:
+                reason = ("holding ON: max %.1f°C < %.0f°C for %ds/%ds - waiting for the room to"
+                          " stay cool (miner restarts cool cards for minutes only)"
+                          % (cool_max, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
+            else:
+                action = "off"
+                fan["cool_since"] = 0
+                reason = ("max %.1f°C < %.0f°C for %ds - every К card stayed cool"
+                          % (cool_max, HA_FAN_OFF_TEMP, held))
         else:
+            fan["cool_since"] = 0
             reason = "holding ON: max %.1f°C inside the %.0f-%.0f°C band" % (
                 cool_max if cool_max is not None else 0, HA_FAN_OFF_TEMP, HA_FAN_ON_TEMP)
     else:
@@ -10592,12 +10615,20 @@ def _ha_fan_tick():
                 reason = "asleep: no temperature data from К-rigs"
         elif hot_max <= HA_FAN_ON_TEMP:
             reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_max, HA_FAN_ON_TEMP)
+        elif hot_max >= HA_FAN_CRITICAL_TEMP:
+            # Cooling is never rationed: the anti-flap dwell and the daily cycle
+            # cap only throttle the warm 65-70°C band, not real heat.
+            action = "on"
+            fan["cool_since"] = 0
+            reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling now (dwell/cycle cap skipped)"
+                      % (hot_max, HA_FAN_CRITICAL_TEMP))
         elif age < HA_FAN_MIN_DWELL:
             reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(age), HA_FAN_MIN_DWELL)
         elif int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
             reason = "daily cycle cap reached"
         else:
             action = "on"
+            fan["cool_since"] = 0
             reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - cooling" %
                       (hot_max, HA_FAN_ON_TEMP))
 
