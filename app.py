@@ -10138,6 +10138,11 @@ def _ha_cluster_rigs():
     cache = load_cluster_cache()
     return state, cache
 
+def _ha_fan_norm(name):
+    """Rig names compare loosely: RIG7 / RIG_7 / rig 7 are the same worker."""
+    return "".join(ch for ch in str(name or "").upper() if ch.isalnum())
+
+
 def _ha_fan_leader(state, cache):
     """Panel that owns the fan decision: the lowest id among ONLINE rigs
     (self always counts - this process is alive by definition).
@@ -10512,8 +10517,26 @@ def _ha_fan_tick():
     # stale (panel dead or frozen) - a mining leader keeps its temps fresh.
     leader, panels = _ha_fan_leader(state, cache)
     self_id = state.get("self_id")
-    can_act = (leader == self_id)
-    if not can_act and len(panels) > 1 and panels[1] == self_id:
+    names = {r.get("id"): (r.get("name") or "") for r in state.get("rigs", [])}
+    self_name = names.get(self_id) or ""
+    if not self_name:
+        try:
+            self_name = _resolve_worker_name()
+        except Exception:
+            self_name = ""
+
+    def _is_me(rid):
+        # Identity mismatch guard: a panel may carry a self_id that is NOT the
+        # id the rest of the farm knows it by (RIG7 on 15 Nov: own id
+        # 48beae4d..., cluster entry 0d6a6cea..., so the elected leader id
+        # never matched "me" and the fan had no owner at all). The rig NAME is
+        # the stable identity, so compare that as well.
+        if rid == self_id:
+            return True
+        return bool(self_name) and _ha_fan_norm(names.get(rid)) == _ha_fan_norm(self_name)
+
+    can_act = _is_me(leader)
+    if not can_act and len(panels) > 1 and _is_me(panels[1]):
         ent = (cache.get("rigs") or {}).get(leader, {})
         lts = int(ent.get("fetched_at") or 0)
         if not ent.get("online") or not lts or (now - lts) > HA_FAN_LEADER_GRACE:
@@ -10521,8 +10544,8 @@ def _ha_fan_tick():
             fan["takeover"] = True
     fan["leader"] = leader
     if not can_act:
-        names = {r.get("id"): (r.get("name") or r.get("id")) for r in state.get("rigs", [])}
-        fan["last_reason"] = "peer-led: waiting for %s (leader panel)" % names.get(leader, leader)
+        fan["last_reason"] = "peer-led: waiting for %s (leader panel)" % (
+            names.get(leader) or leader)
         _ha_save_state(st)
         return
 
