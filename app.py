@@ -9864,9 +9864,11 @@ HA_FAN_MAX_ON = 1800        # legacy constant, no longer forces the fan off whil
 HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
 HA_FAN_OFF_FRESH = 180      # stale stats can never prove "cool" - the fan is held ON instead
 HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day (safety valve below can override)
-HA_FAN_OFF_CONFIRM = 300    # every card must stay below 62°C this long before the fan leaves -
+HA_FAN_OFF_CONFIRM = 900    # every card must stay below 62°C this long before the fan leaves -
                             # a rig whose miner restarts cools for 1-3 min and heats right back,
                             # so an instant OFF just flaps the relay every 10 minutes
+HA_FAN_MIN_ON = 1200        # once cooling starts it runs at least this long (relay wear; the
+                            # boiler room itself cools far slower than the GPUs do)
 HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
                             # and the anti-flap dwell never block cooling for real heat
 HA_FAN_LEADER_GRACE = 900   # non-leader takes over only when the plug sat untouched this long
@@ -10588,19 +10590,28 @@ def _ha_fan_tick():
             # Debounce: a rig whose miner restarts drops to 45-50°C for a couple
             # of minutes and heats back to 70+ (RIG2 does this every ~10 min on
             # 15 Nov). Turning the fan off on the first cool sample flapped the
-            # relay and ate the daily cycle budget, so cool must last.
+            # relay and ate the daily cycle budget, so cool must last - and the
+            # fan itself stays on for a minimum run anyway.
             since = int(fan.get("cool_since") or 0)
             if not since:
                 since = int(now)
                 fan["cool_since"] = since
             held = int(now - since)
+            on_since = int(fan.get("on_since") or 0)
+            if not on_since and fan.get("last_action") == "on":
+                on_since = int(fan.get("last_ts") or 0)
+            ran = int(now - on_since) if on_since else HA_FAN_MIN_ON
             if held < HA_FAN_OFF_CONFIRM:
                 reason = ("holding ON: max %.1f°C < %.0f°C for %ds/%ds - waiting for the room to"
                           " stay cool (miner restarts cool cards for minutes only)"
                           % (cool_max, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
+            elif ran < HA_FAN_MIN_ON:
+                reason = ("holding ON: maximum %.1f°C < %.0f°C but the fan ran only %ds/%ds"
+                          % (cool_max, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
             else:
                 action = "off"
                 fan["cool_since"] = 0
+                fan.pop("on_since", None)
                 reason = ("max %.1f°C < %.0f°C for %ds - every К card stayed cool"
                           % (cool_max, HA_FAN_OFF_TEMP, held))
         else:
@@ -10639,6 +10650,7 @@ def _ha_fan_tick():
         fan["last_reason"] = reason
         if action == "on":
             fan["cycles"] = int(fan.get("cycles") or 0) + 1
+            fan["on_since"] = int(now)
         if ok_act:
             record_metrics_event("info" if action == "on" else "success",
                                  "Boiler room fan assist: turned %s (%s)" % (action.upper(), reason))
@@ -10983,6 +10995,15 @@ def api_ha_fan():
         return jsonify({"success": False,
                         "message": "Fan plug not found in Home Assistant (switch 'Вентилятор')"}), 400
     ok, err = _ha_fan_apply(conf, action == "on", master)
+    if ok:
+        st = _ha_load_state()
+        fan = st.setdefault("fan", {})
+        fan["last_action"] = action
+        fan["last_ts"] = int(time.time())
+        if action == "on":
+            fan["on_since"] = int(time.time())
+            fan["cool_since"] = 0
+        _ha_save_state(st)
     record_metrics_event("info" if ok else "danger",
                          "Boiler room fan manual: %s%s" % (action.upper(), (" failed: " + err) if not ok else ""))
     return jsonify({"success": ok, "message": ("Fan turned %s" % action.upper()) if ok else err})
