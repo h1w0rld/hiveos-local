@@ -10165,20 +10165,25 @@ def _ha_fan_leader(state, cache):
     return (panels[0] if panels else self_id), panels
 
 
-def _ha_rig_temps(state, cache, fresh_ttl):
+def _ha_rig_temps(state, cache, fresh_ttl, stale_last_max_age=1800):
     """GPU temps of all rigs marked 'stokehole'.
-    Returns (values[], all_fresh, rigs_total, stale_names).
+    Returns (values[], all_fresh, rigs_total, stale_names, stale_last_hot).
 
-    values      - temps of the rigs whose cache entry is newer than fresh_ttl
-    all_fresh   - True when every stokehole rig that is currently ONLINE has
-                  fresh stats. A rig whose panel/route just broke must never be
-                  able to "prove" that the boiler room is cool (15 Nov: RIG2
-                  dropped out of the average the moment its miner died).
-    rigs_total  - number of stokehole rigs (any location match)
-    stale_names - online stokehole rigs without fresh stats
+    values          - temps of the rigs whose cache entry is newer than fresh_ttl
+    all_fresh       - True when every stokehole rig that is currently ONLINE has
+                      fresh stats. A rig whose panel/route just broke must never be
+                      able to "prove" that the boiler room is cool (15 Nov: RIG2
+                      dropped out of the average the moment its miner died).
+    rigs_total      - number of stokehole rigs (any location match)
+    stale_names     - online stokehole rigs without fresh stats
+    stale_last_hot  - hottest temp last seen on a rig whose stats just went stale
+                      (within stale_last_max_age). A hung rig keeps its cards hot,
+                      so its last reading must not be forgotten while the fan is
+                      still allowed to start.
     """
     values = []
     stale = []
+    stale_last = []
     any_rig = False
     self_id = state.get("self_id")
     now = time.time()
@@ -10193,6 +10198,12 @@ def _ha_rig_temps(state, cache, fresh_ttl):
             online = True if rid == self_id else bool(entry.get("online"))
             if online:
                 stale.append(rig.get("name") or rid or "?")
+                if ts and (now - ts) <= stale_last_max_age:
+                    last = [float(g.get("temp", 0) or 0)
+                            for g in ((entry.get("stats") or {}).get("gpus") or [])
+                            if isinstance(g.get("temp"), (int, float))]
+                    if last:
+                        stale_last.append(max(last))
             continue
         stats = entry.get("stats") or {}
         for g in stats.get("gpus") or []:
@@ -10202,7 +10213,7 @@ def _ha_rig_temps(state, cache, fresh_ttl):
                 continue
             if t > 0:
                 values.append(t)
-    return values, not stale, any_rig, stale
+    return values, not stale, any_rig, stale, stale_last
 
 _HA_PC_TICK_LOCK = threading.Lock()
 _HA_PC_LOG_NAME = "ha_powercycle.log"   # persistent (ext4 under /hive-config, survives reboot)
@@ -10497,8 +10508,8 @@ def _ha_fan_tick():
         fan["last_reason"] = "plug state unknown%s" % (": " + ent_err if ent_err else "")
         _ha_save_state(st)
         return
-    temp_on, fresh_on, _n1, stale_on = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
-    temp_off, fresh_off, n_stokehole, stale_off = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
+    temp_on, fresh_on, _n1, stale_on, stale_hot = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
+    temp_off, fresh_off, n_stokehole, stale_off, _sh2 = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
     if n_stokehole == 0:
         fan["last_reason"] = "no rigs marked stokehole (К) in Home Assistant"
         _ha_save_state(st)
@@ -10506,12 +10517,19 @@ def _ha_fan_tick():
     hot_max = max(temp_on) if temp_on else None      # fresh cards -> may turn the fan ON
     cool_max = max(temp_off) if temp_off else None   # wider window -> may turn it OFF
     avg = (sum(temp_off) / len(temp_off)) if temp_off else None
+    # A rig that just went dark (hung panel, reboot) keeps its cards hot - its
+    # last reading still counts when deciding to START cooling.
+    stale_peak = max(stale_hot) if stale_hot else None
+    hot_peak = hot_max
+    if stale_peak is not None and (hot_peak is None or stale_peak > hot_peak):
+        hot_peak = stale_peak
 
     room_val = layout.get("room_value")
     room_state = layout.get("room_state") or ""
     fan.update({"avg_temp": round(avg, 1) if avg is not None else None,
                 "max_temp": round(hot_max, 1) if hot_max is not None else None,
                 "max_off_temp": round(cool_max, 1) if cool_max is not None else None,
+                "max_stale_temp": round(stale_peak, 1) if stale_peak is not None else None,
                 "stale_rigs": stale_off,
                 "room_temp": round(room_val, 1) if room_val is not None else None,
                 "room_err": "" if room_val is not None else (room_state or "dark")})
@@ -10619,20 +10637,22 @@ def _ha_fan_tick():
             reason = "holding ON: max %.1f°C inside the %.0f-%.0f°C band" % (
                 cool_max if cool_max is not None else 0, HA_FAN_OFF_TEMP, HA_FAN_ON_TEMP)
     else:
-        if hot_max is None:
+        if hot_peak is None:
             if stale_on:
                 reason = "asleep: no fresh temperature data from К-rigs (%s)" % ", ".join(stale_on[:4])
             else:
                 reason = "asleep: no temperature data from К-rigs"
-        elif hot_max <= HA_FAN_ON_TEMP:
-            reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_max, HA_FAN_ON_TEMP)
-        elif hot_max >= HA_FAN_CRITICAL_TEMP:
+        elif hot_peak <= HA_FAN_ON_TEMP:
+            reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_peak, HA_FAN_ON_TEMP)
+        elif hot_peak >= HA_FAN_CRITICAL_TEMP:
             # Cooling is never rationed: the anti-flap dwell and the daily cycle
             # cap only throttle the warm 65-70°C band, not real heat.
             action = "on"
             fan["cool_since"] = 0
-            reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling now (dwell/cycle cap skipped)"
-                      % (hot_max, HA_FAN_CRITICAL_TEMP))
+            reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling now (dwell/cycle cap skipped)%s"
+                      % (hot_peak, HA_FAN_CRITICAL_TEMP,
+                         " [last reading of %s]" % ", ".join(stale_on[:3]) if stale_peak is not None
+                         and (hot_max is None or stale_peak > hot_max) else ""))
         elif age < HA_FAN_MIN_DWELL:
             reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(age), HA_FAN_MIN_DWELL)
         elif int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
@@ -10641,7 +10661,7 @@ def _ha_fan_tick():
             action = "on"
             fan["cool_since"] = 0
             reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - cooling" %
-                      (hot_max, HA_FAN_ON_TEMP))
+                      (hot_peak, HA_FAN_ON_TEMP))
 
     if action:
         ok_act, act_err = _ha_fan_apply(conf, action == "on", master)
