@@ -8384,7 +8384,8 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
             return False, "Invalid miner install URL."
         if algo and not re.match(r'^[a-z0-9_\-]+$', algo):
             return False, "Invalid hash algorithm name."
-        if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
+        # ',' and '*' allow per-GPU miner lists (--power-save *,1,2, --cclk *,1650)
+        if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\t ,\*]+$', user_config):
             return False, "Invalid miner configuration arguments."
         if template and not re.match(r'^[A-Za-z0-9_\-\.\@\:%]*$', template):
             return False, "Invalid wallet and worker template."
@@ -8718,7 +8719,8 @@ def _validate_fsheet_item(item):
         return None, "Invalid miner install URL."
     if algo and not re.match(r'^[a-z0-9_\-]+$', algo):
         return None, "Invalid hash algorithm name."
-    if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\s]+$', user_config):
+    # ',' and '*' allow per-GPU miner lists (--power-save *,1,2, --cclk *,1650)
+    if user_config and not re.match(r'^[A-Za-z0-9_\-\.\:\%\t ,\*]+$', user_config):
         return None, "Invalid miner configuration arguments."
     if template and not re.match(r'^[A-Za-z0-9_\-\.\@\:%]*$', template):
         return None, "Invalid wallet and worker template."
