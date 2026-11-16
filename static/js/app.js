@@ -690,7 +690,7 @@ document.addEventListener('DOMContentLoaded', function() {
             icon.className = 'bi bi-arrow-clockwise';
         }, 600);
     });
-    // Per-component "select all" checkboxes (Panel / GPU Drivers / Hive OS)
+    // Per-component "select all" checkboxes (Panel / GPU Drivers / Hive OS / Packages)
     CU_COMPONENTS.forEach(comp => {
         const box = document.getElementById('cuAll' + comp.charAt(0).toUpperCase() + comp.slice(1));
         if (!box) return;
@@ -2580,30 +2580,35 @@ async function checkUpdate(isManual = false) {
 }
 
 // ---------------- Cluster Update ----------------
-// One unified table for every update kind (panel / GPU drivers / Hive OS):
-// each component has its own checkbox column, so different rigs can be ticked
-// for different things in the same run. Versions for all three come from a
-// single /api/version call per rig; a run first finishes all drivers/hiveos
-// background jobs (they die with the panel process, so they must not overlap
-// a panel restart) and only then pulls panel updates, self rig LAST because
-// its restart kills this very page.
+// One unified table for every update kind (panel / GPU drivers / Hive OS /
+// system packages): each component has its own checkbox column, so different
+// rigs can be ticked for different things in the same run. Versions for all
+// of them come from a single /api/version call per rig; a run first finishes
+// all drivers/hiveos/packages background jobs (they die with the panel
+// process, so they must not overlap a panel restart) and only then pulls
+// panel updates, self rig LAST because its restart kills this very page.
 
 let cuLatest = null;        // latest panel release on GitHub (null = unknown)
-let cuRigInfo = {};         // rigId -> {version, driver, hiveos, driver_latest, hiveos_latest, err}
+let cuRigInfo = {};         // rigId -> {version, driver, hiveos, driver_latest, hiveos_latest, packages_upgradable, packages_lists_age, err}
 let cuChecked = new Set();  // "rigId|component" pairs ticked for update
 let cuBusy = false;         // an update run is in progress
 let cuRunId = 0;            // guards against stale async refreshes
 let cuLoadedOnce = false;   // a refresh landed with a live session
-let cuJobs = {};            // rigId -> {panel|drivers|hiveos: job|null}
-const CU_COMPONENTS = ['panel', 'drivers', 'hiveos'];
+let cuJobs = {};            // rigId -> {panel|drivers|hiveos|packages: job|null}
+const CU_COMPONENTS = ['panel', 'drivers', 'hiveos', 'packages'];
 const CU_COMPONENT_HINTS = {
     panel: 'Dashboard software: pulls the latest release from GitHub and restarts (miners not affected).',
     drivers: 'Runs nvidia-driver-update — the miner pauses and restarts automatically (10-20 min per rig).',
-    hiveos: 'Runs Hive OS selfupgrade (apt) — takes several minutes; reboot the rig afterwards if the kernel was updated.'
+    hiveos: 'Runs Hive OS selfupgrade (apt) — takes several minutes; reboot the rig afterwards if the kernel was updated.',
+    packages: 'System packages: apt-get update + apt-get upgrade — services may be restarted; reboot the rig if a new kernel was installed.'
 };
 const CU_COMPONENT_LABELS = {
-    panel: 'Panel', drivers: 'GPU Drivers', hiveos: 'Hive OS'
+    panel: 'Panel', drivers: 'GPU Drivers', hiveos: 'Hive OS', packages: 'Packages'
 };
+// apt indexes older than this make the package counter unreliable (a rig
+// that never ran apt-get update sees stale numbers) — such a rig is never
+// treated as "up to date" so the update job can still refresh it
+const CU_PACKAGES_LISTS_FRESH = 24 * 3600;
 
 const cuSleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -2629,17 +2634,47 @@ function cuCompVersion(rigId, comp) {
     const info = cuRigInfo[rigId] || {};
     if (comp === 'drivers') return info.driver || '';
     if (comp === 'hiveos') return info.hiveos || '';
+    if (comp === 'packages') return ''; // packages have no version — only a count
     return info.version || null;
+}
+
+// Number of apt packages waiting for an upgrade on a rig (null = unknown)
+function cuPackagesCount(rigId) {
+    const info = cuRigInfo[rigId] || {};
+    return (typeof info.packages_upgradable === 'number') ? info.packages_upgradable : null;
+}
+
+// Age of the rig's apt indexes in seconds (null = unknown)
+function cuPackagesListsAge(rigId) {
+    const info = cuRigInfo[rigId] || {};
+    return (typeof info.packages_lists_age === 'number') ? info.packages_lists_age : null;
+}
+
+function cuPackagesAgeText(rigId) {
+    const age = cuPackagesListsAge(rigId);
+    if (age == null) return 'apt index age unknown';
+    if (age < 3600) return 'apt index ' + Math.max(1, Math.round(age / 60)) + ' min old';
+    if (age < 86400) return 'apt index ' + Math.round(age / 3600) + ' h old';
+    return 'apt index ' + Math.round(age / 86400) + ' days old';
 }
 
 function cuCompLatest(rigId, comp) {
     const info = cuRigInfo[rigId] || {};
     if (comp === 'drivers') return info.driver_latest || '';
     if (comp === 'hiveos') return info.hiveos_latest || '';
+    if (comp === 'packages') return '';
     return cuLatest;
 }
 
 function cuCompUpToDate(rigId, comp) {
+    if (comp === 'packages') {
+        // nothing to upgrade AND the index is fresh enough to trust that
+        const count = cuPackagesCount(rigId);
+        const age = cuPackagesListsAge(rigId);
+        if (count === null) return false;
+        if (count > 0) return false;
+        return age == null ? false : age < CU_PACKAGES_LISTS_FRESH;
+    }
     const v = cuCompVersion(rigId, comp), latest = cuCompLatest(rigId, comp);
     return !!(v && latest && verCompare(v, latest) >= 0);
 }
@@ -2671,7 +2706,9 @@ async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
         return {
             version: data.version,
             driver: data.driver || '', driver_latest: data.driver_latest || '',
-            hiveos: data.hiveos || '', hiveos_latest: data.hiveos_latest || ''
+            hiveos: data.hiveos || '', hiveos_latest: data.hiveos_latest || '',
+            packages_upgradable: (typeof data.packages_upgradable === 'number') ? data.packages_upgradable : null,
+            packages_lists_age: (typeof data.packages_lists_age === 'number') ? data.packages_lists_age : null
         };
     } catch (e) {
         if (e && e.name === 'AbortError') return { err: 'Timed out' };
@@ -2729,6 +2766,8 @@ async function refreshClusterUpdate() {
             cuRigInfo[r.id] = {
                 version: res.version, driver: res.driver || '', hiveos: res.hiveos || '',
                 driver_latest: res.driver_latest || '', hiveos_latest: res.hiveos_latest || '',
+                packages_upgradable: res.packages_upgradable,
+                packages_lists_age: res.packages_lists_age,
                 err: ''
             };
         } else {
@@ -2736,6 +2775,8 @@ async function refreshClusterUpdate() {
             cuRigInfo[r.id] = {
                 version: prev.version || null, driver: prev.driver || '', hiveos: prev.hiveos || '',
                 driver_latest: prev.driver_latest || '', hiveos_latest: prev.hiveos_latest || '',
+                packages_upgradable: prev.packages_upgradable,
+                packages_lists_age: prev.packages_lists_age,
                 err: (res && res.err) || 'Unreachable'
             };
         }
@@ -2758,6 +2799,7 @@ function cuCheckCellHtml(rig, comp) {
 // Version cell for one component: ONE horizontal line — current version badge
 // + latest available version (or job state during a run), never stacked
 function cuCompInfoHtml(rig, comp) {
+    if (comp === 'packages') return cuPackagesInfoHtml(rig);
     const info = cuRigInfo[rig.id] || {};
     const job = (cuJobs[rig.id] || {})[comp];
     const v = cuCompVersion(rig.id, comp);
@@ -2807,6 +2849,54 @@ function cuCompInfoHtml(rig, comp) {
             tail + '</span>' : '') + '</span>';
 }
 
+// Packages cell: there is no version to show — the badge carries the number
+// of apt packages waiting for an upgrade ("0" = nothing to do). The index
+// age travels in the tooltip: a rig that never ran apt-get update reports
+// stale numbers.
+function cuPackagesInfoHtml(rig) {
+    const info = cuRigInfo[rig.id] || {};
+    const job = (cuJobs[rig.id] || {}).packages;
+    const count = cuPackagesCount(rig.id);
+    const ageTxt = cuPackagesAgeText(rig.id);
+    let badge, tail = '', cls = 'text-muted', failTitle = '';
+    if (count === null) {
+        badge = '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
+            escapeHtml(info.err || 'Package list unavailable') + '">—</span>';
+        tail = '<span title="Could not read the package list">unknown</span>';
+    } else if (count > 0) {
+        const tip = count + ' package(s) can be upgraded (' + ageTxt + ')';
+        badge = '<span class="badge bg-warning-glow border border-warning text-warning cu-version-badge" title="' +
+            escapeHtml(tip) + '">' + count + '</span>';
+        tail = '<span title="' + escapeHtml(tip) + '">updates</span>';
+        cls = 'text-warning fw-semibold';
+    } else {
+        const tip = 'All packages up to date (' + ageTxt + ')';
+        badge = '<span class="badge bg-success-glow border border-success text-success cu-version-badge" title="' +
+            escapeHtml(tip) + '">0</span>';
+        tail = '<span title="' + escapeHtml(tip) + '"><i class="bi bi-check-circle-fill me-1"></i>up to date</span>';
+        cls = 'text-success';
+    }
+    if (job && job.running) {
+        tail = '<i class="bi bi-arrow-repeat cu-status-spin me-1"></i>updating...';
+        cls = 'text-warning';
+    } else if (job && job.ok === true) {
+        tail = '<i class="bi bi-check-circle-fill me-1"></i>done';
+        cls = 'text-success';
+    } else if (job && job.ok === false) {
+        const tailLog = (job.log_tail || '').slice(-600);
+        tail = '<i class="bi bi-x-circle-fill me-1"></i>failed' +
+            (job.exit_code != null ? ' (exit ' + job.exit_code + ')' : '');
+        cls = 'text-danger';
+        failTitle = ' title="' + escapeHtml(tailLog || ('exit code ' + job.exit_code)) + '"';
+    } else if (job && job.err) {
+        tail = '<i class="bi bi-plug me-1"></i>error';
+        cls = 'text-danger';
+        failTitle = ' title="' + escapeHtml(job.err) + '"';
+    }
+    return '<span class="d-inline-flex align-items-center gap-2 text-nowrap">' + badge +
+        (tail ? ' <span class="small ' + cls + '"' + failTitle + '>' + tail + '</span>' : '') + '</span>';
+}
+
 // Whole-row status: offline, run progress, else a summary of what's outdated
 function cuRowStatusHtml(rig) {
     if (!rig.is_self && !rig.online) {
@@ -2830,10 +2920,13 @@ function cuRowStatusHtml(rig) {
     }
     // idle: summarize what could be updated on this rig
     const outdated = CU_COMPONENTS.filter(c => {
+        if (c === 'packages') return (cuPackagesCount(rig.id) || 0) > 0;
         const v = cuCompVersion(rig.id, c), latest = cuCompLatest(rig.id, c);
         return v && latest && verCompare(v, latest) < 0;
     });
-    const known = CU_COMPONENTS.filter(c => cuCompVersion(rig.id, c));
+    const known = CU_COMPONENTS.filter(c => c === 'packages'
+        ? cuPackagesCount(rig.id) !== null
+        : !!cuCompVersion(rig.id, c));
     if (!known.length) {
         return '<span class="text-muted" title="' + escapeHtml((cuRigInfo[rig.id] || {}).err || '') +
             '"><i class="bi bi-dash-circle me-1"></i>Versions unknown</span>';
@@ -2879,7 +2972,7 @@ function renderCuRows() {
     }
     const rigs = ((clusterData && clusterData.rigs) || []).slice().sort(naturalRigCompare);
     if (!rigs.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">Loading versions...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-3">Loading versions...</td></tr>';
         syncCuSelectAllBoxes();
         cuPaintUpdateButton();
         return;
@@ -3050,11 +3143,13 @@ async function runClusterUpdate() {
     const hasDrivers = Object.values(plan).some(cs => cs.includes('drivers'));
     const hasHiveos = Object.values(plan).some(cs => cs.includes('hiveos'));
     const hasPanel = Object.values(plan).some(cs => cs.includes('panel'));
+    const hasPackages = Object.values(plan).some(cs => cs.includes('packages'));
     let warn = '';
     if (hasDrivers) warn += ' Driver updates pause mining on each rig for 10-20 minutes — do not reboot the rigs meanwhile.';
     if (hasHiveos) warn += ' Hive OS upgrade runs apt over several minutes — reboot rigs afterwards if the kernel was updated.';
+    if (hasPackages) warn += ' Package updates run apt upgrade — system services may be restarted and a new kernel may be installed (reboot the rigs afterwards).';
     if (hasPanel) warn += ' Panel updates restart the dashboards (miners are not affected).';
-    if (hasPanel && (hasDrivers || hasHiveos)) warn += ' Panel pulls start only after all driver/Hive OS jobs finish.';
+    if (hasPanel && (hasDrivers || hasHiveos || hasPackages)) warn += ' Panel pulls start only after all driver/Hive OS/package jobs finish.';
     const msg = 'Start updates on ' + Object.keys(plan).length + ' rig(s): ' + planNames + skippedNote + '.' + warn;
     if (!confirm(msg)) return;
 

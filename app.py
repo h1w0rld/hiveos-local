@@ -9469,6 +9469,55 @@ def _detect_latest_versions(max_age=60):
     _latest_env_cache.update({"ts": now, "driver": driver_latest, "hiveos": hiveos_latest})
     return driver_latest, hiveos_latest
 
+_packages_cache = {"ts": 0.0, "count": None, "lists_age": None}
+
+def _apt_lists_age():
+    """Seconds since the newest apt index file was written (None = no lists).
+
+    The package counters below are only as fresh as the rig's apt indexes —
+    a rig that never ran `apt-get update` reports stale numbers, so the age
+    travels with the count and the UI marks it.
+    """
+    newest = 0.0
+    try:
+        for path in glob.glob("/var/lib/apt/lists/*"):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > newest:
+                newest = mtime
+    except OSError:
+        return None
+    if not newest:
+        return None
+    return max(0, int(time.time() - newest))
+
+def _detect_package_updates(max_age=60):
+    """(upgradable_count, lists_age_seconds) — apt packages waiting on the rig.
+
+    `apt-get -s upgrade` simulates the upgrade against the CURRENT package
+    indexes (no network, no dpkg lock) and prints one "Inst <pkg>" line per
+    package that has a newer version — that count is what the Updates tab
+    shows as "N to update". The simulation is local and fast (no repo round
+    trip), so it is safe to call on every version poll.
+    """
+    now = time.time()
+    if _packages_cache["ts"] and now - _packages_cache["ts"] < max_age:
+        return _packages_cache["count"], _packages_cache["lists_age"]
+    count = None
+    out, _, code = run_command("apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null")
+    if code == 0 and out is not None:
+        count = sum(1 for line in out.splitlines() if line.startswith("Inst "))
+    if count is None:
+        # fallback for rigs where the simulation refuses to run: `apt list`
+        # prints one "[upgradable from: ...]" line per package
+        out, _, code = run_command("apt list --upgradable 2>/dev/null")
+        if code == 0 and out:
+            count = sum(1 for line in out.splitlines() if "[upgradable from:" in line)
+    _packages_cache.update({"ts": now, "count": count, "lists_age": _apt_lists_age()})
+    return _packages_cache["count"], _packages_cache["lists_age"]
+
 @app.route('/api/version', methods=['GET'])
 def api_version():
     """Lightweight per-rig version report (no GitHub round-trip).
@@ -9476,15 +9525,19 @@ def api_version():
     Used by the Cluster Update card: self calls it directly, peers through
     the /api/remote/<id> SSH proxy. `version` is this dashboard's release,
     `driver`/`hiveos` (+ their `_latest` counterparts) feed the update-form
-    component switch (GPU Drivers / Hive OS rows).
+    component switch (GPU Drivers / Hive OS rows), `packages_upgradable` /
+    `packages_lists_age` feed the system-packages row.
     """
     driver, hiveos = _detect_env_versions()
     driver_latest, hiveos_latest = _detect_latest_versions()
+    packages_count, packages_age = _detect_package_updates()
     return jsonify({
         "success": True,
         "version": VERSION,
         "driver": driver, "driver_latest": driver_latest,
         "hiveos": hiveos, "hiveos_latest": hiveos_latest,
+        "packages_upgradable": packages_count,
+        "packages_lists_age": packages_age,
     })
 
 # ---------------- Component update jobs (GPU drivers / Hive OS) ----------------
@@ -9508,10 +9561,23 @@ UPDATE_COMPONENT_CMDS = {
                 "/hive/sbin/nvidia-driver-update"),
     "hiveos": ("sudo env PATH=/hive/sbin:/hive/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
                "/hive/bin/selfupgrade"),
+    # System packages (apt): refresh the indexes first (a broken repo must not
+    # abort the upgrade — `|| true`), then upgrade everything that has a
+    # newer version. --force-confold/confdef keeps the rig's own config files
+    # (the panel's rig.conf/wallet.conf live in /hive-config and are NOT apt
+    # managed, but /etc configs are). DPkg::Lock::Timeout waits instead of
+    # failing when unattended-upgrades holds the lock. Both steps are capped
+    # by `timeout` so a stalled download cannot hang the job forever.
+    "packages": ("sudo env DEBIAN_FRONTEND=noninteractive "
+                 "PATH=/hive/sbin:/hive/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+                 "bash -c 'timeout 600 apt-get update -qq || true; "
+                 "timeout 1800 apt-get -y -o DPkg::Lock::Timeout=600 "
+                 "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade'"),
 }
 UPDATE_COMPONENT_LABELS = {
     "drivers": "NVIDIA driver update",
     "hiveos": "Hive OS upgrade",
+    "packages": "System package update",
 }
 
 def _update_log_path(component):
