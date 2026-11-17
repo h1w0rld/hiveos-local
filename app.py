@@ -9934,7 +9934,9 @@ HA_PC_TICK_WARN = 10        # tick slower than this -> write into the persistent
 HA_PC_REQUEST_TTL = 900     # a self-powercycle request must be served by a peer within this
 HA_PC_OFF_RESTORE = 1800    # plug found OFF + rig dark this long -> switch the power back on
 
-HA_FAN_INTERVAL = 60
+HA_FAN_INTERVAL = 20        # every panel re-decides and refreshes its vote 3x per minute -
+                            # the quorum follows a changed decision within ~20 s (17 Nov:
+                            # user wants the cluster vote to keep up in real time)
 HA_FAN_ON_TEMP = 65.0       # ANY K-rig card above this -> fan on (65, not 62: 3070s sit at 62-64 while healthy)
 HA_FAN_OFF_TEMP = 62.0      # fan leaves ONLY when EVERY fresh K-card is below this (max-based, never avg)
 HA_FAN_MIN_DWELL = 600      # min time in the CURRENT plug state (anti-flapping)
@@ -9942,9 +9944,10 @@ HA_FAN_MAX_ON = 1800        # legacy constant, no longer forces the fan off whil
 HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
 HA_FAN_OFF_FRESH = 180      # stale stats can never prove "cool" - the fan is held ON instead
 HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day (safety valve below can override)
-HA_FAN_OFF_CONFIRM = 900    # every card must stay below 62°C this long before the fan leaves -
+HA_FAN_OFF_CONFIRM = 300    # every card must stay below 62°C this long before the fan leaves -
                             # a rig whose miner restarts cools for 1-3 min and heats right back,
-                            # so an instant OFF just flaps the relay every 10 minutes
+                            # so an instant OFF just flaps the relay; 5 min clears those dips
+                            # while reacting ~3x faster than the old 15 min window
 HA_FAN_MIN_ON = 1200        # once cooling starts it runs at least this long (relay wear; the
                             # boiler room itself cools far slower than the GPUs do)
 HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
@@ -9966,12 +9969,18 @@ HA_FAN_MASTER_SETTLE = 3    # s between master ON and the channel ON (HA waits 2
 # --- cluster quorum -----------------------------------------------------------
 # No single rig owns the fan (user, 15 Nov: "никакой риг не должен принимать
 # решение, это всё работа кластера"). Every panel votes every tick, the votes
-# travel with the cluster state, the MAJORITY decides and only the lowest-id
-# panel among the winning voters executes. Votes of dead panels expire, so an
-# unreachable rig (the previous 'leader' included) shrinks the voter set instead
-# of freezing the cooling.
-HA_FAN_VOTE_TTL = 300       # a panel's vote older than this is not counted
-HA_FAN_ACTOR_GRACE = 240    # elected actor silent this long -> next voter acts
+# travel with the cluster state (plus a fast direct push, _ha_fan_push_votes),
+# the MAJORITY decides and only the lowest-id panel among the winning voters
+# executes. Votes of dead panels expire quickly, so an unreachable rig (the
+# previous 'leader' included) shrinks the voter set instead of freezing the
+# cooling - and the quorum immediately reflects who is actually alive.
+HA_FAN_VOTE_TTL = 120       # a panel's vote older than this is not counted: with 20 s
+                            # ticks a live panel refreshes 6x inside the window, so a
+                            # silent panel stops voting within 2 min (was 5)
+HA_FAN_ACTOR_GRACE = 90     # elected actor silent this long -> next voter acts (was 240)
+HA_FAN_PUSH_KEEPALIVE = 3   # ticks between keepalive vote pushes (changed decisions
+                            # push immediately); at 20 s ticks = every 60 s, well inside
+                            # HA_FAN_VOTE_TTL
 # Layout discovery - the farm arrangement lives in the user's Home Assistant
 # (requested 28 Oct: "риги расставлены уже в Home Assistant, просто надо
 # брать инфу оттуда"): room marks sit in input_select.rig_<N> (k/d/-),
@@ -10344,6 +10353,38 @@ def _ha_fan_publish_vote(state, self_id, self_name, target, hot):
     return owner
 
 
+def _ha_fan_push_votes(votes, wait=False):
+    """Fast lane for fan votes: shove the freshly published vote dict at every
+    peer panel right away instead of waiting for the next cluster sync cycle.
+    Runs in a daemon thread so a slow/offline peer never stalls the tick (the
+    regular sync cycle remains the durable fallback anyway). `wait=True` is for
+    tests: join the pusher before asserting."""
+    if not isinstance(votes, dict) or not votes:
+        return
+    payload = {k: dict(v) for k, v in votes.items() if isinstance(v, dict)}
+    if not payload:
+        return
+
+    def _push():
+        try:
+            state = load_cluster_state()
+            for rig in state.get("rigs", []):
+                if not isinstance(rig, dict) or rig.get("id") == state.get("self_id"):
+                    continue
+                try:
+                    cluster_remote_api(rig, "POST", "api/ha/fanvote",
+                                       body={"votes": payload}, timeout=4)
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.error(f"HA fan: fast vote push failed: {e}")
+
+    t = threading.Thread(target=_push, daemon=True, name="ha-fan-vote-push")
+    t.start()
+    if wait:
+        t.join(timeout=30)
+
+
 def merge_fan_votes(base_votes, incoming_votes, keep_secs=86400):
     """Newest vote per panel wins (every panel rewrites only its own entry).
     Votes older than keep_secs are dropped so the dict cannot grow forever."""
@@ -10374,6 +10415,23 @@ def merge_fan_votes(base_votes, incoming_votes, keep_secs=86400):
     return out
 
 
+def _ha_fan_stale_voters(votes, now):
+    """Panels whose vote exists but is older than HA_FAN_VOTE_TTL yet was seen
+    in the last 10 min - they went quiet recently (hung panel, reboot) and are
+    about to stop counting. Diagnostics for 'who is available and voting'."""
+    out = set()
+    for owner, vote in (votes or {}).items():
+        if not isinstance(vote, dict):
+            continue
+        try:
+            ts = int(vote.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts and HA_FAN_VOTE_TTL < (now - ts) <= 600:
+            out.add(str(vote.get("rig") or owner))
+    return sorted(out)
+
+
 def _ha_fan_quorum(state, now):
     """Majority vote of the panels that voted within HA_FAN_VOTE_TTL.
     Returns {winner, counts, voters, actor(vote), actor_ts, newest_ts}.
@@ -10396,7 +10454,8 @@ def _ha_fan_quorum(state, now):
         fresh.append((ts, owner, key, vote))
     if not fresh:
         return {"winner": None, "counts": {}, "voters": 0, "actor": None,
-                "actor_ts": 0, "newest_ts": 0}
+                "actor_ts": 0, "newest_ts": 0, "voter_names": [],
+                "stale": _ha_fan_stale_voters(votes, now)}
     counts = {}
     for _ts, _owner, key, _v in fresh:
         counts[key] = counts.get(key, 0) + 1
@@ -10414,7 +10473,9 @@ def _ha_fan_quorum(state, now):
                                         str((f[3] or {}).get("rig") or "")))
     return {"winner": winner, "counts": counts, "voters": len(fresh),
             "actor": actor[3], "actor_ts": actor[0],
-            "newest_ts": max(f[0] for f in fresh)}
+            "newest_ts": max(f[0] for f in fresh),
+            "voter_names": sorted({str((f[3] or {}).get("rig") or f[1]) for f in fresh}),
+            "stale": _ha_fan_stale_voters(votes, now)}
 
 
 def _ha_fan_identity_match(vote, rig_id, rig_name):
@@ -10828,6 +10889,7 @@ def _ha_fan_tick():
         _ha_fan_publish_vote(state, self_id, self_name, "", None)
         state.get("fan_votes", {}).pop(_ha_fan_vote_owner(self_id, self_name), None)
         save_cluster_state(state)
+        _ha_fan_push_votes(state.get("fan_votes"))
         _ha_save_state(st)
         return
     # Rate limiting: count automatic ON starts per calendar day
@@ -10956,10 +11018,21 @@ def _ha_fan_tick():
         save_cluster_state(state)
     except Exception as e:
         logging.error(f"HA fan: failed to publish the vote: {e}")
+    seq = int(fan.get("push_seq") or 0) + 1
+    fan["push_seq"] = seq
+    if fan.get("last_push_key") != desired or seq % HA_FAN_PUSH_KEEPALIVE == 1:
+        # FAST LANE: a changed decision reaches every peer in ~1 s (the cluster
+        # sync cycle stays as the durable fallback); an unchanged vote rides a
+        # keepalive push every HA_FAN_PUSH_KEEPALIVE ticks so a live panel's
+        # vote never ages out of the TTL window while it is thinking.
+        fan["last_push_key"] = desired
+        _ha_fan_push_votes(state.get("fan_votes"))
     q = _ha_fan_quorum(state, now)
     fan["vote"] = {"key": desired, "hot": round(hot_peak, 1) if hot_peak is not None else None}
     fan["quorum"] = {"winner": q.get("winner"), "counts": q.get("counts"),
                      "voters": q.get("voters"),
+                     "voter_names": q.get("voter_names"),
+                     "stale": q.get("stale"),
                      "actor": (q.get("actor") or {}).get("rig")
                               or (q.get("actor") or {}).get("id") or ""}
     winner = q.get("winner")
@@ -11278,6 +11351,26 @@ def api_ha_location():
         label = "HA powercycle %s" % ("ON" if rig.get("ha_enabled", True) else "OFF")
     record_metrics_event("info", "HA: %s -> %s" % (rig.get("name") or rig_id, label))
     return jsonify({"success": True, "message": "Saved (%s)" % label})
+
+
+@app.route('/api/ha/fanvote', methods=['POST'])
+def api_ha_fanvote():
+    """Peer fast lane for fan votes (target of _ha_fan_push_votes). Merges the
+    incoming votes exactly like the cluster sync does - newest vote per panel
+    wins - and persists them, so the very next fan tick of THIS panel sees the
+    peer's fresh decision without waiting for a sync cycle."""
+    data = request.get_json(silent=True) or {}
+    votes = data.get("votes")
+    if not isinstance(votes, dict):
+        return jsonify({"success": False, "message": "Bad votes payload"}), 400
+    state = load_cluster_state()
+    _CURRENT_SELF_ID["value"] = state["self_id"]
+    merged = merge_fan_votes(state.get("fan_votes"), votes)
+    if merged == state.get("fan_votes"):
+        return jsonify({"success": True, "changed": False})
+    state["fan_votes"] = merged
+    saved = save_cluster_state(state)
+    return jsonify({"success": bool(saved), "changed": True})
 
 
 @app.route('/api/ha/enabled', methods=['POST'])
