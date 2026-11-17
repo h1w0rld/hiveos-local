@@ -10928,8 +10928,16 @@ def _ha_fan_tick():
                           % (step_now, cool_max, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
             else:
                 desired = "off"
-                fan["cool_since"] = 0
-                fan.pop("on_since", None)
+                # STICKY OFF (17 Nov live incident): cool_since is NOT reset
+                # here. Resetting it made this panel's 'off' vote a one-tick
+                # blip: with the 8 panels' timers staggered by minutes the
+                # quorum always saw a mid-countdown 'on:1' majority and the fan
+                # sat ON for 60+ hours while every К card was at 55-58°C
+                # (proven live: timer expired at 903s, quorum on:1 won 5/8,
+                # countdown restarted from 0). The vote now STAYS 'off' every
+                # tick until a card heats up again (the hot branches below
+                # reset cool_since) or the fan actually leaves - then the
+                # off-action resets it for the next cycle.
                 reason = ("max %.1f°C < %.0f°C for %ds - every К card stayed cool"
                           % (cool_max, HA_FAN_OFF_TEMP, held))
         else:
