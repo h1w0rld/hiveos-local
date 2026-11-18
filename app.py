@@ -9934,22 +9934,30 @@ HA_PC_TICK_WARN = 10        # tick slower than this -> write into the persistent
 HA_PC_REQUEST_TTL = 900     # a self-powercycle request must be served by a peer within this
 HA_PC_OFF_RESTORE = 1800    # plug found OFF + rig dark this long -> switch the power back on
 
-HA_FAN_INTERVAL = 20        # every panel re-decides and refreshes its vote 3x per minute -
-                            # the quorum follows a changed decision within ~20 s (17 Nov:
-                            # user wants the cluster vote to keep up in real time)
+HA_FAN_INTERVAL = 10        # every panel re-decides and refreshes its vote 6x per minute -
+                            # the quorum follows a changed decision within ~20 s and the
+                            # full trigger-temperature -> action chain stays under a
+                            # minute (user, 18 Nov: "решение должно быть принято
+                            # меньше чем за минуту с момента триггерной температуры")
 HA_FAN_ON_TEMP = 65.0       # ANY K-rig card above this -> fan on (65, not 62: 3070s sit at 62-64 while healthy)
 HA_FAN_OFF_TEMP = 62.0      # fan leaves ONLY when EVERY fresh K-card is below this (max-based, never avg)
-HA_FAN_MIN_DWELL = 600      # min time in the CURRENT plug state (anti-flapping)
+HA_FAN_MIN_DWELL = 20       # min time in the CURRENT plug state (anti-flapping) - kept short
+                            # so an ON decision still lands within ~1 min of the trigger
+                            # temperature (was 600 s)
 HA_FAN_MAX_ON = 1800        # legacy constant, no longer forces the fan off while cards are hot
 HA_FAN_ON_FRESH = 180       # rig stats must be fresher than this for a fan-ON
 HA_FAN_OFF_FRESH = 180      # stale stats can never prove "cool" - the fan is held ON instead
-HA_FAN_MAX_CYCLES = 12      # max auto on/off cycles per day (safety valve below can override)
-HA_FAN_OFF_CONFIRM = 300    # every card must stay below 62°C this long before the fan leaves -
-                            # a rig whose miner restarts cools for 1-3 min and heats right back,
-                            # so an instant OFF just flaps the relay; 5 min clears those dips
-                            # while reacting ~3x faster than the old 15 min window
-HA_FAN_MIN_ON = 1200        # once cooling starts it runs at least this long (relay wear; the
-                            # boiler room itself cools far slower than the GPUs do)
+HA_FAN_MAX_CYCLES = 120     # max auto on/off cycles per day (safety valve below can override);
+                            # raised from 12 - instant decisions legitimately cycle more,
+                            # a sonoff relay handles orders of magnitude more switching
+HA_FAN_OFF_CONFIRM = 0      # instant OFF: every fresh К card < 62°C is enough NOW. The
+                            # 62/65 hysteresis band itself guards the relay (a card at
+                            # 62-64°C never triggers ON), and a miner-restart dip cools
+                            # cards to 45-50 only to return them to the 55-62 band, never
+                            # across 65 - so no confirm window is needed anymore (was
+                            # 900 s, then 300 s; user 18 Nov: decide in under a minute)
+HA_FAN_MIN_ON = 0           # no forced minimum run: cards that cooled below 62°C release
+                            # the fan immediately (was 1200 s of forced run for relay wear)
 HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
                             # and the anti-flap dwell never block cooling for real heat
 # --- speed ladder -------------------------------------------------------------
@@ -9979,7 +9987,7 @@ HA_FAN_VOTE_TTL = 120       # a panel's vote older than this is not counted: wit
                             # silent panel stops voting within 2 min (was 5)
 HA_FAN_ACTOR_GRACE = 90     # elected actor silent this long -> next voter acts (was 240)
 HA_FAN_PUSH_KEEPALIVE = 3   # ticks between keepalive vote pushes (changed decisions
-                            # push immediately); at 20 s ticks = every 60 s, well inside
+                            # push immediately); at 10 s ticks = every 30 s, well inside
                             # HA_FAN_VOTE_TTL
 # Layout discovery - the farm arrangement lives in the user's Home Assistant
 # (requested 28 Oct: "риги расставлены уже в Home Assistant, просто надо
