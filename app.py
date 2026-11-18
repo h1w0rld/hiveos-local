@@ -9897,8 +9897,8 @@ def api_metrics_export():
 #       get out of - the plug is the external actor.
 #   (2) Fan assist in the stokehole: GPU temps of the rigs marked К drive
 #       one fan (a smart plug + optional channel switches that pick the
-#       speed). Target band 57-62 °C: any card > 62 -> fan on; average < 57
-#       -> fan off. The freeze protection ALWAYS outranks cooling: outdoor
+#       speed). Target band 57-62 °C: any card > 62 -> fan on; EVERY fresh
+#       card < 57 -> fan off (max-based, never average - see HA_FAN_OFF_TEMP). The freeze protection ALWAYS outranks cooling: outdoor
 #       below 0 or the room sensor below +5 (or a dead room sensor falling
 #       back to a negative outdoor reading, or both sensors dark) means
 #       "no fan, ever" while it holds - a frozen pipe costs the building,
@@ -9939,8 +9939,12 @@ HA_FAN_INTERVAL = 10        # every panel re-decides and refreshes its vote 6x p
                             # full trigger-temperature -> action chain stays under a
                             # minute (user, 18 Nov: "решение должно быть принято
                             # меньше чем за минуту с момента триггерной температуры")
-HA_FAN_ON_TEMP = 65.0       # ANY K-rig card above this -> fan on (65, not 62: 3070s sit at 62-64 while healthy)
-HA_FAN_OFF_TEMP = 62.0      # fan leaves ONLY when EVERY fresh K-card is below this (max-based, never avg)
+HA_FAN_ON_TEMP = 62.0       # ANY K-rig card above this -> fan on: the band top (user
+                            # 18 Nov: the fan HOLDS the cards in the 57-62 band, same
+                            # as the user's own HA PID automation where 62°C = 0%)
+HA_FAN_OFF_TEMP = 57.0      # fan leaves ONLY when EVERY fresh K-card is below this -
+                            # the band bottom (max-based, never avg: the avg-based OFF
+                            # turned the fan off on 15 Nov while a RIG2 card was 75°C)
 HA_FAN_MIN_DWELL = 20       # min time in the CURRENT plug state (anti-flapping) - kept short
                             # so an ON decision still lands within ~1 min of the trigger
                             # temperature (was 600 s)
@@ -9950,13 +9954,14 @@ HA_FAN_OFF_FRESH = 180      # stale stats can never prove "cool" - the fan is he
 HA_FAN_MAX_CYCLES = 120     # max auto on/off cycles per day (safety valve below can override);
                             # raised from 12 - instant decisions legitimately cycle more,
                             # a sonoff relay handles orders of magnitude more switching
-HA_FAN_OFF_CONFIRM = 0      # instant OFF: every fresh К card < 62°C is enough NOW. The
-                            # 62/65 hysteresis band itself guards the relay (a card at
-                            # 62-64°C never triggers ON), and a miner-restart dip cools
-                            # cards to 45-50 only to return them to the 55-62 band, never
-                            # across 65 - so no confirm window is needed anymore (was
-                            # 900 s, then 300 s; user 18 Nov: decide in under a minute)
-HA_FAN_MIN_ON = 0           # no forced minimum run: cards that cooled below 62°C release
+HA_FAN_OFF_CONFIRM = 0      # instant OFF: every fresh К card < 57°C is enough NOW. The
+                            # 57-62 hysteresis band itself guards the relay: a card in
+                            # the 57-62 gap triggers NEITHER on (>62) NOR off (<57),
+                            # and a miner-restart dip cools cards to 45-50 only to
+                            # return them into the band without ever crossing 62 - so
+                            # no confirm window is needed anymore (was 900 s, then
+                            # 300 s; user 18 Nov: decide in under a minute)
+HA_FAN_MIN_ON = 0           # no forced minimum run: cards that cooled below 57°C release
                             # the fan immediately (was 1200 s of forced run for relay wear)
 HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the daily cycle cap
                             # and the anti-flap dwell never block cooling for real heat
@@ -9966,8 +9971,8 @@ HA_FAN_CRITICAL_TEMP = 70.0 # above this a card is cooled no matter what: the da
 # the user already trusts: PID <10% -> off, 10-30% -> speed 1, 30-55 -> 2,
 # 55-80 -> 3, >=80 -> speed 4, and no switch until hold_time (600 s) passes.
 # The PID percentage is approximated from the hottest К-card: HA_FAN_OFF_TEMP
-# (62°C) = 0%, HA_FAN_STEP_TEMP_MAX (75°C) = 100%  ->  the step boundaries land
-# at 63.3 / 65.9 / 69.2 / 72.4 °C.
+# (57°C) = 0%, HA_FAN_STEP_TEMP_MAX (75°C) = 100%  ->  the step boundaries land
+# at 58.8 / 62.4 / 66.9 / 71.4 °C (formula auto-shifts with HA_FAN_OFF_TEMP).
 HA_FAN_STEPS = 4            # speed channels 1..4 of the fan (both plugs must be ON)
 HA_FAN_STEP_TEMP_MAX = 75.0 # temperature that counts as "PID 100%"
 HA_FAN_STEP_DWELL = 600     # hold_time: no speed change before this (HA parity)
