@@ -11044,6 +11044,16 @@ def _ha_fan_tick():
             desired = "on:%d" % step_now
             reason = ("holding speed %d: no fresh temps from %s"
                       % (step_now, ", ".join(stale_off[:4]) or "К-rigs"))
+        elif hot_max is not None and hot_max > HA_FAN_ON_TEMP:
+            # HYSTERESIS (19 Nov): the band is 57-62 per CARD. A lone card above
+            # the band top must not be left uncooled just because its rig's mean
+            # is low - otherwise the CRITICAL guard (>=70) would switch the fan
+            # on and the mean would switch it off a minute later, forever.
+            fan["cool_since"] = 0
+            desired = "on:%d" % step_now
+            reason = ("holding speed %d: card %.1f°C above the %.0f°C band top"
+                      " (rig mean %.1f°C)" % (step_now, hot_max, HA_FAN_ON_TEMP,
+                                              band_off if band_off is not None else 0))
         elif band_off is not None and band_off < HA_FAN_OFF_TEMP:
             # Debounce: a rig whose miner restarts drops to 45-50°C for a couple
             # of minutes and heats back to 70+ (RIG2 does this every ~10 min).
