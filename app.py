@@ -10346,10 +10346,12 @@ def _ha_fan_vote_key(target):
     return target if target.startswith("on:") else "off"
 
 
-def _ha_fan_publish_vote(state, self_id, self_name, target, hot):
+def _ha_fan_publish_vote(state, self_id, self_name, target, hot, peak=None):
     """Store this panel's vote in the SHARED cluster state (top level
     `fan_votes`, synced with the rig list like pc_fail/pc_request). Called every
-    tick, so a panel that dies stops voting and its stale vote expires."""
+    tick, so a panel that dies stops voting and its stale vote expires.
+    `hot` is the value the decision is based on (the hottest rig MEAN since
+    19 Nov); `peak` is the hottest single card, kept for diagnostics."""
     votes = state.get("fan_votes")
     if not isinstance(votes, dict):
         votes = {}
@@ -10362,6 +10364,7 @@ def _ha_fan_publish_vote(state, self_id, self_name, target, hot):
         step = 0
     votes[owner] = {"ts": int(time.time()), "key": key, "step": step,
                     "hot": (round(float(hot), 1) if hot is not None else None),
+                    "peak": (round(float(peak), 1) if peak is not None else None),
                     "rig": self_name or "", "id": self_id or ""}
     return owner
 
@@ -10502,6 +10505,68 @@ def _ha_fan_identity_match(vote, rig_id, rig_name):
 
 
 
+def _ha_rig_temp_groups(state, cache, fresh_ttl, stale_last_max_age=1800):
+    """Per-rig temperature aggregates of the rigs marked 'stokehole'.
+
+    The 57-62°C band is driven by a rig's MEAN temperature (user, 19 Nov): two
+    laptop cards idling at 58-59°C must not keep the whole farm's fan ON while
+    the other 18 cards sit at 40°C. One value per rig, so a big rig cannot
+    outvote a small one just by having more cards.
+
+    Returns a dict:
+      rigs            - [{name, avg, max, fresh, cards}] one entry per К rig
+      avg_fresh       - MEAN of every rig that reported fresh stats
+      max_fresh       - hottest CARD of every fresh rig (emergency guard only)
+      cards_fresh     - every fresh card temp (the overall mean shown in the UI)
+      all_fresh       - every ONLINE stokehole rig has fresh stats
+      rigs_total      - stokehole rigs (any location match)
+      stale           - online stokehole rigs without fresh stats
+      stale_last_hot  - hottest card last seen on a rig whose stats went stale
+    """
+    groups = {"rigs": [], "avg_fresh": [], "max_fresh": [], "cards_fresh": [],
+              "all_fresh": True, "rigs_total": 0, "stale": [], "stale_last_hot": []}
+    self_id = state.get("self_id")
+    now = time.time()
+    for rig in state.get("rigs", []):
+        if rig.get("location") != "stokehole":
+            continue
+        groups["rigs_total"] += 1
+        rid = rig.get("id")
+        name = rig.get("name") or rid or "?"
+        entry = cache.get("rigs", {}).get(rid, {})
+        ts = int(entry.get("fetched_at") or 0)
+        if not ts or (now - ts) > fresh_ttl:
+            online = True if rid == self_id else bool(entry.get("online"))
+            if online:
+                groups["stale"].append(name)
+                if ts and (now - ts) <= stale_last_max_age:
+                    last = [float(g.get("temp", 0) or 0)
+                            for g in ((entry.get("stats") or {}).get("gpus") or [])
+                            if isinstance(g.get("temp"), (int, float))]
+                    last = [t for t in last if t > 0]
+                    if last:
+                        groups["stale_last_hot"].append(max(last))
+            continue
+        cards = []
+        for g in ((entry.get("stats") or {}).get("gpus") or []):
+            try:
+                t = float(g.get("temp", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if t > 0:
+                cards.append(t)
+        groups["rigs"].append({"name": name, "cards": len(cards),
+                               "avg": (sum(cards) / len(cards)) if cards else None,
+                               "max": max(cards) if cards else None, "fresh": True})
+        if not cards:
+            continue
+        groups["cards_fresh"].extend(cards)
+        groups["avg_fresh"].append(sum(cards) / len(cards))
+        groups["max_fresh"].append(max(cards))
+    groups["all_fresh"] = not groups["stale"]
+    return groups
+
+
 def _ha_rig_temps(state, cache, fresh_ttl, stale_last_max_age=1800):
     """GPU temps of all rigs marked 'stokehole'.
     Returns (values[], all_fresh, rigs_total, stale_names, stale_last_hot).
@@ -10518,39 +10583,9 @@ def _ha_rig_temps(state, cache, fresh_ttl, stale_last_max_age=1800):
                       so its last reading must not be forgotten while the fan is
                       still allowed to start.
     """
-    values = []
-    stale = []
-    stale_last = []
-    any_rig = False
-    self_id = state.get("self_id")
-    now = time.time()
-    for rig in state.get("rigs", []):
-        if rig.get("location") != "stokehole":
-            continue
-        any_rig = True
-        rid = rig.get("id")
-        entry = cache.get("rigs", {}).get(rid, {})
-        ts = int(entry.get("fetched_at") or 0)
-        if not ts or (now - ts) > fresh_ttl:
-            online = True if rid == self_id else bool(entry.get("online"))
-            if online:
-                stale.append(rig.get("name") or rid or "?")
-                if ts and (now - ts) <= stale_last_max_age:
-                    last = [float(g.get("temp", 0) or 0)
-                            for g in ((entry.get("stats") or {}).get("gpus") or [])
-                            if isinstance(g.get("temp"), (int, float))]
-                    if last:
-                        stale_last.append(max(last))
-            continue
-        stats = entry.get("stats") or {}
-        for g in stats.get("gpus") or []:
-            try:
-                t = float(g.get("temp", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if t > 0:
-                values.append(t)
-    return values, not stale, any_rig, stale, stale_last
+    g = _ha_rig_temp_groups(state, cache, fresh_ttl, stale_last_max_age)
+    return (g["cards_fresh"], g["all_fresh"], g["rigs_total"],
+            g["stale"], g["stale_last_hot"])
 
 _HA_PC_TICK_LOCK = threading.Lock()
 _HA_PC_LOG_NAME = "ha_powercycle.log"   # persistent (ext4 under /hive-config, survives reboot)
@@ -10867,18 +10902,34 @@ def _ha_fan_tick():
     master_ts = float(layout.get("master_ts") or 0)
     master_age = max(0.0, now - master_ts) if master_ts else switch_age
 
-    temp_on, fresh_on, _n1, stale_on, stale_hot = _ha_rig_temps(state, cache, HA_FAN_ON_FRESH)
-    temp_off, fresh_off, n_stokehole, stale_off, _sh2 = _ha_rig_temps(state, cache, HA_FAN_OFF_FRESH)
+    g_on = _ha_rig_temp_groups(state, cache, HA_FAN_ON_FRESH)
+    g_off = _ha_rig_temp_groups(state, cache, HA_FAN_OFF_FRESH)
+    n_stokehole = g_off["rigs_total"]
     if n_stokehole == 0:
         fan["last_reason"] = "no rigs marked stokehole (К) in Home Assistant"
         _ha_save_state(st)
         return
-    hot_max = max(temp_on) if temp_on else None      # fresh cards -> may turn the fan ON
-    cool_max = max(temp_off) if temp_off else None   # wider window -> may turn it OFF
-    avg = (sum(temp_off) / len(temp_off)) if temp_off else None
+    fresh_on = g_on["all_fresh"]
+    fresh_off = g_off["all_fresh"]
+    stale_on = g_on["stale"]
+    stale_off = g_off["stale"]
+    # Band decisions run on the MEAN of each rig (one rig = one sensor): a pair
+    # of laptop cards idling at 58-59°C no longer holds the fan ON while the
+    # rest of the farm sits at 40°C. The hottest single CARD is kept only as
+    # the emergency guard (>=70°C still forces cooling, see below).
+    avg_on = g_on["avg_fresh"]
+    avg_off = g_off["avg_fresh"]
+    band_on = max(avg_on) if avg_on else None        # hottest rig mean, ON window
+    band_off = max(avg_off) if avg_off else None     # hottest rig mean, OFF window
+    hot_max = max(g_on["max_fresh"]) if g_on["max_fresh"] else None    # hottest fresh card
+    cool_max = max(g_off["max_fresh"]) if g_off["max_fresh"] else None
+    cards = g_off["cards_fresh"]
+    avg = (sum(cards) / len(cards)) if cards else None
+    rig_avgs = {r["name"]: round(r["avg"], 1) for r in g_off["rigs"]
+                if r.get("avg") is not None}
     # A rig that just went dark (hung panel, reboot) keeps its cards hot - its
     # last reading still counts when deciding to START cooling.
-    stale_peak = max(stale_hot) if stale_hot else None
+    stale_peak = max(g_on["stale_last_hot"]) if g_on["stale_last_hot"] else None
     hot_peak = hot_max
     if stale_peak is not None and (hot_peak is None or stale_peak > hot_peak):
         hot_peak = stale_peak
@@ -10888,6 +10939,8 @@ def _ha_fan_tick():
     fan.update({"avg_temp": round(avg, 1) if avg is not None else None,
                 "max_temp": round(hot_max, 1) if hot_max is not None else None,
                 "max_off_temp": round(cool_max, 1) if cool_max is not None else None,
+                "max_rig_avg": round(band_on, 1) if band_on is not None else None,
+                "rig_avgs": rig_avgs,
                 "max_stale_temp": round(stale_peak, 1) if stale_peak is not None else None,
                 "stale_rigs": stale_off,
                 "room_temp": round(room_val, 1) if room_val is not None else None,
@@ -10932,58 +10985,66 @@ def _ha_fan_tick():
         desired = "off"
         reason = "anti-freeze: outdoor %.1f°C ≤ 0°C - fan stays OFF" % outdoor_val
     elif master_state == "off":
-        if hot_peak is None:
+        if band_on is None:
             reason = ("asleep: no fresh temperature data from К-rigs (%s)"
                       % ", ".join(stale_on[:4])) if stale_on else \
                      "asleep: no temperature data from К-rigs"
-        elif hot_peak <= HA_FAN_ON_TEMP:
-            reason = "asleep: hottest К card %.0f°C ≤ %.0f°C" % (hot_peak, HA_FAN_ON_TEMP)
-        elif hot_peak < HA_FAN_CRITICAL_TEMP and switch_age < HA_FAN_MIN_DWELL:
+        elif hot_peak is not None and hot_peak >= HA_FAN_CRITICAL_TEMP:
+            # Emergency guard: a single card this hot is cooled immediately even
+            # when its rig's mean is still low (never wait for the ladder).
+            step = HA_FAN_STEPS
+            desired = "on:%d" % step
+            reason = ("CRITICAL heat: card %.1f°C ≥ %.0f°C - cooling at speed %d now"
+                      " (dwell/cycle cap skipped)%s"
+                      % (hot_peak, HA_FAN_CRITICAL_TEMP, step,
+                         " [last reading of %s]" % ", ".join(stale_on[:3])
+                         if stale_peak is not None and (hot_max is None or stale_peak > hot_max) else ""))
+        elif band_on <= HA_FAN_ON_TEMP:
+            reason = ("asleep: hottest rig mean %.0f°C ≤ %.0f°C (cards %.0f°C, mean %.0f°C)"
+                      % (band_on, HA_FAN_ON_TEMP, hot_max or 0, avg or 0))
+        elif switch_age < HA_FAN_MIN_DWELL:
             reason = "waiting anti-flapping dwell (%ds/%ds)" % (int(switch_age), HA_FAN_MIN_DWELL)
-        elif hot_peak < HA_FAN_CRITICAL_TEMP and int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
+        elif int(fan.get("cycles") or 0) >= HA_FAN_MAX_CYCLES:
             reason = "daily cycle cap reached"
         else:
             # Always start cooling at the LOWEST speed - it may well be enough
-            # (user, 15 Nov). Real heat (>=70°C) goes straight to the top speed:
-            # the ladder would need 3 x 600 s of hold time to climb there and a
-            # card at 75°C does not have those minutes.
-            step = HA_FAN_STEPS if hot_peak >= HA_FAN_CRITICAL_TEMP else 1
+            # (user, 15 Nov).
+            step = 1
             desired = "on:%d" % step
-            if hot_peak >= HA_FAN_CRITICAL_TEMP:
-                reason = ("CRITICAL heat: max %.1f°C ≥ %.0f°C - cooling at speed %d now"
-                          " (dwell/cycle cap skipped)%s"
-                          % (hot_peak, HA_FAN_CRITICAL_TEMP, step,
-                             " [last reading of %s]" % ", ".join(stale_on[:3])
-                             if stale_peak is not None and (hot_max is None or stale_peak > hot_max) else ""))
-            else:
-                reason = ("room sensor dark + hot cards: max %.1f°C > %.0f°C - starting at"
-                          " the lowest speed %d" % (hot_peak, HA_FAN_ON_TEMP, step))
+            reason = ("room sensor dark + warm rigs: mean %.1f°C > %.0f°C - starting at"
+                      " the lowest speed %d" % (band_on, HA_FAN_ON_TEMP, step))
     else:
-        # master ON: the ladder holds the hottest card in its band
+        # master ON: the ladder holds the hottest rig MEAN in its band; only a
+        # single card at CRITICAL heat overrides the averages.
         if step_now == 0:
             desired = "on:1"
             reason = "master is ON but no speed channel is on - repairing at speed 1"
-        elif hot_max is not None and hot_max >= HA_FAN_OFF_TEMP:
+        elif hot_peak is not None and hot_peak >= HA_FAN_CRITICAL_TEMP:
             fan["cool_since"] = 0
-            want = min(HA_FAN_STEPS, _ha_fan_step_for_temp(hot_max))
+            desired = "on:%d" % HA_FAN_STEPS
+            reason = ("CRITICAL heat: card %.1f°C ≥ %.0f°C - cooling at speed %d now"
+                      % (hot_peak, HA_FAN_CRITICAL_TEMP, HA_FAN_STEPS))
+        elif band_off is not None and band_off >= HA_FAN_OFF_TEMP:
+            fan["cool_since"] = 0
+            want = min(HA_FAN_STEPS, _ha_fan_step_for_temp(band_off))
             if want != step_now and switch_age >= HA_FAN_STEP_DWELL:
                 desired = "on:%d" % want
-                reason = ("speed %d -> %d: max %.1f°C (hold time %ds passed)"
-                          % (step_now, want, hot_max, int(switch_age)))
+                reason = ("speed %d -> %d: rig mean %.1f°C (hold time %ds passed)"
+                          % (step_now, want, band_off, int(switch_age)))
             else:
                 desired = "on:%d" % step_now
                 if want != step_now:
-                    reason = ("holding speed %d: max %.1f°C wants %d but the hold time"
-                              " has %ds left" % (step_now, hot_max, want,
+                    reason = ("holding speed %d: rig mean %.1f°C wants %d but the hold time"
+                              " has %ds left" % (step_now, band_off, want,
                                                  int(HA_FAN_STEP_DWELL - switch_age)))
                 else:
-                    reason = "holding speed %d: max %.1f°C (run cap no longer cuts cooling)" % (
-                        step_now, hot_max)
+                    reason = ("holding speed %d: rig mean %.1f°C (run cap no longer cuts"
+                              " cooling)" % (step_now, band_off))
         elif not fresh_off:
             desired = "on:%d" % step_now
             reason = ("holding speed %d: no fresh temps from %s"
-                      % (step_now, ", ".join(stale_off[:4])))
-        elif cool_max is not None and cool_max < HA_FAN_OFF_TEMP:
+                      % (step_now, ", ".join(stale_off[:4]) or "К-rigs"))
+        elif band_off is not None and band_off < HA_FAN_OFF_TEMP:
             # Debounce: a rig whose miner restarts drops to 45-50°C for a couple
             # of minutes and heats back to 70+ (RIG2 does this every ~10 min).
             since = int(fan.get("cool_since") or 0)
@@ -10995,12 +11056,12 @@ def _ha_fan_tick():
             ran = int(now - on_since) if on_since else HA_FAN_MIN_ON
             desired = "on:%d" % step_now
             if held < HA_FAN_OFF_CONFIRM:
-                reason = ("holding speed %d: max %.1f°C < %.0f°C for %ds/%ds - waiting for"
-                          " the room to stay cool (miner restarts cool cards for minutes only)"
-                          % (step_now, cool_max, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
+                reason = ("holding speed %d: rig mean %.1f°C < %.0f°C for %ds/%ds - waiting"
+                          " for the room to stay cool (miner restarts cool cards for minutes only)"
+                          % (step_now, band_off, HA_FAN_OFF_TEMP, held, HA_FAN_OFF_CONFIRM))
             elif ran < HA_FAN_MIN_ON:
-                reason = ("holding speed %d: maximum %.1f°C < %.0f°C but the fan ran only %ds/%ds"
-                          % (step_now, cool_max, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
+                reason = ("holding speed %d: rig mean %.1f°C < %.0f°C but the fan ran only %ds/%ds"
+                          % (step_now, band_off, HA_FAN_OFF_TEMP, ran, HA_FAN_MIN_ON))
             else:
                 desired = "off"
                 # STICKY OFF (17 Nov live incident): cool_since is NOT reset
@@ -11010,23 +11071,24 @@ def _ha_fan_tick():
                 # sat ON for 60+ hours while every К card was at 55-58°C
                 # (proven live: timer expired at 903s, quorum on:1 won 5/8,
                 # countdown restarted from 0). The vote now STAYS 'off' every
-                # tick until a card heats up again (the hot branches below
+                # tick until a rig mean heats up again (the hot branches above
                 # reset cool_since) or the fan actually leaves - then the
                 # off-action resets it for the next cycle.
-                reason = ("max %.1f°C < %.0f°C for %ds - every К card stayed cool"
-                          % (cool_max, HA_FAN_OFF_TEMP, held))
+                reason = ("every К rig mean %.1f°C < %.0f°C for %ds - stayed cool"
+                          % (band_off, HA_FAN_OFF_TEMP, held))
         else:
             desired = "on:%d" % step_now
             fan["cool_since"] = 0
-            reason = "holding speed %d: max %.1f°C inside the %.0f-%.0f°C band" % (
-                step_now, cool_max if cool_max is not None else 0,
+            reason = "holding speed %d: rig mean %.1f°C inside the %.0f-%.0f°C band" % (
+                step_now, band_off if band_off is not None else 0,
                 HA_FAN_OFF_TEMP, HA_FAN_ON_TEMP)
 
     # ---------------- cluster quorum ----------------
     # No rig decides alone: publish the vote, then act only when the majority
     # agrees AND this panel is the elected executor (lowest id among the
     # winning voters). Missing rigs simply do not vote.
-    _ha_fan_publish_vote(state, self_id, self_name, desired, hot_peak)
+    vote_hot = band_on if band_on is not None else hot_peak
+    _ha_fan_publish_vote(state, self_id, self_name, desired, vote_hot, hot_peak)
     try:
         save_cluster_state(state)
     except Exception as e:
@@ -11041,7 +11103,9 @@ def _ha_fan_tick():
         fan["last_push_key"] = desired
         _ha_fan_push_votes(state.get("fan_votes"))
     q = _ha_fan_quorum(state, now)
-    fan["vote"] = {"key": desired, "hot": round(hot_peak, 1) if hot_peak is not None else None}
+    fan["vote"] = {"key": desired,
+                   "hot": round(vote_hot, 1) if vote_hot is not None else None,
+                   "peak": round(hot_peak, 1) if hot_peak is not None else None}
     fan["quorum"] = {"winner": q.get("winner"), "counts": q.get("counts"),
                      "voters": q.get("voters"),
                      "voter_names": q.get("voter_names"),
