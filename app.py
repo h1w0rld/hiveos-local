@@ -9907,7 +9907,11 @@ def _detect_latest_versions(max_age=60):
         parts = re.findall(r"\d+", v or "")
         return tuple(int(p) for p in parts[:4]) if parts else ()
 
-    out, _, _ = run_command("sudo /hive/sbin/nvidia-driver-update --list 2>/dev/null")
+    # HARD BOUND: with the hiveos.farm network hard-hanging (DPI block, 22 Nov)
+    # this fetch never returns and a call without a timeout eats a waitress
+    # thread forever - every panel API thread died that way within minutes
+    # (login/stats kept working, /api/version and the Updates tab hung).
+    out, _, _ = run_command("sudo timeout 25 /hive/sbin/nvidia-driver-update --list 2>/dev/null")
     if out:
         plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
         tokens = re.findall(r"\b\d{3,4}\.\d+(?:\.\d+)*\b", plain)
