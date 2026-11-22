@@ -2544,7 +2544,16 @@ def api_guard():
 HEAL_STATE_PATH = os.path.join(HIVE_CONFIG_DIR, "heal_state.json")
 HEAL_CHECK_INTERVAL = 600      # periodic heal pass (10 min)
 HEAL_BOOT_DELAY = 300          # first pass: give the hive agent time to boot the miner
-HEAL_MINER_GAP = 1800          # min seconds between miner start/restart heal actions
+HEAL_MINER_GAP = 120           # min seconds between miner start/restart heal actions
+# Fast "the miner must be hashing" guard. The farm runs on local panel settings:
+# the HiveOS cloud being down/unreachable must never keep a rig idle, so a
+# missing MINER_RUN flag is repaired within seconds instead of waiting for the
+# 10-minute full heal pass.
+MINER_GUARD_INTERVAL = 30
+MINER_GUARD_BOOT_DELAY = 90
+MINER_GUARD_GAP = 90           # min seconds between fast start attempts
+AGENT_SCRIPT_PATH = "/hive/bin/agent"
+AGENT_STOP_PATCH_MARK = "cloud API outage must not stop mining"
 HEAL_ZOMBIE_ZERO_SECONDS = 900 # miner alive but zero hashrate for this long = zombie -> restart
 HEAL_ZOMBIE_GAP = 3600         # min seconds between zombie restarts
 HEAL_HOST_GAP = 86400          # min seconds between rig.conf API-host fixes
@@ -2650,6 +2659,107 @@ def _agent_log_last_noconn_ts():
         return 0
     except Exception:
         return 0
+
+def _agent_cloud_stop_patched():
+    """True when /hive/bin/agent can no longer stop the miner because the cloud
+    API is unreachable.
+
+    HiveOS behaviour: when the agent cannot talk to api*.hiveos.farm for long
+    enough it runs `miner stop` on every loop ("No connection with API server.
+    Stop the miner"). On this farm the local panel is the source of truth and
+    the cloud is optional, so that stop is neutralised (see
+    _agent_cloud_stop_patch). Unknown layouts are treated as patched so the
+    self-heal never touches a file it does not understand."""
+    try:
+        with open(AGENT_SCRIPT_PATH, 'r', errors='ignore') as f:
+            text = f.read()
+    except Exception:
+        return False
+    if AGENT_STOP_PATCH_MARK in text:
+        return True
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if 'LAST_OK < SECONDS - RESPONSE_TIME' in line:
+            for j in range(i + 1, min(i + 8, len(lines))):
+                if lines[j].strip().startswith('miner stop'):
+                    return False
+            return True
+    return True
+
+
+def _agent_cloud_stop_patch():
+    """Neutralise `miner stop` inside the agent's 'no cloud connection' branch.
+
+    Idempotent, keeps a timestamped backup next to the script. Returns
+    (changed, message)."""
+    try:
+        with open(AGENT_SCRIPT_PATH, 'r', errors='ignore') as f:
+            text = f.read()
+    except Exception as e:
+        return False, "cannot read %s: %s" % (AGENT_SCRIPT_PATH, e)
+    if AGENT_STOP_PATCH_MARK in text:
+        return False, "already patched"
+    lines = text.splitlines(True)
+    patched = False
+    for i, line in enumerate(lines):
+        if 'LAST_OK < SECONDS - RESPONSE_TIME' in line:
+            for j in range(i + 1, min(i + 8, len(lines))):
+                stripped = lines[j].strip()
+                if stripped.startswith('miner stop'):
+                    indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                    lines[j] = indent + ": # " + AGENT_STOP_PATCH_MARK + "\n"
+                    patched = True
+                    break
+            if patched:
+                break
+    if not patched:
+        return False, "cloud-stop branch not found (layout changed) - left untouched"
+    try:
+        st = os.stat(AGENT_SCRIPT_PATH)
+        bak = AGENT_SCRIPT_PATH + ".bak-cloudguard-%d" % int(time.time())
+        shutil.copy2(AGENT_SCRIPT_PATH, bak)
+        tmp = AGENT_SCRIPT_PATH + ".tmp-%d" % os.getpid()
+        with open(tmp, 'w') as f:
+            f.write(''.join(lines))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, st.st_mode & 0o7777)
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except Exception:
+            pass
+        os.replace(tmp, AGENT_SCRIPT_PATH)
+        return True, "patched (backup %s)" % os.path.basename(bak)
+    except Exception as e:
+        return False, "write failed: %s" % e
+
+
+def _heal_check_agent_cloud_guard(st, report):
+    """Keep the hive agent from killing the miner when the cloud API is down.
+
+    Cloud outage / DPI block on hiveos.farm used to leave rigs idle: the agent
+    stops the miner on every loop and the panel's own restart got killed again.
+    Patch the script (idempotent), restart the agent only when the file was
+    actually rewritten (hive upgrade may restore the original)."""
+    now = int(time.time())
+    if _agent_cloud_stop_patched():
+        return
+    if now - int(st.get("last_agent_guard") or 0) < 300:
+        return
+    changed, msg = _agent_cloud_stop_patch()
+    st["last_agent_guard"] = now
+    if changed:
+        st["last_action"] = "hive agent cloud-stop guard applied (cloud outage cannot stop mining)"
+        report["fixed"].append(st["last_action"])
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: hive agent patched - a cloud API outage can no longer stop the miner")
+        try:
+            run_command("sudo systemctl restart hive")
+        except Exception as e:
+            logging.error("Self-heal: hive agent restart failed: %s", e)
+    else:
+        report["notes"].append("agent cloud guard: " + msg)
+
 
 def _heal_parse_url_basename(url):
     """'https://host/path/srbminer_custom-3.7.4.tar.gz' -> (name, version, basename)."""
@@ -3043,7 +3153,7 @@ def _heal_check_miner(st, report):
     # on a cloud command - do not fight it while its complaint is fresh (<1h);
     # an old line in a rotated log must not block healing forever.
     noconn_ts = _agent_log_last_noconn_ts()
-    if noconn_ts and time.time() - noconn_ts < 3600:
+    if noconn_ts and time.time() - noconn_ts < 3600 and not _agent_cloud_stop_patched():
         report["notes"].append("agent reported API connection loss recently (%d min ago); miner start skipped"
                                % (int(time.time() - noconn_ts) // 60))
         return
@@ -3478,6 +3588,11 @@ def heal_run_check():
         logging.error("Self-heal: rig id check failed: %s", e)
         report["notes"].append("rig id check failed: %s" % e)
     try:
+        _heal_check_agent_cloud_guard(st, report)
+    except Exception as e:
+        logging.error("Self-heal: agent cloud guard check failed: %s", e)
+        report["notes"].append("agent cloud guard check failed: %s" % e)
+    try:
         _heal_check_api_host(st, report)
     except Exception as e:
         logging.error("Self-heal: api host check failed: %s", e)
@@ -3508,6 +3623,55 @@ def heal_run_check():
     _heal_state_save(st)
     return report
 
+def _uptime_seconds():
+    try:
+        with open('/proc/uptime') as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return 1e9
+
+
+def _miner_guard_tick():
+    """Cheap liveness repair: nobody asked the miner to stop, yet it is not
+    running -> start it immediately. No cloud involvement whatsoever."""
+    if os.path.exists(MINER_RUN_FLAG) or os.path.exists(MINER_STOP_FLAG):
+        return
+    miner = _conf_value(RIG_CONF_PATH, "MINER")
+    if not miner or miner == "none":
+        return
+    maintenance = _conf_value(RIG_CONF_PATH, "MAINTENANCE")
+    if maintenance and maintenance.strip() not in ("", "0"):
+        return
+    if _uptime_seconds() < MINER_GUARD_BOOT_DELAY:
+        return
+    st = _heal_state_load()
+    now = int(time.time())
+    if now - int(st.get("last_miner_heal") or 0) < MINER_GUARD_GAP:
+        return
+    # a dead screen left behind by a failed start blocks "miner start"
+    # ("screen session already running") - clear it first
+    out, _e, code = run_command("sudo screen -ls")
+    if code == 0 and ".miner" in (out or ""):
+        run_command("sudo /hive/bin/miner stop")
+        time.sleep(2)
+    run_command(MINER_START_CMD)
+    st["last_miner_heal"] = now
+    st["last_action"] = "fast guard: miner was not running - started"
+    _heal_state_save(st)
+    logging.warning("Self-heal: %s", st["last_action"])
+    record_metrics_event("warning", "Self-heal: miner was not running - started it (fast guard)")
+
+
+def _miner_guard_worker():
+    time.sleep(MINER_GUARD_BOOT_DELAY)
+    while True:
+        try:
+            _miner_guard_tick()
+        except Exception as e:
+            logging.error("Miner fast guard failed: %s", e)
+        time.sleep(MINER_GUARD_INTERVAL)
+
+
 def _heal_worker():
     time.sleep(HEAL_BOOT_DELAY)
     while True:
@@ -3518,9 +3682,22 @@ def _heal_worker():
         time.sleep(HEAL_CHECK_INTERVAL)
 
 def start_heal_worker():
+    # the cloud-stop guard must be in place before the agent's next loop:
+    # otherwise a cloud outage keeps stopping the miner on every agent tick
+    try:
+        if not _agent_cloud_stop_patched():
+            changed, msg = _agent_cloud_stop_patch()
+            logging.warning("Self-heal: agent cloud-stop guard at startup: %s", msg)
+            if changed:
+                run_command("sudo systemctl restart hive")
+    except Exception as e:
+        logging.error("Self-heal: agent cloud-stop guard failed: %s", e)
     t = threading.Thread(target=_heal_worker, daemon=True, name="self-heal")
     t.start()
+    g = threading.Thread(target=_miner_guard_worker, daemon=True, name="miner-guard")
+    g.start()
     logging.info("Self-heal worker started (rig id guard, package repair, API host fix, stale screen)")
+    logging.info("Miner fast guard started (miner must be running; cloud-independent)")
 
 @app.route('/api/heal/info')
 def api_heal_info():
