@@ -3509,6 +3509,7 @@ def _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts)
     if ok:
         # Served: drop the request so no panel repeats it
         rig["pc_request"] = None
+        rig["pc_last_cycle"] = int(now)
         rig["updated_at"] = int(now)
         try:
             save_cluster_state(state)
@@ -5825,6 +5826,11 @@ RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses
                     # state and the 6h slow-retry cadence; lives in the cluster
                     # state ON PURPOSE: any acting panel must see the same ladder)
                     "pc_fail",
+                    # shared timestamp of the last plug cycle ANY panel ran for
+                    # this rig: non-leader takeover requires it to be older than
+                    # HA_PC_LEADER_GRACE, otherwise the panels take turns and
+                    # cycle a rig every ~15 min (RIG6 22 Nov)
+                    "pc_last_cycle",
                     # delegated self-powercycle: a rig that decides to power cycle
                     # ITSELF writes {"ts": epoch, "reason": "..."} here and a PEER
                     # panel runs the off->on sequence. A rig must never cut its own
@@ -10369,6 +10375,11 @@ HA_BOOT_DELAY = 420         # let the rig finish booting before acting
 HA_POWER_INTERVAL = 60      # powercycle worker poll
 HA_POWER_DOWN = 300         # rig fully unreachable this long -> plug cycle
 HA_POWER_DWELL = 30         # plug stays OFF this long (guaranteed power cycle)
+HA_PC_COOLDOWN = 2700       # after a plug cycle trust no "rig is down" observation
+                            # for this long: the reboot tail (netbird/wifi/sshd
+                            # re-establishing) looks exactly like a dead rig. RIG6
+                            # 22 Nov was healthy and mining while the farm cycled
+                            # its plug every ~15 min on such false positives.
 HA_POWER_GAP = 3600         # min time between plug cycles per rig
 HA_POWER_TCP_TIMEOUT = 3    # per-route reachability probe
 HA_PC_ESCALATED_DWELL = 150 # failed rigs get a LONG power cut (2.5 min)
@@ -10702,12 +10713,59 @@ def _ha_fan_channel_map(byid):
     return best[2] if best else {}
 
 
+def _ha_tcp_alive(rig):
+    """Cheap 'is the machine up at all' probe: TCP to the rig's dashboard port
+    over every direct access route. A successful connect OR an active refusal
+    (RST) proves a live host answered. SSH-only reachability used to be the
+    sole life signal: sshd closing handshakes under probing load / a dead
+    netbird / a NAT shadow answering RST for a target behind repeater#2 made
+    HEALTHY rigs look dead (RIG6 22 Nov mined 530 TH/s while its plug was
+    being cycled by this automation every ~15 min)."""
+    hosts = []
+    try:
+        for a in _ordered_rig_accesses(rig):
+            h = str(a.get("host") or "").strip()
+            if h and h not in hosts:
+                hosts.append(h)
+    except Exception:
+        return False
+    if not hosts:
+        return False
+    # parallel: N routes must cost one timeout, not N (the tick loops all rigs)
+    results = [False] * len(hosts)
+
+    def _try(i, h):
+        try:
+            s = socket.create_connection((h, DASHBOARD_PORT), timeout=HA_POWER_TCP_TIMEOUT)
+            s.close()
+            results[i] = True
+        except ConnectionRefusedError:
+            results[i] = True  # the host itself answered - it is alive
+        except Exception:
+            pass
+
+    th = [threading.Thread(target=_try, args=(i, h), daemon=True)
+          for i, h in enumerate(hosts)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(HA_POWER_TCP_TIMEOUT + 0.5)
+    return any(results)
+
+
 def _ha_reachable(rig):
     """True when ANY configured SSH route can execute a command on the target rig.
     This is the 'is the machine up at all' signal of the plug powercycle.
     Uses the same SSH infrastructure as cluster_remote_api (run_ssh_command)
     to verify we can actually reach the target rig, not just the jump host.
-    Routes are probed IN PARALLEL with a short timeout."""
+    Routes are probed IN PARALLEL with a short timeout.
+
+    A TCP probe of the rig's dashboard port runs first: it needs no
+    authentication, no sshd concurrency budget and answers in one round trip.
+    Only when no panel port answers anywhere does the (much heavier) SSH
+    check decide."""
+    if _ha_tcp_alive(rig):
+        return True
     try:
         accesses = [a for a in _ordered_rig_accesses(rig) if a.get("host")]
     except Exception:
@@ -11155,6 +11213,15 @@ def _ha_powercycle_tick_body(conf):
                 _ha_save_state(st)
             continue
         if not rec.get("down_since"):
+            if now - float(rec.get("last_cycle") or 0) < HA_PC_COOLDOWN:
+                # Our own cycle just rebooted this rig: the reboot tail
+                # (netbird/wifi/sshd re-establishing) looks exactly like a dead
+                # rig. Never arm a new window from it - one false positive used
+                # to loop into re-cycling a healthy rig every ~15 min (RIG6).
+                rec["last_result"] = "post-cycle cooldown (%d s left)" % max(
+                    0, int(HA_PC_COOLDOWN - (now - float(rec.get("last_cycle") or 0))))
+                _ha_save_state(st)
+                continue
             rec["down_since"] = int(now)
             rec.pop("attention_noted", None)
             _ha_save_state(st)
@@ -11187,6 +11254,12 @@ def _ha_powercycle_tick_body(conf):
                         and now - float(rec.get("last_cycle") or 0) >= HA_POWER_GAP):
                     ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
                     rec["last_cycle"] = int(now)
+                    rig["pc_last_cycle"] = int(now)
+                    rig["updated_at"] = int(now)
+                    try:
+                        save_cluster_state(state)
+                    except Exception:
+                        pass
                     if ok_on:
                         rec["last_result"] = "plug was OFF - power restored"
                         rec["down_since"] = None
@@ -11214,8 +11287,12 @@ def _ha_powercycle_tick_body(conf):
             continue
         # One actor at a time: the lowest-id ALIVE panel holds the right to
         # cycle. A non-leader takes over only when the plug state has been
-        # untouched for HA_PC_LEADER_GRACE (leader down/frozen mid-incident).
-        can_act = im_leader or (age >= HA_PC_LEADER_GRACE and leader in panels)
+        # untouched for HA_PC_LEADER_GRACE AND no panel has run a cycle for
+        # this rig recently (shared pc_last_cycle in the cluster state).
+        # Per-panel rate limits alone let every panel take its turn in
+        # sequence - RIG6 was plug-cycled every ~15 min that way on 22 Nov.
+        can_act = im_leader or (age >= HA_PC_LEADER_GRACE and leader in panels and
+                                now - float(rig.get("pc_last_cycle") or 0) >= HA_PC_LEADER_GRACE)
         if not can_act:
             rec["last_result"] = "peer-led: waiting for %s (leader)" % leader
             _ha_save_state(st)
@@ -11236,6 +11313,12 @@ def _ha_powercycle_tick_body(conf):
         _ha_pc_log("%s cycle attempt %d (dwell %ds, down %d min, leader %s)"
                    % (name, fc, dwell, down_min, leader))
         rec["last_cycle"] = int(now)
+        rig["pc_last_cycle"] = int(now)
+        rig["updated_at"] = int(now)
+        try:
+            save_cluster_state(state)
+        except Exception:
+            pass
         rec["last_result"] = "cycling..."
         _ha_save_state(st)
         ok_off, err_off = _ha_service(conf, "turn_off", rig.get("ha_plug"))
