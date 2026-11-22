@@ -4032,6 +4032,12 @@ NET_HEAL_PEER_FRESH = 300           # peer net-heal last_check max age for a val
 NET_HEAL_PEER_MAX = 3               # peers queried per verdict round
 NET_HEAL_NOPEER_INET_WAIT = 600     # no peer evidence -> soft ladder (reboot OFF) after this long
 NET_HEAL_SOFT_CYCLE_GAP = 1800      # min spacing between repeated no-reboot soft cycles
+NET_HEAL_WIFI_BW_TARGET = 32        # 0x20 = 20MHz-only; 33 (0x21) = 20+40 allowed (RIG6: 40MHz
+                                    # spilled onto ch4 of repeater#1 - self-inflicted, Nov 22)
+NET_HEAL_WIFI_BW_RETRY = 3600       # min gap between enforcement attempts
+NET_HEAL_WIFI_WIDE_RATE = 100.0     # Mb/s: 20MHz 1T1R ceiling is 72.2, 40MHz is 150 ->
+                                    # rate >= this = the link is ACTUALLY wide right now
+NET_HEAL_WIFI_BW_CONF = "/etc/modprobe.d/hiveos-wifi-20mhz.conf"  # drop-in path (tests redirect)
 
 _net_heal_state_lock = threading.Lock()
 _net_heal_state_cache = {"loaded": False, "data": None}
@@ -4201,6 +4207,105 @@ def _net_heal_detect_driver(iface):
     except Exception:
         pass
     return ""
+
+def _net_heal_bw_param(drv, name):
+    """Current value of a module parameter, or None when the driver has no
+    such knob (rtl8xxxu etc. - hands off those rigs entirely)."""
+    try:
+        with open('/sys/module/%s/parameters/%s' % (drv, name)) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def _net_heal_write_bw_conf(drv):
+    """Atomic modprobe.d drop-in forcing 20MHz + no power-save on Realtek
+    out-of-tree drivers (proven live on RIG6: losses 3.3% -> 0.2%)."""
+    path = NET_HEAL_WIFI_BW_CONF  # drop-in path (tests redirect this constant)
+    body = "options %s rtw_bw_mode=%d rtw_tx_bw_mode=%d rtw_power_mgnt=0 rtw_ips_mode=0\n" % (
+        drv, NET_HEAL_WIFI_BW_TARGET, NET_HEAL_WIFI_BW_TARGET)
+    tmp = path + ".%d.%d.tmp" % (os.getpid(), threading.get_ident())
+    try:
+        with open(tmp, "w") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        logging.error("Net-heal: cannot write %s: %s", path, e)
+        return False
+
+def _net_heal_wifi_bitrate(iface):
+    """Negotiated link rate in Mb/s via wext (iwconfig - works on 8188eu
+    where iw scan/survey is ignored), or None when unknown."""
+    out, _err, _rc = _net_heal_run("iwconfig %s" % iface, 10)
+    m = re.search(r"Bit Rate[:=]\s*([0-9.]+)\s*Mb/s", out or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+def _net_heal_check_wifi_bw():
+    """Channel-width guard, CONDITION-BASED (user decision 23 Nov: intervene
+    only when the problem is real, not on a mere capability). The interference
+    condition = a 40MHz-capable Realtek module AND the link actually
+    negotiating wide (Bit Rate >= NET_HEAL_WIFI_WIDE_RATE). The wide footprint
+    2401-2443 covers repeater#1 on ch4 - the rig interferes with its own farm
+    (RIG6, 136 down-windows on Nov 22). A 20MHz link (<=72.2 Mb/s), unknown
+    rate, or a driver without the knob -> strictly no action, ever."""
+    iface = _net_heal_wifi_iface()
+    if not iface:
+        return
+    drv = _net_heal_detect_driver(iface)
+    if not drv or not os.path.isdir('/sys/module/%s' % drv):
+        return
+    mode = _net_heal_bw_param(drv, "rtw_bw_mode")
+    if mode is None:
+        return
+    try:
+        if int(mode, 0) == NET_HEAL_WIFI_BW_TARGET:
+            return  # module pinned to 20MHz - nothing to look at
+    except ValueError:
+        return
+    # Wide mode is merely ALLOWED. The problem exists only when the link
+    # actually uses it - wait for the real condition, never act on a guess.
+    rate = _net_heal_wifi_bitrate(iface)
+    if rate is None or rate < NET_HEAL_WIFI_WIDE_RATE:
+        return
+    st = _net_heal_state_load()
+    bw = st.get("bw_fix")
+    if not isinstance(bw, dict):
+        bw = {"ts": 0, "fails": 0}
+    now = time.time()
+    if now - int(bw.get("ts") or 0) < NET_HEAL_WIFI_BW_RETRY:
+        return  # enforce at most once per hour
+    if int(bw.get("fails") or 0) >= 3:
+        return  # driver refuses the param - do not churn the link forever
+    _net_heal_write_bw_conf(drv)
+    _net_heal_run("ip link set %s down" % iface, 15)
+    _net_heal_run("sh -c 'modprobe -r %s && sleep 2 && modprobe %s'" % (drv, drv), 120)
+    _net_heal_run("netplan apply", 90)
+    mode2 = _net_heal_bw_param(drv, "rtw_bw_mode")
+    applied = False
+    try:
+        applied = int(mode2, 0) == NET_HEAL_WIFI_BW_TARGET
+    except (TypeError, ValueError):
+        pass
+    bw.update({"ts": now, "driver": drv, "was": mode, "rate": rate,
+               "fixed": applied, "applied": applied,
+               "fails": 0 if applied else int(bw.get("fails") or 0) + 1})
+    st["bw_fix"] = bw
+    st["last_action"] = (
+        "wide link at %.0f Mb/s (%s at %s) - channel width forced to 20MHz%s" % (
+            rate, drv, mode, "" if applied else " - did not stick, will retry"))
+    record_metrics_event("warning" if applied else "danger", "Net-heal: " + st["last_action"])
+    _net_heal_state_save(st)
 
 def _net_heal_wpa_conf_fix():
     """netpre writes key_mgmt=PSK (invalid, must be WPA-PSK) into
@@ -4759,9 +4864,14 @@ def net_heal_run_check():
 
 def _net_heal_worker():
     time.sleep(NET_HEAL_BOOT_DELAY)
+    try:
+        _net_heal_check_wifi_bw()  # channel-width guard once right after boot
+    except Exception as e:
+        logging.error("Net-heal bw check failed: %s", e)
     while True:
         try:
             net_heal_run_check()
+            _net_heal_check_wifi_bw()
         except Exception as e:
             logging.error("Net-heal check failed: %s", e)
         time.sleep(NET_HEAL_CHECK_INTERVAL)
