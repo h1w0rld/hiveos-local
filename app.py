@@ -2554,6 +2554,27 @@ MINER_GUARD_BOOT_DELAY = 90
 MINER_GUARD_GAP = 90           # min seconds between fast start attempts
 MINER_GUARD_ZERO_SECONDS = 300 # miner running but hashing nothing this long -> restart
 MINER_GUARD_ZERO_GAP = 600     # min seconds between zero-hash restarts
+# ---------------- Pool failover (a rig must never sit on a dead pool) ----------------
+# RIG7/RIG3 22 Nov: pool.peryn.ai stopped ACCEPTING new TCP connections while
+# its long-lived miner sockets kept working - every rig that happened to
+# reconnect sat at 0 H/s, and a miner restart cannot fix a dead pool. When the
+# miner is running, hashes zero for MINER_GUARD_ZERO_SECONDS AND the configured
+# pool endpoint refuses a TCP connection from this rig, wallet.conf is pointed
+# at the next endpoint of the same algorithm (cross-provider list below,
+# user-overridable via /hive-config/pool_failover.json {"<algo>": [urls]}) and
+# the miner restarts. While failed over, the primary endpoint is probed every
+# POOL_FAILBACK_INTERVAL and the rig switches back automatically after
+# POOL_FAILBACK_CONFIRM good probes in a row. A flight-sheet apply resets this
+# state: the user's explicit pool choice always wins.
+POOL_FAILOVER_PROBE_TIMEOUT = 8  # TCP connect timeout for one pool probe
+POOL_FAILOVER_WALK_GAP = 900     # min seconds between pool endpoint switches
+POOL_FAILBACK_INTERVAL = 600     # failed over: probe the primary this often
+POOL_FAILBACK_CONFIRM = 2        # consecutive good probes before failing back
+POOL_FAILOVER_CONF = os.path.join(HIVE_CONFIG_DIR, "pool_failover.json")
+POOL_FAILOVER_DEFAULTS = {
+    "pearlhash": ["ssl://prl-ru.kryptex.network:8048", "ssl://prl.kryptex.network:8048",
+                  "ssl://pool.peryn.ai:3443"],
+}
 AGENT_SCRIPT_PATH = "/hive/bin/agent"
 AGENT_STOP_PATCH_MARK = "cloud API outage must not stop mining"
 HEAL_ZOMBIE_ZERO_SECONDS = 900 # miner alive but zero hashrate for this long = zombie -> restart
@@ -2588,7 +2609,9 @@ def _heal_state_load():
               "last_transfer": "", "last_rigid_fix": 0, "last_rigid_restart": 0,
               "last_wd_fix": 0, "zombie_streak": 0, "zombie_series_since": 0,
               "rig_id_ok": None, "gpu_reset_since": 0, "gpu_reset_buses": [],
-              "expected_gpu_count": 0, "gpu_count_since": 0, "gpu_count_deficit": 0}
+              "expected_gpu_count": 0, "gpu_count_since": 0, "gpu_count_deficit": 0,
+              "pool_state": "ok", "pool_primary": "", "pool_active": "",
+              "pool_probe_ts": 0, "pool_failback_ok": 0, "pool_last_switch": 0}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -3565,6 +3588,9 @@ def _heal_check_zombie(st, report):
     if now - int(st.get("last_zombie_heal") or 0) < HEAL_ZOMBIE_GAP:
         report["notes"].append("zombie restart skipped (rate limit)")
         return
+    if now - int(st.get("pool_last_switch") or 0) < 600:
+        report["notes"].append("zombie restart skipped (pool failover just acted)")
+        return
     noconn_ts = _agent_log_last_noconn_ts()
     if noconn_ts and time.time() - noconn_ts < 3600:
         report["notes"].append("agent reported API connection loss recently; zombie restart skipped")
@@ -3653,6 +3679,183 @@ def _khs_value():
         return 0.0
 
 
+def _pool_parse_endpoint(url):
+    """'ssl://host:8048' -> ('host', 8048); None when the URL is unparsable."""
+    u = str(url or '').strip()
+    if not u:
+        return None
+    u = re.sub(r'^[A-Za-z][A-Za-z0-9+.\-]*://', '', u)
+    if '/' in u:
+        u = u.split('/', 1)[0]
+    if '@' in u:
+        u = u.rsplit('@', 1)[1]
+    host, _, port = u.partition(':')
+    host = host.strip()
+    if not host or not re.match(r'^[A-Za-z0-9._\-]+$', host):
+        return None
+    try:
+        return host, int(port) if port.strip() else 3333
+    except ValueError:
+        return None
+
+
+def _pool_tcp_probe(url, timeout=None):
+    """True when a TCP connection to the pool endpoint succeeds, False when it
+    fails, None when the endpoint cannot be parsed (never act on a guess)."""
+    ep = _pool_parse_endpoint(url)
+    if not ep:
+        return None
+    try:
+        s = socket.create_connection(ep, timeout=timeout or POOL_FAILOVER_PROBE_TIMEOUT)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _pool_failover_candidates(algo, active):
+    """Ordered fallback endpoints for the algorithm, minus the endpoint in use."""
+    lst = []
+    try:
+        with open(POOL_FAILOVER_CONF) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            lst = data.get((algo or '').strip().lower()) or []
+    except Exception:
+        pass
+    if not lst:
+        lst = POOL_FAILOVER_DEFAULTS.get((algo or '').strip().lower(), [])
+    out, seen = [], set()
+    for u in lst:
+        u = str(u).strip()
+        if u and u != (active or '').strip() and u.lower() not in seen:
+            out.append(u)
+            seen.add(u.lower())
+    return out
+
+
+def _pool_active_url():
+    """Pool endpoint the live miner is configured to use (wallet.conf)."""
+    miner = (_conf_value(RIG_CONF_PATH, "MINER") or "").strip().lower()
+    key = "CUSTOM_URL" if miner == "custom" else "POOL_URL"
+    return (_conf_value(WALLET_CONF_PATH, key) or "").strip()
+
+
+def _pool_failover_algo():
+    algo = (_conf_value(WALLET_CONF_PATH, "CUSTOM_ALGO") or
+            _conf_value(RIG_CONF_PATH, "ALGO") or "").strip().lower()
+    return algo
+
+
+def _pool_switch_wallet_url(new_url):
+    """Point the live miner at another pool endpoint (wallet.conf rewritten with
+    the full key set - write_shell_config also refreshes the guard snapshot for
+    this file) and restart the miner. Returns (ok, message)."""
+    try:
+        with config_lock:
+            conf = parse_shell_config(WALLET_CONF_PATH)
+        miner = (_conf_value(RIG_CONF_PATH, "MINER") or "").strip().lower()
+        conf["CUSTOM_URL" if miner == "custom" else "POOL_URL"] = new_url
+        if not write_shell_config(WALLET_CONF_PATH, conf):
+            return False, "wallet.conf write failed"
+    except Exception as e:
+        return False, "wallet.conf edit failed: %s" % e
+    run_command(MINER_RESTART_CMD)
+    return True, "wallet.conf pool -> %s" % new_url
+
+
+def _pool_failover_reset(st=None):
+    """Back to the user's chosen pool: forget any failover state (called when a
+    flight sheet is applied - the user's explicit pool choice always wins)."""
+    if st is None:
+        st = _heal_state_load()
+    st["pool_state"] = "ok"
+    st["pool_primary"] = ""
+    st["pool_active"] = ""
+    st["pool_probe_ts"] = 0
+    st["pool_failback_ok"] = 0
+    _heal_state_save(st)
+
+
+def _pool_probe_allowed():
+    """Failover actions wait while oc_recovery is walking clocks: its own
+    miner restart cadence would muddy pool attribution."""
+    try:
+        if (_oc_state_load() or {}).get("active"):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _pool_failover_walk(st, now, active):
+    """The configured pool refuses TCP: switch to the next endpoint and restart.
+    Returns True when a switch was attempted (the caller must not also restart
+    the miner), False when there was nothing to switch to (no candidates or the
+    walk gap has not elapsed) - then the plain restart ladder continues."""
+    if now - int(st.get("pool_last_switch") or 0) < POOL_FAILOVER_WALK_GAP:
+        return False
+    cands = _pool_failover_candidates(_pool_failover_algo(), active)
+    if not cands:
+        return False  # no alternative endpoint known - keep the plain restart ladder
+    if st.get("pool_state") != "failed_over" and not st.get("pool_primary"):
+        st["pool_primary"] = active
+    nxt = cands[0]
+    ok, msg = _pool_switch_wallet_url(nxt)
+    st["pool_last_switch"] = now
+    st["last_miner_heal"] = now
+    st["guard_zero_since"] = now
+    st["pool_probe_ts"] = now
+    st["pool_failback_ok"] = 0
+    if ok:
+        st["pool_state"] = "failed_over"
+        st["pool_active"] = nxt
+        st["last_action"] = ("pool failover: %s is unreachable - switched to %s" % (active, nxt))
+        record_metrics_event("danger", "Self-heal: " + st["last_action"])
+    else:
+        st["last_action"] = "pool failover failed: " + msg
+        record_metrics_event("warning", "Self-heal: " + st["last_action"])
+    _heal_state_save(st)
+    logging.warning("Self-heal: %s", st["last_action"])
+    return True
+
+
+def _pool_failback_probe(st, now):
+    """Failed over + the primary endpoint alive again -> switch back to it."""
+    if st.get("pool_state") != "failed_over":
+        return
+    primary = (st.get("pool_primary") or "").strip()
+    if not primary:
+        return
+    if now - int(st.get("pool_probe_ts") or 0) < POOL_FAILBACK_INTERVAL:
+        return
+    st["pool_probe_ts"] = now
+    if _pool_tcp_probe(primary, timeout=5) is True:
+        ok_n = int(st.get("pool_failback_ok") or 0) + 1
+    else:
+        ok_n = 0
+    st["pool_failback_ok"] = ok_n
+    if ok_n < POOL_FAILBACK_CONFIRM:
+        _heal_state_save(st)
+        return
+    ok, msg = _pool_switch_wallet_url(primary)
+    st["pool_probe_ts"] = now
+    st["pool_failback_ok"] = 0
+    st["pool_last_switch"] = now
+    st["last_miner_heal"] = now
+    st["guard_zero_since"] = now
+    if ok:
+        st["pool_state"] = "ok"
+        st["pool_active"] = primary
+        st["last_action"] = "pool failback: primary pool is back - " + msg
+        record_metrics_event("success", "Self-heal: " + st["last_action"])
+    else:
+        st["last_action"] = "pool failback failed: " + msg
+        record_metrics_event("warning", "Self-heal: " + st["last_action"])
+    _heal_state_save(st)
+    logging.warning("Self-heal: %s", st["last_action"])
+
+
 def _miner_guard_tick():
     """Cheap liveness repair, fully independent of the HiveOS cloud.
 
@@ -3680,15 +3883,24 @@ def _miner_guard_tick():
             if st.get("guard_zero_since"):
                 st.pop("guard_zero_since", None)
                 _heal_state_save(st)
+            _pool_failback_probe(st, now)
             return
         if not st.get("guard_zero_since"):
             st["guard_zero_since"] = now
             _heal_state_save(st)
             return
         if now - int(st["guard_zero_since"]) < MINER_GUARD_ZERO_SECONDS:
+            _pool_failback_probe(st, now)
             return
         if now - int(st.get("last_miner_heal") or 0) < MINER_GUARD_ZERO_GAP:
             return
+        # A miner restart cannot fix a dead pool: when the configured endpoint
+        # refuses a TCP connection from this rig, move to the next endpoint of
+        # the same algorithm instead (pool failover).
+        active = st.get("pool_active") or _pool_active_url()
+        if _pool_probe_allowed() and _pool_tcp_probe(active) is False:
+            if _pool_failover_walk(st, now, active):
+                return
         run_command(MINER_RESTART_CMD)
         st["last_miner_heal"] = now
         st["guard_zero_since"] = now
@@ -3751,7 +3963,7 @@ def start_heal_worker():
     g = threading.Thread(target=_miner_guard_worker, daemon=True, name="miner-guard")
     g.start()
     logging.info("Self-heal worker started (rig id guard, package repair, API host fix, stale screen)")
-    logging.info("Miner fast guard started (miner must be running; cloud-independent)")
+    logging.info("Miner fast guard started (miner must be running; cloud-independent; dead pools fail over)")
 
 @app.route('/api/heal/info')
 def api_heal_info():
@@ -8658,6 +8870,7 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
             return False, "Failed to write rig.conf"
 
         logging.info(f"Custom flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Package={miner_alt})")
+        _pool_failover_reset()
         run_command(MINER_RESTART_CMD)
         return True, "Flight sheet applied successfully! Miner daemon restarting..."
 
@@ -8679,6 +8892,7 @@ def _apply_flight_sheet(coin, wallet, pool, miner, extra=None):
         return False, "Failed to write rig.conf"
 
     logging.info(f"Flight sheet applied by IP: {request.remote_addr} (Coin={coin}, Miner={miner})")
+    _pool_failover_reset()
     run_command(MINER_RESTART_CMD)
     return True, "Flight sheet applied successfully! Miner daemon restarting..."
 
