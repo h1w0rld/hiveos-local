@@ -4047,25 +4047,97 @@ def _net_heal_state_load():
               "no_reboot": False, "wan_down_noted": False,
               "peer_check_ts": 0, "soft_cycle_ts": 0, "peer_verdict": {},
               "flaps": [], "obs_problem": False}
+        # Newest valid copy wins between the primary file and the `.fallback`
+        # file written when the primary inode is wedged by ntfs-3g (RIG6: every
+        # rename onto net_heal.json returned ENOENT while every other store on
+        # the same mount kept writing fine) - a stale-but-readable primary must
+        # never shadow the fresh fallback state.
+        candidates = []
+        for path in _net_heal_state_paths():
+            try:
+                with open(path, 'r') as f:
+                    disk = json.load(f)
+                if isinstance(disk, dict):
+                    fresh = int(disk.get("saved_at") or disk.get("last_check") or 0)
+                    candidates.append((fresh, path, disk))
+            except Exception:
+                pass
+        if candidates:
+            candidates.sort(key=lambda c: c[0])
+            disk = candidates[-1][2]
+            for k in st:
+                if k in disk:
+                    st[k] = disk[k]
+        # Best-effort cleanup of the fixed-name tmp the pre-1.13.25 writer left
+        # behind when its rename failed mid-flight.
         try:
-            with open(NET_HEAL_STATE_PATH, 'r') as f:
-                disk = json.load(f)
-            if isinstance(disk, dict):
-                for k in st:
-                    if k in disk:
-                        st[k] = disk[k]
-        except Exception:
+            os.unlink(NET_HEAL_STATE_PATH + ".tmp")
+        except OSError:
             pass
         _net_heal_state_cache["data"] = st
         _net_heal_state_cache["loaded"] = True
         return st
 
+def _net_heal_state_paths():
+    """(primary, fallback) computed at call time - tests redirect
+    NET_HEAL_STATE_PATH after import, the fallback must follow."""
+    return (NET_HEAL_STATE_PATH, NET_HEAL_STATE_PATH + ".fallback")
+
+_NET_HEAL_SAVE_WARN = {"ts": 0}
+
+def _net_heal_write_state_file(path, st, mode=0o600):
+    """Write net-heal state to `path`: atomic tmp+rename first, then an in-place
+    truncate+write fallback. ntfs-3g on /hive-config can wedge a single filename
+    (RIG6 net_heal.json 22 Nov: every rename returned ENOENT while every other
+    store on the same mount kept writing fine), which silently froze the
+    worker's disk state for hours. Mirrors _guard_write_state_file.
+    Caller holds config_lock."""
+    payload = json.dumps(st, indent=2)
+    tmp_path = "%s.%s.%s.tmp" % (path, os.getpid(), threading.get_ident())
+    try:
+        with open(tmp_path, 'w') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        try:
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return True
+    except Exception as e:
+        logging.warning("Net-heal: atomic save of %s failed (%s) - retrying in place", path, e)
+    try:
+        with open(path, 'w') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(path, mode)
+        return True
+    except Exception as e:
+        logging.error("Net-heal: in-place save of %s failed (%s)", path, e)
+        return False
+
 def _net_heal_state_save(st):
     with _net_heal_state_lock:
         _net_heal_state_cache["data"] = st
         _net_heal_state_cache["loaded"] = True
+        st["saved_at"] = int(time.time())
+        primary, fallback = _net_heal_state_paths()
         try:
-            _atomic_write_file(NET_HEAL_STATE_PATH, json.dumps(st, indent=2))
+            with config_lock:
+                if _net_heal_write_state_file(primary, st):
+                    return
+                now = int(time.time())
+                if now - _NET_HEAL_SAVE_WARN["ts"] >= 3600:
+                    logging.error("Net-heal: %s is unwritable - keeping the state in %s instead",
+                                  primary, fallback)
+                    _NET_HEAL_SAVE_WARN["ts"] = now
+                if not _net_heal_write_state_file(fallback, st):
+                    logging.error("Failed to save net heal state")
         except Exception as e:
             logging.error("Failed to save net heal state: %s", e)
 
