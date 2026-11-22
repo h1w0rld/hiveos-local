@@ -2552,6 +2552,8 @@ HEAL_MINER_GAP = 120           # min seconds between miner start/restart heal ac
 MINER_GUARD_INTERVAL = 30
 MINER_GUARD_BOOT_DELAY = 90
 MINER_GUARD_GAP = 90           # min seconds between fast start attempts
+MINER_GUARD_ZERO_SECONDS = 300 # miner running but hashing nothing this long -> restart
+MINER_GUARD_ZERO_GAP = 600     # min seconds between zero-hash restarts
 AGENT_SCRIPT_PATH = "/hive/bin/agent"
 AGENT_STOP_PATCH_MARK = "cloud API outage must not stop mining"
 HEAL_ZOMBIE_ZERO_SECONDS = 900 # miner alive but zero hashrate for this long = zombie -> restart
@@ -2570,6 +2572,7 @@ HEAL_CHUNK_RETRIES = 2
 AGENT_LOG_PATH = "/var/log/hive-agent.log"
 MINER_STOP_FLAG = "/run/hive/MINER_STOP"
 MINER_RUN_FLAG = "/run/hive/MINER_RUN"
+KHS_PATH = "/run/hive/khs"
 MINER_LOG_DIR = "/var/log/miner"
 HEAL_DOWNLOADS_DIR = "/hive/miners/custom/downloads"
 HEAL_CUSTOM_DIR = "/hive/miners/custom"
@@ -3631,10 +3634,34 @@ def _uptime_seconds():
         return 1e9
 
 
+def _khs_value():
+    """Live hashrate in kH/s from the hive agent's /run/hive/khs file.
+
+    Returns None when the file does not exist at all (unknown - the guard must
+    not act on a rig whose telemetry is missing), 0.0 when the file is stale
+    (older than 120 s - the agent stopped updating it, same rule hive's own
+    watchdog uses), otherwise the parsed number."""
+    path = KHS_PATH
+    if not os.path.exists(path):
+        return None
+    try:
+        if time.time() - os.stat(path).st_mtime > 120:
+            return 0.0
+        with open(path) as f:
+            return float((f.read() or '0').strip() or 0)
+    except Exception:
+        return 0.0
+
+
 def _miner_guard_tick():
-    """Cheap liveness repair: nobody asked the miner to stop, yet it is not
-    running -> start it immediately. No cloud involvement whatsoever."""
-    if os.path.exists(MINER_RUN_FLAG) or os.path.exists(MINER_STOP_FLAG):
+    """Cheap liveness repair, fully independent of the HiveOS cloud.
+
+    Two failure modes are repaired within ~5 minutes:
+      * nobody asked the miner to stop, yet it is not running -> start it;
+      * the miner is 'running' but hashes nothing for MINER_GUARD_ZERO_SECONDS
+        (zombie workers after a driver glitch / pool break) -> restart it.
+    """
+    if os.path.exists(MINER_STOP_FLAG):
         return
     miner = _conf_value(RIG_CONF_PATH, "MINER")
     if not miner or miner == "none":
@@ -3646,6 +3673,32 @@ def _miner_guard_tick():
         return
     st = _heal_state_load()
     now = int(time.time())
+
+    if os.path.exists(MINER_RUN_FLAG):
+        khs = _khs_value()
+        if khs is None or khs > 0:
+            if st.get("guard_zero_since"):
+                st.pop("guard_zero_since", None)
+                _heal_state_save(st)
+            return
+        if not st.get("guard_zero_since"):
+            st["guard_zero_since"] = now
+            _heal_state_save(st)
+            return
+        if now - int(st["guard_zero_since"]) < MINER_GUARD_ZERO_SECONDS:
+            return
+        if now - int(st.get("last_miner_heal") or 0) < MINER_GUARD_ZERO_GAP:
+            return
+        run_command(MINER_RESTART_CMD)
+        st["last_miner_heal"] = now
+        st["guard_zero_since"] = now
+        st["last_action"] = ("fast guard: zero hashrate for %d min - miner restarted"
+                             % (MINER_GUARD_ZERO_SECONDS // 60))
+        _heal_state_save(st)
+        logging.warning("Self-heal: %s", st["last_action"])
+        record_metrics_event("warning", "Self-heal: zero hashrate - miner restarted (fast guard)")
+        return
+
     if now - int(st.get("last_miner_heal") or 0) < MINER_GUARD_GAP:
         return
     # a dead screen left behind by a failed start blocks "miner start"
@@ -3656,6 +3709,7 @@ def _miner_guard_tick():
         time.sleep(2)
     run_command(MINER_START_CMD)
     st["last_miner_heal"] = now
+    st["guard_zero_since"] = now
     st["last_action"] = "fast guard: miner was not running - started"
     _heal_state_save(st)
     logging.warning("Self-heal: %s", st["last_action"])
