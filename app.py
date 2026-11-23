@@ -2552,7 +2552,9 @@ HEAL_MINER_GAP = 120           # min seconds between miner start/restart heal ac
 MINER_GUARD_INTERVAL = 30
 MINER_GUARD_BOOT_DELAY = 90
 MINER_GUARD_GAP = 90           # min seconds between fast start attempts
-MINER_GUARD_ZERO_SECONDS = 300 # miner running but hashing nothing this long -> restart
+MINER_GUARD_ZERO_SECONDS = 180 # miner running but hashing nothing this long -> restart
+                                # (180s: onezerominer reconnects/re-ramps in 1-2 min and pool
+                                # glitches clear in 5-30s, so 180s still rides them out)
 MINER_GUARD_ZERO_GAP = 600     # min seconds between zero-hash restarts
 # ---------------- Pool failover (a rig must never sit on a dead pool) ----------------
 # RIG7/RIG3 22 Nov: pool.peryn.ai stopped ACCEPTING new TCP connections while
@@ -3860,7 +3862,7 @@ def _pool_failback_probe(st, now):
 def _miner_guard_tick():
     """Cheap liveness repair, fully independent of the HiveOS cloud.
 
-    Two failure modes are repaired within ~5 minutes:
+    Two failure modes are repaired within ~3 minutes:
       * nobody asked the miner to stop, yet it is not running -> start it;
       * the miner is 'running' but hashes nothing for MINER_GUARD_ZERO_SECONDS
         (zombie workers after a driver glitch / pool break) -> restart it.
