@@ -2718,6 +2718,8 @@ async function cuFetchVersion(rigId, isSelf, timeoutMs = 15000) {
     }
 }
 
+let cuLatestRetryTimer = null, cuLatestRetries = 0;
+
 // Background job states of all components on one rig ({panel,drivers,hiveos})
 async function cuFetchJobs(rigId, isSelf, timeoutMs = 15000) {
     const ctrl = new AbortController();
@@ -2783,6 +2785,24 @@ async function refreshClusterUpdate() {
     });
     cuLoadedOnce = true;
     renderCuRows();
+    // The backend serves /api/version without blocking now; 'latest' values are
+    // detected in a background thread and fill in ~10-30s after a panel restart
+    // (right after it the first fetch carries empty driver/hiveos latest).
+    // Re-poll a couple of times so the tab catches them without a manual Refresh;
+    // a rig without hiveos.farm connectivity never fills - retries stay bounded.
+    const missingLatest = rigs.some(r => {
+        const i = cuRigInfo[r.id];
+        return i && !i.err && (!i.driver_latest || !i.hiveos_latest);
+    });
+    if (cuTabVisible() && missingLatest && cuLatestRetries < 2) {
+        clearTimeout(cuLatestRetryTimer);
+        cuLatestRetries++;
+        cuLatestRetryTimer = setTimeout(() => {
+            if (cuTabVisible()) refreshClusterUpdate();
+        }, cuLatestRetries === 1 ? 10000 : 20000);
+    } else if (!missingLatest) {
+        cuLatestRetries = 0;
+    }
 }
 
 // Select-all checkbox cell for one component column
@@ -6311,6 +6331,7 @@ function showDashTab(tab) {
     if (tab === 'services') loadHardwareWatchdog();
     if (tab === 'updates') {
         // fresh rig list/online flags feed the version table + re-check the banner
+        cuLatestRetries = 0; // every fresh visit to the tab gets its catch-up polls
         loadClusterData(true).then(() => refreshClusterUpdate());
         checkUpdate();
     }

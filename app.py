@@ -10113,50 +10113,82 @@ def _detect_env_versions(max_age=60):
     if _env_versions_cache["ts"] and now - _env_versions_cache["ts"] < max_age:
         return _env_versions_cache["driver"], _env_versions_cache["hiveos"]
     driver, hiveos = "", ""
-    out, _, _ = run_command("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1")
+    # timeout: a hung GPU driver (post-boot GPU init freeze) must not eat a
+    # waitress thread here either - same hard bound as the driver-index fetch
+    out, _, _ = run_command("timeout 10 nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1")
     driver = out.strip().splitlines()[0].strip() if out.strip() else ""
     out, _, _ = run_command("dpkg-query -W -f='${Version}' hive 2>/dev/null")
     hiveos = out.strip()
     _env_versions_cache.update({"ts": now, "driver": driver, "hiveos": hiveos})
     return driver, hiveos
 
-_latest_env_cache = {"ts": 0.0, "driver": "", "hiveos": ""}
+_latest_env_cache = {"ts": 0.0, "driver": "", "hiveos": "", "refreshing": False}
+_latest_env_lock = threading.Lock()
+
+def _latest_env_refresh_worker():
+    """One detection pass in a background thread (single-flight).
+
+    `nvidia-driver-update --list` fetches the hive driver index over the
+    network; with hiveos.farm DPI-blocked (silent drop, 22 Nov) the fetch
+    hangs until the `timeout 25` kills it. Running that inline in /api/version
+    ate a waitress thread for up to 25s per cold call — the 8-thread pool +
+    one Updates-tab refresh across the peers starved login/stats (journal:
+    "Task queue depth is 15"), and the 15s browser abort fired first anyway,
+    so the answer never even reached the tab.
+    """
+    try:
+        driver_latest, hiveos_latest = "", ""
+
+        def _vt(v):
+            parts = re.findall(r"\d+", v or "")
+            return tuple(int(p) for p in parts[:4]) if parts else ()
+
+        # HARD BOUND: with the hiveos.farm network hard-hanging (DPI block,
+        # 22 Nov) this fetch never returns on its own.
+        out, _, _ = run_command("sudo timeout 25 /hive/sbin/nvidia-driver-update --list 2>/dev/null")
+        if out:
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+            tokens = re.findall(r"\b\d{3,4}\.\d+(?:\.\d+)*\b", plain)
+            if tokens:
+                driver_latest = max(tokens, key=_vt)
+        out, _, _ = run_command("apt-cache policy hive 2>/dev/null")
+        m = re.search(r"Candidate:\s*(\S+)", out or "")
+        if m and m.group(1) != "(none)":
+            hiveos_latest = m.group(1)
+        with _latest_env_lock:
+            _latest_env_cache.update({"ts": time.time(), "driver": driver_latest,
+                                      "hiveos": hiveos_latest, "refreshing": False})
+    except Exception:
+        logging.exception("latest env version detection failed")
+        with _latest_env_lock:
+            _latest_env_cache["refreshing"] = False
 
 def _detect_latest_versions(max_age=60):
     """(driver_latest, hiveos_latest) — versions an update would move to.
 
+    STALE-WHILE-REVALIDATE: values are served from the in-process cache
+    instantly (empty right after a panel restart) and the real detection runs
+    in a background thread, so /api/version never blocks on the network; the
+    next poll (the Updates tab refreshes in a loop) serves the filled-in
+    values.
+
     driver: newest version offered by `nvidia-driver-update --list` (network
-    fetch of the hive driver index, cached for 60s so a manual Refresh picks up
-    new releases promptly; the rig has no NVIDIA "stable" marker — max of all
-    listed branches is the freshest).
+    fetch of the hive driver index, cached; the rig has no NVIDIA "stable"
+    marker — max of all listed branches is the freshest).
     hiveos: apt candidate of the `hive` package (from the rig's current apt
     lists; selfupgrade refreshes them during the actual upgrade).
     """
-    now = time.time()
-    if _latest_env_cache["ts"] and now - _latest_env_cache["ts"] < max_age:
-        return _latest_env_cache["driver"], _latest_env_cache["hiveos"]
-    driver_latest, hiveos_latest = "", ""
-
-    def _vt(v):
-        parts = re.findall(r"\d+", v or "")
-        return tuple(int(p) for p in parts[:4]) if parts else ()
-
-    # HARD BOUND: with the hiveos.farm network hard-hanging (DPI block, 22 Nov)
-    # this fetch never returns and a call without a timeout eats a waitress
-    # thread forever - every panel API thread died that way within minutes
-    # (login/stats kept working, /api/version and the Updates tab hung).
-    out, _, _ = run_command("sudo timeout 25 /hive/sbin/nvidia-driver-update --list 2>/dev/null")
-    if out:
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
-        tokens = re.findall(r"\b\d{3,4}\.\d+(?:\.\d+)*\b", plain)
-        if tokens:
-            driver_latest = max(tokens, key=_vt)
-    out, _, _ = run_command("apt-cache policy hive 2>/dev/null")
-    m = re.search(r"Candidate:\s*(\S+)", out or "")
-    if m and m.group(1) != "(none)":
-        hiveos_latest = m.group(1)
-    _latest_env_cache.update({"ts": now, "driver": driver_latest, "hiveos": hiveos_latest})
-    return driver_latest, hiveos_latest
+    start_refresh = False
+    with _latest_env_lock:
+        fresh = bool(_latest_env_cache["ts"]) and time.time() - _latest_env_cache["ts"] < max_age
+        if not fresh and not _latest_env_cache.get("refreshing"):
+            _latest_env_cache["refreshing"] = True
+            start_refresh = True
+        driver, hiveos = _latest_env_cache["driver"], _latest_env_cache["hiveos"]
+    if start_refresh:
+        threading.Thread(target=_latest_env_refresh_worker, daemon=True,
+                         name="latest-env-refresh").start()
+    return driver, hiveos
 
 _packages_cache = {"ts": 0.0, "count": None, "lists_age": None}
 
@@ -10281,7 +10313,9 @@ def _update_status_read():
         return {}
 
 def _update_status_write(data):
-    tmp = UPDATE_STATUS_PATH + ".tmp"
+    # unique tmp: GET /api/update/status persists job outcomes too, so two
+    # threads can write concurrently - a shared .tmp name would interleave
+    tmp = "%s.%s.%s.tmp" % (UPDATE_STATUS_PATH, os.getpid(), threading.get_ident())
     try:
         with open(tmp, "w") as fh:
             json.dump(data, fh)
@@ -10290,7 +10324,10 @@ def _update_status_write(data):
         os.chmod(tmp, 0o600)
         os.replace(tmp, UPDATE_STATUS_PATH)
     except OSError:
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 def _pid_alive(pid):
     try:
@@ -10320,8 +10357,17 @@ def _update_exit_code(log_text):
                 return None
     return None
 
+UPDATE_JOB_STALE_SECONDS = 3600  # dead job with no known outcome older than this = ghost
+
 def _update_job_state(component):
-    entry = _update_status_read().get(component)
+    # read-modify-write under config_lock: parallel status GETs persisting
+    # outcomes/pruning ghosts must not lose each other's changes
+    with config_lock:
+        return _update_job_state_locked(component)
+
+def _update_job_state_locked(component):
+    store = _update_status_read()
+    entry = store.get(component)
     if not isinstance(entry, dict) or not entry.get("pid"):
         return None
     state = {
@@ -10336,6 +10382,25 @@ def _update_job_state(component):
         return state
     log_text = _read_log_tail(_update_log_path(component))
     code = _update_exit_code(log_text)
+    if code is not None:
+        # First observation of the outcome - persist it. /var/log is tmpfs on
+        # HiveOS: a reboot wipes the log (and its UPDATE_EXIT_CODE marker)
+        # while update_status.json survives, which used to resurrect every old
+        # job as a permanent "failed" ghost on the Updates tab.
+        entry = dict(entry)
+        entry["exit_code"] = code
+        entry["finished_at"] = int(time.time())
+        store[component] = entry
+        _update_status_write(store)
+    elif entry.get("exit_code") is not None:
+        code = int(entry.get("exit_code"))  # outcome observed before a log wipe
+    elif int(entry.get("started_at") or 0) < time.time() - UPDATE_JOB_STALE_SECONDS:
+        # Dead pid, no marker anywhere: the log was wiped before the outcome
+        # was ever observed - the entry carries no information and would sit
+        # on the Updates tab as "failed" forever. Drop it.
+        store.pop(component, None)
+        _update_status_write(store)
+        return None
     state.update({"running": False, "exit_code": code, "ok": code == 0,
                   "log_tail": log_text})
     return state
