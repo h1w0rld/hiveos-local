@@ -3567,6 +3567,16 @@ def _heal_check_zombie(st, report):
         st["zombie_streak"] = 0
         st["zombie_series_since"] = 0
         return
+    # NEB (aria-energy-neb) warmup: the miner is alive and progressing through
+    # its per-GPU self-tests (fresh log) but hashes nothing yet - hold the
+    # zombie timer instead of restarting mid-self-test (same hold as in
+    # _miner_guard_tick: an 8-GPU rig needs ~11 min of zero-hash init, RIG9
+    # 24 Nov). A hung self-test drops the hold (stale log) and the normal
+    # zero-branch resumes with the already-armed timer.
+    if _aria_neb_selftest_alive():
+        if not st.get("zombie_zero_since"):
+            st["zombie_zero_since"] = now
+        return
     zs = int(st.get("zombie_zero_since") or 0)
     if not zs:
         st["zombie_zero_since"] = now
