@@ -5185,7 +5185,12 @@ def _oc_read_khs():
     """Current rig hashrate (kH/s) as reported by the hive agent. A stale
     file (>120s without an update, hive-watchdog semantics) reads as 0 -
     a dead miner leaves the last value behind otherwise. Sub-floor values
-    (phantom averages of zombie workers) read as 0 as well."""
+    (phantom averages of zombie workers) read as 0 as well - unless the NEB
+    miner proves liveness with its own fresh stats file (see ARIA_KHS_*
+    below): nebhash mines at 1e5-1e6 kH/s, far below the generic floor."""
+    aria = _aria_neb_khs()
+    if aria is not None and aria >= ARIA_KHS_MIN:
+        return aria
     try:
         age = time.time() - os.path.getmtime(OC_REC_KHS_PATH)
         if age > 120:
@@ -5195,6 +5200,31 @@ def _oc_read_khs():
         return val if val >= MINING_KHS_FLOOR else 0.0
     except Exception:
         return 0.0
+
+# NEB (aria-energy-neb custom miner) writes its own stats file every 10 s with
+# "khs" in kH/s. Its legitimate hashrate (0.1-1 GH/s = 1e5-1e6 kH/s) sits BELOW
+# MINING_KHS_FLOOR, so the generic floor reads a healthy NEB rig as zero -
+# zombie restarts every hour and an escalation reboot (caught live on RIG3,
+# 23 Nov, 15 min after the first NEB run). The miner's own fresh stats file is
+# an exact liveness signal: it is rewritten by the mining loop every 10 s, so a
+# hung miner leaves it stale and the guards must treat the rig as zero again.
+ARIA_KHS_STATS_PATH = "/run/hive/aria-energy-neb.json"
+ARIA_KHS_STATS_MAX_AGE = 60.0   # the miner rewrites it every 10 s
+ARIA_KHS_MIN = 1000.0           # 1 MH/s: far below real NEB hashing, far above phantom averages
+
+def _aria_neb_khs():
+    """kH/s from the aria-energy-neb miner's own stats file.
+
+    None when the file is missing or stale (>60 s) - the NEB miner is not
+    running or is hung and the generic MINING_KHS_FLOOR rules apply."""
+    try:
+        if time.time() - os.path.getmtime(ARIA_KHS_STATS_PATH) > ARIA_KHS_STATS_MAX_AGE:
+            return None
+        with open(ARIA_KHS_STATS_PATH) as f:
+            d = json.load(f)
+        return float(d.get("khs") or 0)
+    except Exception:
+        return None
 
 def _oc_xid_counts():
     """{pci_norm: count} of fatal Xid faults (13/31) per GPU from dmesg."""
