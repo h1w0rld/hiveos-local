@@ -2595,6 +2595,8 @@ let cuBusy = false;         // an update run is in progress
 let cuRunId = 0;            // guards against stale async refreshes
 let cuLoadedOnce = false;   // a refresh landed with a live session
 let cuJobs = {};            // rigId -> {panel|drivers|hiveos|packages: job|null}
+let cuRunPlan = {};         // rigId -> [components] of the running update (progress accounting)
+let cuBannerOverride = '';  // explicit phase text for the banner; '' = derive from state
 const CU_COMPONENTS = ['panel', 'drivers', 'hiveos', 'packages'];
 const CU_COMPONENT_HINTS = {
     panel: 'Dashboard software: pulls the latest release from GitHub and restarts (miners not affected).',
@@ -2784,6 +2786,29 @@ async function refreshClusterUpdate() {
         }
     });
     cuLoadedOnce = true;
+    // Hydrate job states from the rigs: a page reload wipes cuJobs while
+    // drivers/hiveos/packages jobs keep running (and the persisted outcomes of
+    // a recent run would be lost too). Running jobs are adopted, finished ones
+    // only within 30 min so yesterday's results don't haunt the table. cuBusy
+    // is NOT set — the banner reports the detected run, the UI stays usable.
+    const jobStates = await Promise.all(rigs.map(r =>
+        cuFetchJobs(r.id, r.is_self, 8000).catch(() => null)));
+    if (runId !== cuRunId) return;
+    rigs.forEach((r, i) => {
+        const st = jobStates[i];
+        if (!st || st.err) return;
+        const jobs = { ...(cuJobs[r.id] || {}) };
+        let adopted = false;
+        CU_COMPONENTS.forEach(c => {
+            const j = st[c];
+            if (!j) return;
+            if (j.running || (j.finished_at && Date.now() / 1000 - j.finished_at < 1800)) {
+                jobs[c] = j;
+                adopted = true;
+            }
+        });
+        if (adopted) cuJobs[r.id] = jobs;
+    });
     renderCuRows();
     // The backend serves /api/version without blocking now; 'latest' values are
     // detected in a background thread and fill in ~10-30s after a panel restart
@@ -3008,6 +3033,7 @@ function renderCuRows() {
             compTds +
             '<td class="align-middle">' + cuRowStatusHtml(rig) + '</td></tr>';
     }).join('');
+    cuPaintBanner();
     syncCuSelectAllBoxes();
     cuPaintUpdateButton();
 }
@@ -3036,22 +3062,66 @@ function cuPaintUpdateButton() {
     }
 }
 
-// Wait-indicator banner above the table while a run is in progress
-function cuSetBanner(text) {
-    const banner = document.getElementById('cuRunBanner');
-    if (!banner) return;
-    if (text) {
-        document.getElementById('cuRunBannerText').textContent = text;
-        banner.classList.remove('d-none');
-    } else {
-        banner.classList.add('d-none');
-    }
+// Progress line above the table while an update run is in progress — and when
+// running jobs were detected on the rigs after a page reload (hydration).
+// Everything is derived from cuJobs + cuRunPlan, so every poll repaints the
+// numbers for free: "2/5 done, 3 running — GPU Drivers ×2, Panel ×3".
+function cuRunProgress() {
+    const planKeys = Object.keys(cuRunPlan);
+    const sources = planKeys.length
+        ? planKeys.map(id => ({ rig: id, comps: cuRunPlan[id] }))
+        : Object.keys(cuJobs).map(id => ({ rig: id, comps: CU_COMPONENTS.filter(c => (cuJobs[id] || {})[c]) }));
+    const pairs = [];
+    sources.forEach(({ rig, comps }) => comps.forEach(c => {
+        const job = (cuJobs[rig] || {})[c];
+        if (!job) return;
+        pairs.push({ rig, comp: c, running: !!job.running, settled: job.running === false });
+    }));
+    const runningPairs = pairs.filter(p => p.running);
+    return {
+        total: pairs.length,
+        done: pairs.filter(p => p.settled).length,
+        running: runningPairs.length,
+        runningPairs
+    };
 }
 
-function cuJobCount() {
-    let n = 0;
-    Object.values(cuJobs).forEach(jobs => CU_COMPONENTS.forEach(c => { if (jobs[c] && jobs[c].running) n++; }));
-    return n;
+// Wait-indicator banner above the table while a run is in progress
+function cuSetBanner(text) {
+    cuBannerOverride = text || '';
+    cuPaintBanner();
+}
+
+function cuPaintBanner() {
+    const banner = document.getElementById('cuRunBanner');
+    if (!banner) return;
+    const { total, done, running, runningPairs } = cuRunProgress();
+    if (!running && !cuBusy) {
+        banner.classList.add('d-none');
+        return;
+    }
+    const compNames = {};
+    runningPairs.forEach(p => { compNames[p.comp] = (compNames[p.comp] || 0) + 1; });
+    const runningTxt = Object.keys(compNames).map(c =>
+        CU_COMPONENT_LABELS[c] + ' \u00d7' + compNames[c]).join(', ');
+    let text = cuBannerOverride;
+    if (!text) {
+        text = cuBusy
+            ? 'Cluster update: ' + done + '/' + total + ' done' +
+              (running ? ', ' + running + ' running' : '') +
+              (runningTxt ? ' — ' + runningTxt : '')
+            : 'Updates running on rigs (detected after page reload): ' + done + '/' + total + ' done' +
+              (running ? ', ' + running + ' running' : '') +
+              (runningTxt ? ' — ' + runningTxt : '');
+    }
+    document.getElementById('cuRunBannerText').textContent = text;
+    const bar = document.getElementById('cuRunProgressBar');
+    if (bar) {
+        const pct = total ? Math.round(done / total * 100) : 0;
+        bar.style.width = Math.max(pct, running ? 6 : 100) + '%';
+        bar.classList.toggle('progress-bar-animated', running > 0);
+    }
+    banner.classList.remove('d-none');
 }
 
 // Start one component job on one rig (self direct, peers through SSH proxy)
@@ -3075,23 +3145,46 @@ async function cuStartJob(rig, comp, password) {
     }
 }
 
-// Phase 1 of a run: poll every started drivers/hiveos job until it finishes
-// or the deadline hits (miner keeps running for hiveos, pauses for drivers)
+// Phase 1 of a run: poll every started drivers/hiveos/packages job until it
+// finishes or the deadline hits (miner keeps running for hiveos/packages,
+// pauses for drivers). A rig that stops answering mid-run (flapping wifi,
+// proxy hiccup) must not freeze the whole run: after 8 consecutive failed
+// polls (~30s) its in-flight jobs are settled as unverifiable and the
+// remaining rigs keep going.
 async function cuWaitComponentJobs(targets) {
     const deadline = Date.now() + 25 * 60 * 1000;
+    const errStreak = {};
     while (targets.length && Date.now() < deadline) {
         await cuSleep(4000);
         const states = await Promise.all(targets.map(r => cuFetchJobs(r.id, r.is_self, 8000)));
         targets.forEach((r, i) => {
             const st = states[i];
             if (st && !st.err) {
+                errStreak[r.id] = 0;
                 cuJobs[r.id] = { ...(cuJobs[r.id] || {}), ...st };
+            } else {
+                errStreak[r.id] = (errStreak[r.id] || 0) + 1;
+                if (errStreak[r.id] >= 8) {
+                    // panel unreachable for ~30s+ — the job states can no
+                    // longer be verified; show that instead of an eternal
+                    // "updating..." spinner
+                    const jobs = cuJobs[r.id] || {};
+                    CU_COMPONENTS.forEach(c => {
+                        if (jobs[c] && jobs[c].running) {
+                            jobs[c] = { ...jobs[c], running: false, ok: null, exit_code: null,
+                                        err: 'panel unreachable during the update run — verify the result on the rig' };
+                        }
+                    });
+                }
             }
         });
         renderCuRows();
-        cuSetBanner('Updating ' + targets.length + ' rig(s) — ' + cuJobCount() + ' job(s) running...');
-        if (states.every(st => st && !st.err &&
-                CU_COMPONENTS.filter(c => c !== 'panel').every(c => !(st[c] && st[c].running)))) break;
+        const allSettled = targets.every(r =>
+            (cuRunPlan[r.id] || []).filter(c => c !== 'panel').every(c => {
+                const j = (cuJobs[r.id] || {})[c];
+                return j && !j.running;
+            }));
+        if (allSettled) break;
     }
 }
 
@@ -3100,20 +3193,32 @@ async function cuWaitComponentJobs(targets) {
 // are expected and tolerated). Self rig must go last: its restart kills this page.
 async function cuUpdatePanelOneRig(rig, password) {
     const setJob = (job) => { cuJobs[rig.id] = { ...(cuJobs[rig.id] || {}), panel: job }; renderCuRows(); };
+    // Success is reaching cuLatest when GitHub told us the target release;
+    // otherwise ANY version change from the pre-pull baseline (GitHub being
+    // unreachable must not turn a successful update into a false 'timed out').
+    let before = (cuRigInfo[rig.id] || {}).version || null;
+    const fresh = await cuFetchVersion(rig.id, rig.is_self, 8000);
+    if (fresh && fresh.version) before = fresh.version;
     const started = await cuStartJob(rig, 'panel', password);
     if (!started.running) { setJob(started); return false; }
     setJob({ running: true, ok: null, exit_code: null, log_tail: '' });
     const deadline = Date.now() + 120000;
+    let sawGap = false; // a failed poll = the panel was seen restarting
     while (Date.now() < deadline) {
         await cuSleep(3000);
         const v = await cuFetchVersion(rig.id, rig.is_self, 8000);
         if (v && v.version) {
-            if (cuLatest && verCompare(v.version, cuLatest) >= 0) {
+            const reached = cuLatest
+                ? verCompare(v.version, cuLatest) >= 0
+                : (before ? v.version !== before : sawGap);
+            if (reached) {
                 setJob({ running: false, ok: true, exit_code: 0, log_tail: '' });
                 cuRigInfo[rig.id] = { ...(cuRigInfo[rig.id] || {}), version: v.version, err: '' };
                 return true;
             }
             // old build still answering — restart pending, keep spinning
+        } else {
+            sawGap = true;
         }
     }
     setJob({ running: false, ok: false, exit_code: null, log_tail: '', err: 'Timed out waiting for restart' });
@@ -3175,13 +3280,14 @@ async function runClusterUpdate() {
 
     cuBusy = true;
     cuRunId++; // invalidate any in-flight version refresh
+    cuRunPlan = {}; // progress accounting: what this run is supposed to update
     Object.keys(plan).forEach(rigId => {
+        cuRunPlan[rigId] = plan[rigId].slice();
         const jobs = {};
         plan[rigId].forEach(c => { jobs[c] = { running: true, ok: null, exit_code: null, log_tail: '' }; });
         cuJobs[rigId] = { ...(cuJobs[rigId] || {}), ...jobs };
     });
     renderCuRows();
-    cuSetBanner('Starting updates on ' + Object.keys(plan).length + ' rig(s)...');
 
     // Phase 1: drivers/hiveos background jobs (they die with the panel process,
     // so they must never overlap a panel restart)
@@ -3204,7 +3310,6 @@ async function runClusterUpdate() {
     const panelPeers = Object.keys(plan).filter(id => plan[id].includes('panel') && !rigById[id].is_self);
     const panelSelf = Object.keys(plan).find(id => plan[id].includes('panel') && rigById[id].is_self);
     if (panelPeers.length || panelSelf) {
-        cuSetBanner('Updating panels on ' + (panelPeers.length + (panelSelf ? 1 : 0)) + ' rig(s)...');
         if (panelSelf) {
             cuJobs[panelSelf] = { ...(cuJobs[panelSelf] || {}), panel: { running: true, ok: null, exit_code: null, log_tail: '' } };
         }
@@ -3231,6 +3336,7 @@ async function runClusterUpdate() {
 
 function finishCount(okCount, failCount, total) {
     cuBusy = false;
+    cuRunPlan = {};
     document.getElementById('cuPassword').value = '';
     cuChecked.clear();
     cuSetBanner('');

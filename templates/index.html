@@ -1111,9 +1111,14 @@
                                 </div>
                             </div>
                         </div>
-                        <div id="cuRunBanner" class="alert alert-warning d-flex align-items-center gap-2 py-2 px-3 mb-2 d-none" role="status">
-                            <i class="bi bi-arrow-repeat cu-status-spin"></i>
-                            <span id="cuRunBannerText" class="fw-semibold">Updating...</span>
+                        <div id="cuRunBanner" class="alert alert-warning py-2 px-3 mb-2 d-none" role="status">
+                            <div class="d-flex align-items-center gap-2">
+                                <i class="bi bi-arrow-repeat cu-status-spin"></i>
+                                <span id="cuRunBannerText" class="fw-semibold">Updating...</span>
+                            </div>
+                            <div class="progress cu-progress mt-2" style="height: 6px;">
+                                <div id="cuRunProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-warning" style="width: 6%"></div>
+                            </div>
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-borderless align-middle mb-2 cu-table" style="font-size: 0.95rem;">

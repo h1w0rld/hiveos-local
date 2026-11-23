@@ -1208,6 +1208,17 @@ tr.af-sep td {
     display: inline-block;
 }
 
+/* thin progress line under the run banner text */
+.cu-progress {
+    max-width: 640px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.cu-progress .progress-bar {
+    transition: width 0.6s ease;
+}
+
 @keyframes cuSpin {
     to { transform: rotate(360deg); }
 }
