@@ -3926,6 +3926,16 @@ def _miner_guard_tick():
                 _heal_state_save(st)
             _pool_failback_probe(st, now)
             return
+        # NEB (aria-energy-neb) warmup: the miner is alive and progressing
+        # through its per-GPU self-tests (fresh log) but hashes nothing yet -
+        # hold the zero timer instead of resetting the self-test (see
+        # _aria_neb_selftest_alive). If the self-test hangs (log goes stale)
+        # the normal zero-branch below resumes with the already-armed timer.
+        if _aria_neb_selftest_alive():
+            if not st.get("guard_zero_since"):
+                st["guard_zero_since"] = now
+                _heal_state_save(st)
+            return
         if not st.get("guard_zero_since"):
             st["guard_zero_since"] = now
             _heal_state_save(st)
@@ -5240,6 +5250,41 @@ def _aria_neb_khs():
         return float(d.get("khs") or 0)
     except (TypeError, ValueError):
         return None
+
+ARIA_NEB_LOG_PATH = "/var/log/miner/aria-energy-neb/aria-energy-neb.log"
+ARIA_NEB_SELFTEST_HOLD = 1800  # hard cap on the warmup hold (30 min after miner start)
+
+def _aria_neb_selftest_alive():
+    """True while an aria-energy-neb miner is visibly working through its
+    per-GPU self-tests (fresh log with self-test lines in the tail, phase
+    still inside the hard cap counted from MINER_RUN).
+
+    The miner hashes nothing during this phase - ~78 s per GPU, ~11 min on an
+    8-GPU rig - and the hive agent writes khs=0 the whole time (it cannot
+    parse the self-test output), while the stats file only appears once real
+    hashing starts. Without a hold, the fast guard's 180 s zero-restart would
+    reset the self-test every 600 s (restart gap) and the rig would loop
+    forever without ever mining (RIG9, 24 Nov)."""
+    try:
+        if _conf_value(RIG_CONF_PATH, "CUSTOM_MINER").strip() != "aria-energy-neb":
+            return False
+        try:
+            if time.time() - os.stat(MINER_RUN_FLAG).st_mtime > ARIA_NEB_SELFTEST_HOLD:
+                return False
+        except OSError:
+            return False
+        try:
+            lst = os.stat(ARIA_NEB_LOG_PATH)
+        except OSError:
+            return False
+        if time.time() - lst.st_mtime > 120:
+            return False
+        with open(ARIA_NEB_LOG_PATH, 'rb') as f:
+            f.seek(max(0, lst.st_size - 4096))
+            tail = f.read().decode(errors='ignore')
+        return "self-test" in tail
+    except Exception:
+        return False
 
 def _oc_xid_counts():
     """{pci_norm: count} of fatal Xid faults (13/31) per GPU from dmesg."""
