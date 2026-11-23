@@ -5212,18 +5212,33 @@ ARIA_KHS_STATS_PATH = "/run/hive/aria-energy-neb.json"
 ARIA_KHS_STATS_MAX_AGE = 60.0   # the miner rewrites it every 10 s
 ARIA_KHS_MIN = 1000.0           # 1 MH/s: far below real NEB hashing, far above phantom averages
 
-def _aria_neb_khs():
-    """kH/s from the aria-energy-neb miner's own stats file.
+def _aria_neb_stats():
+    """Parsed aria-energy-neb stats JSON, or None when missing/stale (>60 s).
 
-    None when the file is missing or stale (>60 s) - the NEB miner is not
-    running or is hung and the generic MINING_KHS_FLOOR rules apply."""
+    The NEB miner has no HTTP stats API (checked live on RIG3: no listening
+    port) - it rewrites this file every 10 s with the per-GPU breakdown:
+    {"khs": <kH/s total>, "hs": [<kH/s per GPU>], "hs_units": "khs",
+     "ar": [<accepted shares per GPU>], "algo": "nebhash", ...}."""
     try:
         if time.time() - os.path.getmtime(ARIA_KHS_STATS_PATH) > ARIA_KHS_STATS_MAX_AGE:
             return None
         with open(ARIA_KHS_STATS_PATH) as f:
             d = json.load(f)
-        return float(d.get("khs") or 0)
+        return d if isinstance(d, dict) and d else None
     except Exception:
+        return None
+
+def _aria_neb_khs():
+    """kH/s from the aria-energy-neb miner's own stats file.
+
+    None when the file is missing or stale (>60 s) - the NEB miner is not
+    running or is hung and the generic MINING_KHS_FLOOR rules apply."""
+    d = _aria_neb_stats()
+    if d is None:
+        return None
+    try:
+        return float(d.get("khs") or 0)
+    except (TypeError, ValueError):
         return None
 
 def _oc_xid_counts():
@@ -7051,23 +7066,39 @@ def get_miner_shares():
         return _miner_shares_cache["val"]
     val = None
     if is_miner_screen_running():
-        for port in (5000, 4067, 4068, 4028, 21373, 21473):
-            try:
-                req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
-                with urllib.request.urlopen(req, timeout=1.5) as resp:
-                    data = json.loads(resp.read().decode(errors="ignore"))
-                shares = _extract_api_shares(data)
-                if shares:
-                    val = {"accepted": shares[0], "rejected": shares[1]}
-                    break
-                # Diagnostics: log the response shape once per 10 min so unknown
-                # miner API formats can be identified from hiveos-local.log
-                if now - _miner_shares_log_ts["ts"] > 600:
-                    _miner_shares_log_ts["ts"] = now
-                    keys = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
-                    logging.warning(f"miner stats API :{port} has no known share keys; top-level keys: {keys}")
-            except Exception:
-                continue
+        # NEB (aria-energy-neb): no HTTP API - shares live in the same stats
+        # file ("ar", accepted per GPU; share verification is centralized on
+        # the pool CPU, so one GPU legitimately showing 0 is normal, not a
+        # fault - seen live on RIG3). No rejected counter is exposed.
+        aria = _aria_neb_stats()
+        if aria is not None:
+            ar = aria.get("ar")
+            if isinstance(ar, list) and ar:
+                acc = 0.0
+                for v in ar:
+                    try:
+                        acc += float(v)
+                    except (TypeError, ValueError):
+                        continue
+                val = {"accepted": int(acc), "rejected": 0}
+        if val is None:
+            for port in (5000, 4067, 4068, 4028, 21373, 21473):
+                try:
+                    req = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"User-Agent": "hiveos-local"})
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        data = json.loads(resp.read().decode(errors="ignore"))
+                    shares = _extract_api_shares(data)
+                    if shares:
+                        val = {"accepted": shares[0], "rejected": shares[1]}
+                        break
+                    # Diagnostics: log the response shape once per 10 min so unknown
+                    # miner API formats can be identified from hiveos-local.log
+                    if now - _miner_shares_log_ts["ts"] > 600:
+                        _miner_shares_log_ts["ts"] = now
+                        keys = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
+                        logging.warning(f"miner stats API :{port} has no known share keys; top-level keys: {keys}")
+                except Exception:
+                    continue
     _miner_shares_cache.update({"ts": now, "val": val})
     return val
 
@@ -7118,6 +7149,30 @@ def get_miner_hashrate():
     agent_khs = _oc_read_khs()
     if agent_khs > 0:
         total_mh = agent_khs / 1000.0
+
+    # 0b. NEB (aria-energy-neb): the miner has no HTTP stats API - the per-GPU
+    #     breakdown and the algo name live only in its stats file. Without
+    #     this every GPU card showed 0.00 MH/s and the coin had no algorithm
+    #     next to it (RIG3 NEB, 24 Nov).
+    aria = _aria_neb_stats()
+    if aria is not None:
+        mult = {"hs": 1e-6, "khs": 1e-3, "mhs": 1.0, "ghs": 1e3, "ths": 1e6}.get(
+            str(aria.get("hs_units") or "khs").lower(), 1e-3)
+        hs = aria.get("hs")
+        if isinstance(hs, list) and hs:
+            for idx, v in enumerate(hs):
+                try:
+                    per_gpu[idx] = float(v) * mult
+                except (TypeError, ValueError):
+                    continue
+        try:
+            aria_total_mh = float(aria.get("khs") or 0) * 1e-3
+        except (TypeError, ValueError):
+            aria_total_mh = 0.0
+        if not algo and aria.get("algo"):
+            algo = str(aria.get("algo"))
+        if total_mh <= 0 and aria_total_mh > 0:
+            total_mh = aria_total_mh
 
     # 1. Miner HTTP stats APIs (rigel 5000, t-rex 4067, gminer/xmrig 4068,
     #    lolminer 4028, srbminer 21373/21473, onezerominer 63002 = CUSTOM_API_PORT)
