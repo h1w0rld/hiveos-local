@@ -5276,7 +5276,8 @@ def _aria_neb_selftest_alive():
     reset the self-test every 600 s (restart gap) and the rig would loop
     forever without ever mining (RIG9, 24 Nov)."""
     try:
-        if _conf_value(RIG_CONF_PATH, "CUSTOM_MINER").strip() != "aria-energy-neb":
+        # CUSTOM_MINER lives in wallet.conf (rig.conf only has MINER="custom")
+        if _conf_value(WALLET_CONF_PATH, "CUSTOM_MINER").strip() != "aria-energy-neb":
             return False
         try:
             if time.time() - os.stat(MINER_RUN_FLAG).st_mtime > ARIA_NEB_SELFTEST_HOLD:
