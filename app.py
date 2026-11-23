@@ -2562,9 +2562,10 @@ MINER_GUARD_ZERO_GAP = 600     # min seconds between zero-hash restarts
 # reconnect sat at 0 H/s, and a miner restart cannot fix a dead pool. When the
 # miner is running, hashes zero for MINER_GUARD_ZERO_SECONDS AND the configured
 # pool endpoint refuses a TCP connection from this rig, wallet.conf is pointed
-# at the next endpoint of the same algorithm (cross-provider list below,
-# user-overridable via /hive-config/pool_failover.json {"<algo>": [urls]}) and
-# the miner restarts. While failed over, the primary endpoint is probed every
+# at the next endpoint of the same algorithm that actually accepts a TCP
+# connection (cross-provider list below, user-overridable via
+# /hive-config/pool_failover.json {"<algo>": [urls]}) and the miner restarts.
+# While failed over, the primary endpoint is probed every
 # POOL_FAILBACK_INTERVAL and the rig switches back automatically after
 # POOL_FAILBACK_CONFIRM good probes in a row. A flight-sheet apply resets this
 # state: the user's explicit pool choice always wins.
@@ -2613,7 +2614,13 @@ def _heal_state_load():
               "rig_id_ok": None, "gpu_reset_since": 0, "gpu_reset_buses": [],
               "expected_gpu_count": 0, "gpu_count_since": 0, "gpu_count_deficit": 0,
               "pool_state": "ok", "pool_primary": "", "pool_active": "",
-              "pool_probe_ts": 0, "pool_failback_ok": 0, "pool_last_switch": 0}
+              "pool_probe_ts": 0, "pool_failback_ok": 0, "pool_last_switch": 0,
+              # Zero-hash timers (fast guard + zombie heal): the merge above only
+              # copies keys present in this default dict, so these MUST be
+              # listed here - otherwise the zero confirmation resets on every
+              # panel restart and the first healing action after a deploy is
+              # delayed by the full confirm window again.
+              "guard_zero_since": 0, "zombie_zero_since": 0, "last_zombie_heal": 0}
         try:
             with open(HEAL_STATE_PATH, 'r') as f:
                 disk = json.load(f)
@@ -3794,8 +3801,9 @@ def _pool_probe_allowed():
 def _pool_failover_walk(st, now, active):
     """The configured pool refuses TCP: switch to the next endpoint and restart.
     Returns True when a switch was attempted (the caller must not also restart
-    the miner), False when there was nothing to switch to (no candidates or the
-    walk gap has not elapsed) - then the plain restart ladder continues."""
+    the miner), False when there was nothing to switch to (no candidates, no
+    candidate accepts TCP, or the walk gap has not elapsed) - then the plain
+    restart ladder continues."""
     if now - int(st.get("pool_last_switch") or 0) < POOL_FAILOVER_WALK_GAP:
         return False
     cands = _pool_failover_candidates(_pool_failover_algo(), active)
@@ -3803,7 +3811,27 @@ def _pool_failover_walk(st, now, active):
         return False  # no alternative endpoint known - keep the plain restart ladder
     if st.get("pool_state") != "failed_over" and not st.get("pool_primary"):
         st["pool_primary"] = active
-    nxt = cands[0]
+    # Probe the candidates and switch to the first one that actually accepts a
+    # TCP connection. Blindly taking cands[0] ping-ponged between two dead
+    # endpoints of the same provider and never reached a healthy third one
+    # (two dead kryptex mirrors + live peryn: [prl, prl-ru, prl, prl-ru, ...]
+    # forever, each hop costing a pointless miner restart every ~15 min).
+    nxt = None
+    for c in cands:
+        if _pool_tcp_probe(c) is True:
+            nxt = c
+            break
+    if nxt is None:
+        # Every known endpoint refuses connections right now (provider down or
+        # our own uplink is dead): switching would only churn wallet.conf
+        # between dead endpoints - pace the next walk and let the plain
+        # restart ladder continue.
+        st["pool_last_switch"] = now
+        st["last_action"] = ("pool failover: no candidate endpoint accepts TCP - staying on %s"
+                             % active)
+        _heal_state_save(st)
+        logging.warning("Self-heal: %s", st["last_action"])
+        return False
     ok, msg = _pool_switch_wallet_url(nxt)
     st["pool_last_switch"] = now
     st["last_miner_heal"] = now
@@ -3866,6 +3894,8 @@ def _miner_guard_tick():
       * nobody asked the miner to stop, yet it is not running -> start it;
       * the miner is 'running' but hashes nothing for MINER_GUARD_ZERO_SECONDS
         (zombie workers after a driver glitch / pool break) -> restart it.
+    Both hands-off while an oc_recovery clock walk is active (it owns the
+    miner: stop -> apply -> restart -> warmup with zero hash).
     """
     if os.path.exists(MINER_STOP_FLAG):
         return
@@ -3875,6 +3905,14 @@ def _miner_guard_tick():
     maintenance = _conf_value(RIG_CONF_PATH, "MAINTENANCE")
     if maintenance and maintenance.strip() not in ("", "0"):
         return
+    # oc_recovery walk owns the miner while active (stop -> apply -> restart ->
+    # warmup 240s with khs=0): a parallel guard start/restart would race its
+    # clock test (start it mid-stop, restart it mid-warmup) - hands off.
+    try:
+        if (_oc_state_load() or {}).get("active"):
+            return
+    except Exception:
+        pass
     if _uptime_seconds() < MINER_GUARD_BOOT_DELAY:
         return
     st = _heal_state_load()
@@ -4054,7 +4092,13 @@ def _net_heal_state_load():
               "static": None, "static_try": 0,
               "no_reboot": False, "wan_down_noted": False,
               "peer_check_ts": 0, "soft_cycle_ts": 0, "peer_verdict": {},
-              "flaps": [], "obs_problem": False}
+              "flaps": [], "obs_problem": False,
+              # Channel-width guard state: the merge above only copies keys
+              # present in this default dict - bw_fix (ts/fails of the wifi
+              # 20MHz enforcement) must be listed here or the hourly retry
+              # limit and the 3-attempt fail cap reset on every panel restart
+              # (deploy/crash), re-triggering ip link down + driver reload.
+              "bw_fix": None}
         # Newest valid copy wins between the primary file and the `.fallback`
         # file written when the primary inode is wedged by ntfs-3g (RIG6: every
         # rename onto net_heal.json returned ENOENT while every other store on
@@ -4289,10 +4333,14 @@ def _net_heal_check_wifi_bw():
         return  # enforce at most once per hour
     if int(bw.get("fails") or 0) >= 3:
         return  # driver refuses the param - do not churn the link forever
-    _net_heal_write_bw_conf(drv)
-    _net_heal_run("ip link set %s down" % iface, 15)
-    _net_heal_run("sh -c 'modprobe -r %s && sleep 2 && modprobe %s'" % (drv, drv), 120)
-    _net_heal_run("netplan apply", 90)
+    wrote = _net_heal_write_bw_conf(drv)
+    if wrote:
+        # reload only when the drop-in actually landed - reloading a driver
+        # that ignores rtw_bw_mode anyway (or with no drop-in present) just
+        # churns the link for nothing
+        _net_heal_run("ip link set %s down" % iface, 15)
+        _net_heal_run("sh -c 'modprobe -r %s && sleep 2 && modprobe %s'" % (drv, drv), 120)
+        _net_heal_run("netplan apply", 90)
     mode2 = _net_heal_bw_param(drv, "rtw_bw_mode")
     applied = False
     try:
@@ -4305,7 +4353,9 @@ def _net_heal_check_wifi_bw():
     st["bw_fix"] = bw
     st["last_action"] = (
         "wide link at %.0f Mb/s (%s at %s) - channel width forced to 20MHz%s" % (
-            rate, drv, mode, "" if applied else " - did not stick, will retry"))
+            rate, drv, mode,
+            "" if applied else (" - drop-in write failed, will retry" if not wrote
+                                else " - did not stick, will retry")))
     record_metrics_event("warning" if applied else "danger", "Net-heal: " + st["last_action"])
     _net_heal_state_save(st)
 
