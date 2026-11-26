@@ -10442,6 +10442,75 @@ UPDATE_COMPONENT_LABELS = {
     "packages": "System package update",
 }
 
+# --- driver version list for the picker (Updates tab) ------------------------
+# `nvidia-driver-update --ext --list` reads the NVIDIA archive index
+# (download.nvidia.com) — it stays reachable when the hiveos.farm domain is
+# DPI-blocked from the rig network (since 22 Nov), and every version Hive
+# hosts is the same NVIDIA release re-packaged without compat32/Wine. The
+# plain `--list` (Hive collection) is fetched best-effort with a short
+# timeout only to MARK which versions download from Hive as the smaller
+# no-compat32 package; while the block is up it simply never contributes.
+# Installation routing needs no help from us: `nvidia-driver-update <ver>`
+# (no --ext) downloads from Hive when it hosts the version and falls back to
+# the NVIDIA URL on its own otherwise (get_url, "was not found in the list").
+DRIVER_VERSION_RE = re.compile(r"^[0-9]{3}\.[0-9]{2,3}(?:\.[0-9]{2})?$")  # shapes the hive script accepts
+_drivers_list_cache = {"ts": 0.0, "items": []}
+
+def _driver_ver_key(v):
+    parts = re.findall(r"\d+", v or "")
+    return tuple(int(p) for p in parts[:4]) if parts else ()
+
+def _detect_driver_versions(max_age=600):
+    """Available NVIDIA driver versions, newest first: [{"v", "hive"}].
+
+    Synchronous on purpose — the endpoint is fetched on an explicit click
+    (picker modal), never polled; the in-process cache keeps repeat clicks
+    instant. Both fetches are hard-bounded by `timeout` (a dead hiveos.farm
+    must not eat a waitress thread for minutes) and run in parallel threads:
+    worst case is bounded by the NVIDIA fetch (25s), not their sum.
+    Failed detection is not cached — the next click retries.
+    """
+    now = time.time()
+    if _drivers_list_cache["ts"] and now - _drivers_list_cache["ts"] < max_age:
+        return _drivers_list_cache["items"]
+
+    def _fetch(tag, cmd):
+        out, _, _ = run_command(cmd)
+        if not out:
+            return
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        acc[tag] = set(t for t in re.findall(r"\b\d{3,4}\.\d+(?:\.\d+)*\b", plain)
+                       if DRIVER_VERSION_RE.match(t))
+
+    acc = {}
+    threads = [
+        threading.Thread(target=_fetch, name="drv-list-hive", daemon=True,
+                         args=("hive", "sudo timeout 10 /hive/sbin/nvidia-driver-update --list 2>/dev/null")),
+        threading.Thread(target=_fetch, name="drv-list-nvidia", daemon=True,
+                         args=("ext", "sudo timeout 25 /hive/sbin/nvidia-driver-update --ext --list 2>/dev/null")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(40)
+    hive, ext = acc.get("hive", set()), acc.get("ext", set())
+    items = [{"v": v, "hive": v in hive}
+             for v in sorted(ext | hive, key=_driver_ver_key, reverse=True)]
+    if items:
+        _drivers_list_cache.update({"ts": now, "items": items})
+    return items
+
+@app.route('/api/update/drivers/list', methods=['GET'])
+def api_update_driver_list():
+    """Driver versions the picker offers (the self rig's view of the archives).
+
+    The list is rig-independent (same archives for everyone); each rig still
+    downloads its package itself when the job runs, so a peer that cannot
+    reach NVIDIA fails loudly in its own job log.
+    """
+    items = _detect_driver_versions()
+    return jsonify({"success": True, "items": items})
+
 def _update_log_path(component):
     return os.path.join(UPDATE_LOG_DIR, f"hive-local-update-{component}.log")
 
@@ -10516,6 +10585,7 @@ def _update_job_state_locked(component):
         "pid": entry.get("pid"),
         "started_at": entry.get("started_at"),
         "finished_at": entry.get("finished_at"),
+        "version": entry.get("version") or "",
     }
     if _pid_alive(entry.get("pid")):
         state.update({"running": True, "ok": None, "exit_code": None,
@@ -10546,7 +10616,7 @@ def _update_job_state_locked(component):
                   "log_tail": log_text})
     return state
 
-def _update_job_start(component):
+def _update_job_start(component, version=""):
     """Start a background update job; returns its state, or None if busy."""
     current = _update_job_state(component)
     if current and current.get("running"):
@@ -10556,15 +10626,19 @@ def _update_job_start(component):
         open(log_path, "w").close()
     except OSError:
         pass
+    cmd = UPDATE_COMPONENT_CMDS[component]
+    if component == "drivers" and version:
+        # validated against DRIVER_VERSION_RE at the route — inert as an argument
+        cmd = cmd + " " + version
     inner = "{cmd} > {log} 2>&1; rc=$?; echo UPDATE_EXIT_CODE:$rc >> {log}".format(
-        cmd=UPDATE_COMPONENT_CMDS[component], log=log_path)
+        cmd=cmd, log=log_path)
     try:
         proc = subprocess.Popen(["bash", "-c", inner], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
         return False
     status = _update_status_read()
-    status[component] = {"pid": proc.pid, "started_at": int(time.time())}
+    status[component] = {"pid": proc.pid, "started_at": int(time.time()), "version": version}
     _update_status_write(status)
     return _update_job_state(component)
 
@@ -10629,11 +10703,21 @@ def pull_update():
     if component not in ('panel',) + tuple(UPDATE_COMPONENT_CMDS):
         return jsonify({"success": False, "message": "Unknown update component."}), 400
 
+    # GPU drivers: a version picked in the Updates-tab list. Only the shapes
+    # the hive script itself accepts (get_url) pass through — anything else
+    # would be treated as a URL by the script.
+    version = ""
+    if component == 'drivers':
+        version = str(data.get('version') or '').strip()
+        if version and not DRIVER_VERSION_RE.match(version):
+            return jsonify({"success": False, "message":
+                            "Invalid driver version format (expected e.g. 595.91.07 or 550.142)."}), 400
+
     logging.info(f"Dashboard update authorized with password by IP: {request.remote_addr} (component={component})")
 
     # Drivers / Hive OS: long background jobs — start and return immediately.
     if component in UPDATE_COMPONENT_CMDS:
-        state = _update_job_start(component)
+        state = _update_job_start(component, version=version)
         if state is None:
             label = UPDATE_COMPONENT_LABELS[component]
             return jsonify({"success": False,
@@ -10642,9 +10726,9 @@ def pull_update():
             return jsonify({"success": False,
                             "message": "Failed to start the update job."}), 500
         label = UPDATE_COMPONENT_LABELS[component]
-        logging.info(f"{label} started in background (pid {state.get('pid')})")
+        logging.info(f"{label}{(' ' + version) if version else ''} started in background (pid {state.get('pid')})")
         return jsonify({"success": True, "component": component, "async": True,
-                        "message": f"{label} started! Track progress in the Status column."})
+                        "message": f"{label}{(' ' + version) if version else ''} started! Track progress in the Status column."})
 
     cwd = os.getcwd()
 

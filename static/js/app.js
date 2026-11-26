@@ -712,6 +712,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (box.checked) cuChecked.add(pair); else cuChecked.delete(pair);
         syncCuSelectAllBoxes();
     });
+    document.getElementById('cuDriverSearch').addEventListener('input', renderCuDriverRows);
 
     // Reboot / Shutdown bindings (act on the rig selected in the header dropdown)
     document.getElementById('rigRebootBtn').addEventListener('click', async () => {
@@ -2597,6 +2598,10 @@ let cuLoadedOnce = false;   // a refresh landed with a live session
 let cuJobs = {};            // rigId -> {panel|drivers|hiveos|packages: job|null}
 let cuRunPlan = {};         // rigId -> [components] of the running update (progress accounting)
 let cuBannerOverride = '';  // explicit phase text for the banner; '' = derive from state
+let cuDriverPick = {};      // rigId -> driver version picked in the list (overrides 'latest')
+let cuDriverList = null;    // {items, ts} cached from GET /api/update/drivers/list (items=[] on empty)
+let cuDriverListRig = null; // rig whose driver picker modal is open
+let cuDriverListLoading = false;
 const CU_COMPONENTS = ['panel', 'drivers', 'hiveos', 'packages'];
 const CU_COMPONENT_HINTS = {
     panel: 'Dashboard software: pulls the latest release from GitHub and restarts (miners not affected).',
@@ -2669,6 +2674,11 @@ function cuCompLatest(rigId, comp) {
 }
 
 function cuCompUpToDate(rigId, comp) {
+    if (comp === 'drivers' && cuDriverPick[rigId]) {
+        // an explicitly picked version is an instruction — never skip it as
+        // "up to date", even when it equals or is older than the installed one
+        return false;
+    }
     if (comp === 'packages') {
         // nothing to upgrade AND the index is fresh enough to trust that
         const count = cuPackagesCount(rigId);
@@ -2848,16 +2858,17 @@ function cuCompInfoHtml(rig, comp) {
     const info = cuRigInfo[rig.id] || {};
     const job = (cuJobs[rig.id] || {})[comp];
     const v = cuCompVersion(rig.id, comp);
-    const latest = cuCompLatest(rig.id, comp);
+    const picked = comp === 'drivers' ? (cuDriverPick[rig.id] || '') : '';
+    const latest = picked || cuCompLatest(rig.id, comp);
     const what = comp === 'panel' ? 'Dashboard version on this rig'
         : comp === 'drivers' ? 'NVIDIA driver version on this rig'
         : 'Hive OS package version on this rig';
-    const outdated = v && latest && verCompare(v, latest) < 0;
+    const outdated = v && latest && (picked ? picked !== v : verCompare(v, latest) < 0);
     const badge = v
         ? '<span class="badge ' + (outdated
             ? 'bg-warning-glow border border-warning text-warning'
             : 'bg-success-glow border border-success text-success') +
-          ' cu-version-badge" title="' + escapeHtml(what + (latest ? ' — latest available: v' + latest : ' — latest unknown')) +
+          ' cu-version-badge" title="' + escapeHtml(what + (cuCompLatest(rig.id, comp) ? ' — latest available: v' + cuCompLatest(rig.id, comp) : ' — latest unknown')) +
           '">v' + escapeHtml(v) + '</span>'
         : '<span class="badge bg-secondary-subtle text-secondary-emphasis cu-version-badge" title="' +
           escapeHtml(info.err || (what + ' — unknown')) + '">—</span>';
@@ -2878,6 +2889,10 @@ function cuCompInfoHtml(rig, comp) {
         tail = '<i class="bi bi-plug me-1"></i>error';
         cls = 'text-danger';
         var failTitle = ' title="' + escapeHtml(job.err) + '"';
+    } else if (picked) {
+        tail = '<span title="Version picked in the driver list — press Update to install it">\u2192 v' +
+            escapeHtml(picked) + '</span>';
+        cls = 'text-info fw-semibold';
     } else if (outdated) {
         // short "→ vX" tail (details in the tooltip + Updates column) so the
         // fixed-width version columns hold it without clipping at any state
@@ -2889,9 +2904,117 @@ function cuCompInfoHtml(rig, comp) {
         tail = '<span title="Up to date"><i class="bi bi-check-circle-fill me-1"></i>up to date</span>';
         cls = 'text-success';
     } // v==='' : badge already explains (no NVIDIA GPU / unknown)
+    // Driver picker: a small chevron next to the version — opens the list of
+    // versions and lets the user pick the exact one for the next update run.
+    let pickBtn = '';
+    if (comp === 'drivers' && !(job && job.running) && (rig.is_self || rig.online) && !cuBusy) {
+        pickBtn = '<button type="button" class="btn btn-link btn-sm p-0 ms-1 text-decoration-none lh-1 cu-driver-pick-btn" ' +
+            'title="Choose a specific driver version for this rig" ' +
+            'onclick="cuOpenDriverPicker(event, \'' + escapeHtml(rig.id) + '\')">' +
+            '<i class="bi bi-chevron-down small"></i></button>';
+    }
     return '<span class="d-inline-flex align-items-center gap-2 text-nowrap">' + badge +
         (tail ? ' <span class="small ' + cls + '"' + (typeof failTitle !== 'undefined' ? failTitle : '') + '>' +
-            tail + '</span>' : '') + '</span>';
+            tail + '</span>' : '') + pickBtn + '</span>';
+}
+
+// ----- driver version picker (Updates tab, drivers column) ------------------
+// One list of versions (the self rig's view of the Hive collection + NVIDIA
+// archive) is shared by all rows; picking a version for a rig overrides the
+// automatic 'latest' target and ticks the rig's drivers checkbox. The list
+// is cached for 10 minutes; failed loads are not cached (next open retries).
+async function cuOpenDriverPicker(ev, rigId) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    cuDriverListRig = rigId;
+    const rig = ((clusterData && clusterData.rigs) || []).find(r => r.id === rigId);
+    document.getElementById('cuDriverModalRig').textContent = rig ? (rig.name || rig.id) : rigId;
+    document.getElementById('cuDriverSearch').value = '';
+    await cuLoadDriverList();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('cuDriverModal')).show();
+}
+
+async function cuLoadDriverList(force) {
+    if (!force && cuDriverList && Date.now() - cuDriverList.ts < 600000) {
+        renderCuDriverRows();
+        return;
+    }
+    cuDriverList = null;
+    cuDriverListLoading = true;
+    renderCuDriverRows();
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 45000);
+        const res = await fetch('/api/update/drivers/list', { signal: ctrl.signal });
+        clearTimeout(timer);
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            cuDriverList = { items: data.items || [], ts: Date.now() };
+        }
+    } catch (e) { /* archives unreachable — error state is rendered, not cached */ }
+    cuDriverListLoading = false;
+    renderCuDriverRows();
+}
+
+function renderCuDriverRows() {
+    const host = document.getElementById('cuDriverList');
+    if (!host) return;
+    if (cuDriverListLoading) {
+        host.innerHTML = '<div class="text-center text-muted py-4">' +
+            '<i class="bi bi-arrow-repeat cu-status-spin me-1"></i>Loading versions from the driver archives...</div>';
+        return;
+    }
+    if (!cuDriverList) {
+        host.innerHTML = '<div class="text-center text-danger py-4">Could not load the version list ' +
+            '(driver archives unreachable). Close and reopen to retry.</div>';
+        return;
+    }
+    const filter = (document.getElementById('cuDriverSearch').value || '').trim();
+    let items = cuDriverList.items || [];
+    if (filter) items = items.filter(it => (it.v || '').indexOf(filter) !== -1);
+    if (!items.length) {
+        host.innerHTML = '<div class="text-center text-muted py-4">' +
+            (filter ? 'No versions match "' + escapeHtml(filter) + '"' : 'No versions available') + '</div>';
+        return;
+    }
+    const rigId = cuDriverListRig;
+    const installed = rigId ? cuCompVersion(rigId, 'drivers') : '';
+    const newest = items[0].v;
+    host.innerHTML = items.map(it =>
+        '<button type="button" class="list-group-item list-group-item-action d-flex align-items-center justify-content-between py-1 px-3" ' +
+        'onclick="cuPickDriverVersion(\'' + it.v + '\')">' +
+        '<span class="font-monospace">v' + escapeHtml(it.v) + '</span>' +
+        '<span class="d-flex gap-1">' +
+        (it.v === installed ? '<span class="badge bg-success-glow border border-success text-success small">installed</span>' : '') +
+        (it.v === newest ? '<span class="badge bg-warning-glow border border-warning text-warning small">latest</span>' : '') +
+        (it.hive ? '<span class="badge bg-info-subtle border border-info text-info small" ' +
+            'title="Hosted by Hive — smaller no-compat32 package">hive</span>' : '') +
+        '</span></button>').join('');
+}
+
+function cuPickDriverVersion(v) {
+    const rigId = cuDriverListRig;
+    if (!rigId) return;
+    const rig = ((clusterData && clusterData.rigs) || []).find(r => r.id === rigId);
+    const name = rig ? (rig.name || rig.id) : rigId;
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('cuDriverModal')).hide();
+    const installed = cuCompVersion(rigId, 'drivers');
+    if (installed && v === installed) {
+        delete cuDriverPick[rigId];
+        showToast('v' + v + ' is already installed on ' + name + '.', true);
+        renderCuRows();
+        return;
+    }
+    cuDriverPick[rigId] = v;
+    if (rig && (rig.is_self || rig.online)) cuChecked.add(cuPair(rigId, 'drivers'));
+    renderCuRows();
+    showToast('Driver v' + v + ' will be installed on ' + name + ' — press Update to run.', true);
+}
+
+function cuClearDriverPick() {
+    if (cuDriverListRig) delete cuDriverPick[cuDriverListRig];
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('cuDriverModal')).hide();
+    renderCuRows();
 }
 
 // Packages cell: there is no version to show — the badge carries the number
@@ -2966,6 +3089,7 @@ function cuRowStatusHtml(rig) {
     // idle: summarize what could be updated on this rig
     const outdated = CU_COMPONENTS.filter(c => {
         if (c === 'packages') return (cuPackagesCount(rig.id) || 0) > 0;
+        if (c === 'drivers' && cuDriverPick[rig.id]) return cuDriverPick[rig.id] !== cuCompVersion(rig.id, c);
         const v = cuCompVersion(rig.id, c), latest = cuCompLatest(rig.id, c);
         return v && latest && verCompare(v, latest) < 0;
     });
@@ -3128,11 +3252,14 @@ function cuPaintBanner() {
 async function cuStartJob(rig, comp, password) {
     const url = rig.is_self ? '/api/update/pull'
         : '/api/remote/' + encodeURIComponent(rig.id) + '/api/update/pull';
+    // drivers: a version picked in the list overrides the automatic 'latest'
+    const version = comp === 'drivers' ? (cuDriverPick[rig.id] || '') : '';
     try {
         const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-            body: JSON.stringify({ password: password, component: comp })
+            body: JSON.stringify(version ? { password: password, component: comp, version: version }
+                                         : { password: password, component: comp })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) {
@@ -3269,13 +3396,18 @@ async function runClusterUpdate() {
     const hasHiveos = Object.values(plan).some(cs => cs.includes('hiveos'));
     const hasPanel = Object.values(plan).some(cs => cs.includes('panel'));
     const hasPackages = Object.values(plan).some(cs => cs.includes('packages'));
+    // explicit driver picks travel in the confirmation so the run is verifiable
+    const driverTargets = Object.keys(plan)
+        .filter(id => plan[id].includes('drivers') && cuDriverPick[id])
+        .map(id => (rigById[id].name || id) + ' \u2192 v' + cuDriverPick[id]);
     let warn = '';
     if (hasDrivers) warn += ' Driver updates pause mining on each rig for 10-20 minutes — do not reboot the rigs meanwhile.';
     if (hasHiveos) warn += ' Hive OS upgrade runs apt over several minutes — reboot rigs afterwards if the kernel was updated.';
     if (hasPackages) warn += ' Package updates run apt upgrade — system services may be restarted and a new kernel may be installed (reboot the rigs afterwards).';
     if (hasPanel) warn += ' Panel updates restart the dashboards (miners are not affected).';
     if (hasPanel && (hasDrivers || hasHiveos || hasPackages)) warn += ' Panel pulls start only after all driver/Hive OS/package jobs finish.';
-    const msg = 'Start updates on ' + Object.keys(plan).length + ' rig(s): ' + planNames + skippedNote + '.' + warn;
+    const msg = 'Start updates on ' + Object.keys(plan).length + ' rig(s): ' + planNames + skippedNote + '.' +
+        (driverTargets.length ? ' Driver targets: ' + driverTargets.join(', ') + '.' : '') + warn;
     if (!confirm(msg)) return;
 
     cuBusy = true;
@@ -3337,6 +3469,7 @@ async function runClusterUpdate() {
 function finishCount(okCount, failCount, total) {
     cuBusy = false;
     cuRunPlan = {};
+    cuDriverPick = {}; // picks were consumed by this run
     document.getElementById('cuPassword').value = '';
     cuChecked.clear();
     cuSetBanner('');

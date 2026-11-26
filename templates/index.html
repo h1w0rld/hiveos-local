@@ -1147,7 +1147,7 @@
                                         <th class="text-center align-middle cu-check-col" title="Select all rigs for driver update">
                                             <input type="checkbox" class="form-check-input m-0" id="cuAllDrivers">
                                         </th>
-                                        <th title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically">GPU Drivers</th>
+                                        <th title="NVIDIA GPU drivers via nvidia-driver-update — the miner pauses and restarts automatically. Pick a specific version with the ▾ button in a version cell.">GPU Drivers</th>
                                         <th class="text-center align-middle cu-check-col" title="Select all rigs for Hive OS upgrade">
                                             <input type="checkbox" class="form-check-input m-0" id="cuAllHiveos">
                                         </th>
@@ -1174,6 +1174,29 @@
                     </div>
                 </div>
             </div>
+
+    <!-- Driver version picker (Updates tab, GPU Drivers column) -->
+    <div class="modal fade" id="cuDriverModal" tabindex="-1" aria-labelledby="cuDriverModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content glass-modal border border-secondary-subtle">
+                <div class="modal-header py-2">
+                    <h5 class="modal-title fw-bold" id="cuDriverModalLabel">
+                        <i class="bi bi-gpu-card text-warning me-2"></i>Driver version — <span id="cuDriverModalRig"></span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body py-2">
+                    <input type="text" id="cuDriverSearch" class="form-control form-control-sm bg-dark-input mb-2" placeholder="Filter versions..." autocomplete="off">
+                    <div id="cuDriverList" class="list-group" style="max-height: 55vh; overflow-y: auto;"></div>
+                    <div class="small text-muted mt-2">hive = smaller package from the Hive collection (no 32-bit/Wine files); the rest download from NVIDIA. The rig falls back to NVIDIA automatically when Hive has no such version.</div>
+                </div>
+                <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="cuClearDriverPick()" title="Remove the picked version from this rig">Clear choice</button>
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
             <!-- Statistics tab content (HiveOS worker Stats parity) -->
             <div id="statsTabContainer" class="d-none">
