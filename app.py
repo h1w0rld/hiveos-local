@@ -3493,7 +3493,26 @@ def _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts)
     plug_state, _age, err = _ha_fan_power_state_for_entity(conf, plug)
     ok = False
     if plug_state == "off":
-        # The plug is already cut (earlier self-cut or a manual off): restore power
+        our_off = float(rec.get("our_off_at") or rig.get("pc_off_at") or 0)
+        if not (our_off and now - our_off <= HA_PC_OUR_OFF_TTL):
+            # A human cut this plug. Never power it back on, and drop the stale
+            # request: the automation is hands off until a human turns it ON.
+            rec["manual_off"] = True
+            rec["last_result"] = "plug OFF (manual) - hands off"
+            rec["down_since"] = None
+            rig["pc_request"] = None
+            rig["updated_at"] = int(now)
+            try:
+                save_cluster_state(state)
+            except Exception:
+                pass
+            _ha_pc_log("%s plug is OFF - manual stop, requested cycle dropped" % name)
+            record_metrics_event("info",
+                "HA powercycle: plug for %s is OFF - treated as a manual stop,"
+                " requested cycle dropped" % name)
+            _ha_save_state(st)
+            return True
+        # Our own earlier cut that never got its turn_on: restore power
         ok, err_on = _ha_service(conf, "turn_on", plug)
         if ok:
             rec["last_result"] = "request: plug was OFF - power restored"
@@ -3505,6 +3524,16 @@ def _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts)
                 "HA powercycle %s (requested): turn OFF failed (%s)" % (name, err_off))
             _ha_save_state(st)
             return True
+        # Same marker as the autonomous path: if this panel dies during the dwell
+        # the plug is left OFF and only this proves the cut was ours (a manual OFF
+        # must never be powered back on automatically).
+        rec["our_off_at"] = int(now)
+        rig["pc_off_at"] = int(now)
+        rig["updated_at"] = int(now)
+        try:
+            save_cluster_state(state)
+        except Exception:
+            pass
         time.sleep(HA_POWER_DWELL)
         # Verify it really went off, then power back up
         plug_state, _a2, _e2 = _ha_fan_power_state_for_entity(conf, plug)
@@ -3517,6 +3546,8 @@ def _ha_pc_delegated_cycle(conf, state, rig, rec, st, now, panels, name, req_ts)
             rec["last_result"] = "request: power cycled (off %ds -> on)" % HA_POWER_DWELL
     if ok:
         # Served: drop the request so no panel repeats it
+        rec.pop("our_off_at", None)
+        rig["pc_off_at"] = None
         rig["pc_request"] = None
         rig["pc_last_cycle"] = int(now)
         rig["updated_at"] = int(now)
@@ -6166,6 +6197,12 @@ RIG_ENTRY_FIELDS = ["id", "name", "host_label", "is_self", "password", "accesses
                     # HA_PC_LEADER_GRACE, otherwise the panels take turns and
                     # cycle a rig every ~15 min (RIG6 22 Nov)
                     "pc_last_cycle",
+                    # marker written right BEFORE our own turn_off and cleared right
+                    # after turn_on: if the panel dies during the dwell (a deploy!)
+                    # the plug stays OFF and this is the only proof the cut was OURS.
+                    # Without it the "manual OFF = hands off" rule would leave the
+                    # rig dark forever (pc_off_at, epoch seconds)
+                    "pc_off_at",
                     # delegated self-powercycle: a rig that decides to power cycle
                     # ITSELF writes {"ts": epoch, "reason": "..."} here and a PEER
                     # panel runs the off->on sequence. A rig must never cut its own
@@ -10916,7 +10953,12 @@ HA_PC_EXHAUSTED_GAP = 21600 # after "physical attention": retry only every 6 h
 HA_PC_LEADER_GRACE = 900    # if the elected panel is silent this long, the next one acts
 HA_PC_TICK_WARN = 10        # tick slower than this -> write into the persistent log
 HA_PC_REQUEST_TTL = 900     # a self-powercycle request must be served by a peer within this
-HA_PC_OFF_RESTORE = 1800    # plug found OFF + rig dark this long -> switch the power back on
+HA_PC_OUR_OFF_TTL = 900     # a plug found OFF right after OUR OWN turn_off (panel restarted during
+                            # the dwell) is our interrupted cycle -> restore power. Every other OFF
+                            # plug is a HUMAN decision: the automation never powers it back on and
+                            # never cycles it until a human turns it ON again (user, 27 Nov:
+                            # "должно учитываться когда я вручную выключил розетку, чтобы этот риг
+                            # никто не дергал и не пытался включать")
 
 HA_FAN_INTERVAL = 10        # every panel re-decides and refreshes its vote 6x per minute -
                             # the quorum follows a changed decision within ~20 s and the
@@ -11699,6 +11741,77 @@ def _ha_powercycle_tick():
         _HA_PC_TICK_LOCK.release()
 
 
+def _ha_pc_plug_gate(conf, state, rig, rec, st, now, name):
+    """What does the smart plug's state mean for the powercycle automation?
+
+    A plug cycle ALWAYS ends with ON, so an OFF plug was left off by someone.
+    Two very different cases:
+      * OUR OWN interrupted cycle - the panel died between turn_off and turn_on
+        (a deploy during the dwell). Only our marker (rec.our_off_at written
+        right before the cut, or the shared rig.pc_off_at) proves it -> restore.
+      * A HUMAN cut it - a deliberate stop. The user (27 Nov): "должно
+        учитываться когда я вручную выключил розетку, чтобы этот риг никто не
+        дергал и не пытался включать". We never power it back on, never cycle
+        it, never escalate - hands off until a human switches it ON again.
+
+    Returns "on" (safe to act), "hands_off", "restored" or "skip" (unreadable).
+    """
+    plug_state, _age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
+    st["last_probe"] = {"ts": int(now), "ok": bool(plug_state), "err": err or ""}
+    if plug_state == "on":
+        rec.pop("off_since", None)
+        return "on"
+    if plug_state == "off":
+        our_off = float(rec.get("our_off_at") or rig.get("pc_off_at") or 0)
+        if our_off and now - our_off <= HA_PC_OUR_OFF_TTL:
+            ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
+            rec["last_cycle"] = int(now)
+            rig["pc_last_cycle"] = int(now)
+            rig["pc_off_at"] = None
+            rec.pop("our_off_at", None)
+            rig["updated_at"] = int(now)
+            try:
+                save_cluster_state(state)
+            except Exception:
+                pass
+            if ok_on:
+                rec["last_result"] = "own interrupted cycle - power restored"
+                rec["down_since"] = None
+                rec.pop("off_since", None)
+                rec.pop("warned", None)
+                record_metrics_event("warning",
+                    "HA: plug for %s was left OFF by our own interrupted cycle"
+                    " - power restored" % name)
+                _ha_pc_log("%s plug was left OFF by our own interrupted cycle"
+                           " - power restored" % name)
+                return "restored"
+            rec["last_result"] = "own interrupted cycle - turn ON failed (%s)" % err_on
+            _ha_pc_log("%s plug was left OFF by our own interrupted cycle"
+                       " - turn ON failed (%s)" % (name, err_on))
+            return "skip"
+        if not rec.get("manual_off"):
+            rec["manual_off"] = True
+            rec["off_since"] = int(now)
+            _ha_pc_log("%s plug is OFF - treated as a MANUAL stop, automation hands"
+                       " off until a human turns it ON" % name)
+            record_metrics_event("info",
+                "HA powercycle: plug for %s is OFF - treated as a manual stop:"
+                " no automatic power-on and no plug cycles until it is switched"
+                " back ON by hand" % name)
+        rec["last_result"] = "plug OFF (manual) - hands off"
+        rec["down_since"] = None      # never arm a window from a manual stop
+        rec.pop("warned", None)
+        return "hands_off"
+    rec["last_result"] = "plug not on (%s%s) - skipped" % (plug_state or "?",
+                         (": " + err) if err else "")
+    rec["down_since"] = None  # restart the window: next tick re-awaits 5 min
+    if not rec.get("warned"):
+        rec["warned"] = True
+        record_metrics_event("warning",
+            "HA powercycle skipped for %s: smart plug is not ON%s" % (name, (" (%s)" % err) if err else ""))
+    return "skip"
+
+
 def _ha_powercycle_tick_body(conf):
     state, cache = _ha_cluster_rigs()
     _ha_pull_layout(conf, state)   # rooms + plugs are pulled from Home Assistant
@@ -11739,6 +11852,49 @@ def _ha_powercycle_tick_body(conf):
             rec.pop("down_since", None)
             continue
         name = rig.get("name") or rid
+        # Manual stop / resume. While the plug is OFF by hand this rig is out of
+        # scope for the automation: no power-on, no cycles, no escalation, no
+        # delegated requests (a human decision outranks everything we do). The
+        # moment a human switches the plug back ON the rig is back in service with
+        # a clean ladder and a boot grace - exactly "он работает как должен и при
+        # необходимости перезагружается если должен" (user, 27 Nov).
+        if rec.get("manual_off"):
+            p_state, _pa, _pe = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
+            if p_state != "on":
+                rec["last_result"] = "plug OFF (manual) - hands off"
+                rec["down_since"] = None
+                _ha_save_state(st)
+                continue
+            rec.pop("manual_off", None)
+            rec.pop("off_since", None)
+            rec.pop("warned", None)
+            rec.pop("attention_noted", None)
+            rec["down_since"] = None
+            # A human just powered the rig: give it the same trust window as our
+            # own cycle (HA_PC_COOLDOWN) so a slow POST/GPU init is not cut short.
+            rec["last_cycle"] = int(now)
+            rec["last_result"] = "plug back ON (manual) - automation resumed"
+            rig["pc_last_cycle"] = int(now)
+            rig["pc_fail"] = 0
+            rig["updated_at"] = int(now)
+            try:
+                save_cluster_state(state)
+            except Exception:
+                pass
+            _ha_pc_log("%s plug is ON again (manual) - automation resumed, ladder reset"
+                       % name)
+            record_metrics_event("info",
+                "HA powercycle: plug for %s was switched back ON by hand - automation"
+                " resumed (escalation ladder reset, %d min boot grace)"
+                % (name, HA_PC_COOLDOWN // 60))
+            _ha_save_state(st)
+            continue
+        # A dead rig whose plug is OFF by hand: note it right away instead of
+        # waiting for the down window, so no panel can ever power it back on.
+        if reach.get(rid) is False:
+            if _ha_pc_plug_gate(conf, state, rig, rec, st, now, name) != "on":
+                _ha_save_state(st)
+                continue
         # A rig can ask a peer to power cycle it (self-heal: GPU count deficit /
         # hung cards). Serve the request before the down-window logic: the rig is
         # still ALIVE when it asks - it must not cut its own plug.
@@ -11818,55 +11974,9 @@ def _ha_powercycle_tick_body(conf):
             _ha_save_state(st)
             continue
         down_min = int((now - int(rec.get("down_since") or 0)) / 60)
-        # Final gate right before acting: read the plug from HA and confirm it
-        # is ON. A plug cycle ALWAYS ends with ON, so an OFF plug was left off by
-        # someone: either a human or a rig that tried to cut its own power and
-        # could never send the turn-on. Never blind-cycle in that state, but do
-        # restore power once the outage is real (that failure mode left RIG2 dark
-        # for hours on 8 Nov 2026).
-        plug_state, age, err = _ha_fan_power_state_for_entity(conf, rig.get("ha_plug"))
-        st["last_probe"] = {"ts": int(now), "ok": bool(plug_state), "err": err or ""}
-        if plug_state == "on":
-            rec.pop("off_since", None)
-        else:
-            if plug_state == "off":
-                if not rec.get("off_since"):
-                    rec["off_since"] = int(now)
-                waited = max(int(now - int(rec.get("down_since") or now)),
-                             int(now - int(rec["off_since"])))
-                if (waited >= HA_PC_OFF_RESTORE
-                        and now - float(rec.get("last_cycle") or 0) >= HA_POWER_GAP):
-                    ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
-                    rec["last_cycle"] = int(now)
-                    rig["pc_last_cycle"] = int(now)
-                    rig["updated_at"] = int(now)
-                    try:
-                        save_cluster_state(state)
-                    except Exception:
-                        pass
-                    if ok_on:
-                        rec["last_result"] = "plug was OFF - power restored"
-                        rec["down_since"] = None
-                        rec.pop("off_since", None)
-                        rec.pop("warned", None)
-                        record_metrics_event("warning",
-                            "HA: plug for %s was OFF while the rig stayed dark for %d min"
-                            " - power restored" % (name, waited // 60))
-                        _ha_pc_log("%s plug was OFF for %d min - turned it ON"
-                                   % (name, waited // 60))
-                        _ha_save_state(st)
-                        continue
-                    rec["last_result"] = "plug was OFF - turn ON failed (%s)" % err_on
-                    _ha_pc_log("%s plug was OFF - turn ON failed (%s)" % (name, err_on))
-                    _ha_save_state(st)
-                    continue
-            rec["last_result"] = "plug not on (%s%s) - skipped" % (plug_state or "?",
-                                 (": " + err) if err else "")
-            rec["down_since"] = None  # restart the window: next tick re-awaits 5 min
-            if not rec.get("warned"):
-                rec["warned"] = True
-                record_metrics_event("warning",
-                    "HA powercycle skipped for %s: smart plug is not ON%s" % (name, (" (%s)" % err) if err else ""))
+        # Final gate right before acting: re-read the plug. Manual OFF (a human
+        # cut the power) always wins over our intent to cycle.
+        if _ha_pc_plug_gate(conf, state, rig, rec, st, now, name) != "on":
             _ha_save_state(st)
             continue
         # One actor at a time: the lowest-id ALIVE panel holds the right to
@@ -11897,7 +12007,9 @@ def _ha_powercycle_tick_body(conf):
         _ha_pc_log("%s cycle attempt %d (dwell %ds, down %d min, leader %s)"
                    % (name, fc, dwell, down_min, leader))
         rec["last_cycle"] = int(now)
+        rec["our_off_at"] = int(now)   # proof the next OFF state is OURS
         rig["pc_last_cycle"] = int(now)
+        rig["pc_off_at"] = int(now)
         rig["updated_at"] = int(now)
         try:
             save_cluster_state(state)
@@ -11920,6 +12032,13 @@ def _ha_powercycle_tick_body(conf):
                 time.sleep(5)
         ok_on, err_on = _ha_service(conf, "turn_on", rig.get("ha_plug"))
         if ok_on:
+            rec.pop("our_off_at", None)
+            rig["pc_off_at"] = None
+            rig["updated_at"] = int(now)
+            try:
+                save_cluster_state(state)
+            except Exception:
+                pass
             # Shared escalation ladder: the counter survives panel restarts and
             # syncs across the farm, so ANY acting panel walks the same ladder.
             if int(rig.get("pc_fail") or 0) != fc:
@@ -12400,14 +12519,20 @@ def api_ha():
 def _ha_public_full():
     pub = _ha_public()
     state, cache = _ha_cluster_rigs()
+    power = (_ha_load_state().get("power") or {})
     rigs = []
     for r in state.get("rigs", []):
+        rec = power.get(r.get("id")) or {}
         rigs.append({
             "id": r.get("id"), "name": r.get("name", r.get("id")),
             "is_self": r.get("id") == state.get("self_id"),
             "location": r.get("location", ""),
             "ha_plug": r.get("ha_plug", ""),
             "ha_enabled": bool(r.get("ha_enabled", True)),
+            # "plug OFF (manual) - hands off" / "waiting rate limit" / ...
+            "power_result": rec.get("last_result") or "",
+            # True while a human has the plug switched off: automation is paused
+            "manual_off": bool(rec.get("manual_off")),
             "online": bool(cache.get("rigs", {}).get(r.get("id"), {}).get("online")) if not r["id"] == state["self_id"] else True,
         })
     pub["rigs"] = rigs
