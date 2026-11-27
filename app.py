@@ -11322,6 +11322,42 @@ def _ha_reachable(rig):
         t.join(deadline)
     return any(results)
 
+HA_PC_TELEMETRY_FRESH = 600   # s: a stats entry this new proves the rig runs
+
+
+def _ha_alive_strong(rig, cache=None):
+    """Liveness evidence strong enough to clear the SHARED escalation ladder.
+
+    A bare TCP answer is not: behind repeater#2 a NAT shadow answers RST for a
+    dead rig's LAN IP. RIG7 (the lowest-id 'leader') kept seeing dead RIG3 as
+    alive on 27 Nov, cleared pc_fail back to 0 on every tick, so the ladder
+    never reached 3 and the whole farm cut RIG3's plug every ~15 min for hours.
+
+    Strong = the rig itself produced telemetry recently, or an SSH command
+    actually executed on it. Only consulted while pc_fail > 0 (an incident),
+    so the extra probes cost nothing in normal operation."""
+    rid = rig.get("id")
+    try:
+        entry = ((cache or {}).get("rigs") or {}).get(rid) or {}
+        ts = int(entry.get("fetched_at") or 0)
+        if ts and (time.time() - ts) <= HA_PC_TELEMETRY_FRESH and entry.get("online"):
+            return True
+    except Exception:
+        pass
+    try:
+        accesses = [a for a in _ordered_rig_accesses(rig) if a.get("host")]
+    except Exception:
+        accesses = []
+    for a in accesses:
+        try:
+            ok, _out, _err = run_ssh_command(a, "echo ok", timeout=HA_POWER_TCP_TIMEOUT)
+        except Exception:
+            ok = False
+        if ok:
+            return True
+    return False
+
+
 def _ha_is_powercycle_rig(rig):
     """К (stokehole) and Д (house) rigs may be power cycled; a rig in a lived-in
     house (location 'none'/empty) is NEVER touched - a night reboot there
@@ -11634,7 +11670,11 @@ def _ha_pc_log(msg):
         except OSError:
             pass
         with open(path, "a") as f:
-            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ"), msg))
+            # real UTC: time.strftime() renders LOCAL time, and the rigs run at
+            # +07/+02, so every "Z" line used to be 7 h in the future (RIG3
+            # incident 27 Nov was first read as a 04:00 UTC cycle).
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                              time.gmtime()), msg))
     except Exception:
         pass
 
@@ -11734,10 +11774,21 @@ def _ha_powercycle_tick_body(conf):
                 rec.pop("last_result", None)
                 rec.pop("attention_noted", None)
                 if pc_fail:
-                    rig["pc_fail"] = 0                    # reset the shared escalation ladder
-                    rig["updated_at"] = int(now)
-                    save_cluster_state(state)
-                    _ha_pc_log("%s escalation ladder reset (pc_fail=0)" % name)
+                    if _ha_alive_strong(rig, cache):
+                        rig["pc_fail"] = 0                # reset the shared escalation ladder
+                        rig["updated_at"] = int(now)
+                        save_cluster_state(state)
+                        _ha_pc_log("%s escalation ladder reset (pc_fail=0)" % name)
+                    else:
+                        # TCP answered but the machine itself shows no sign of
+                        # life (no fresh telemetry, no SSH): a NAT shadow on a
+                        # shared LAN answers RST for a dead IP. Do not let that
+                        # blind view wipe the farm-wide ladder - it is what kept
+                        # RIG3's plug cycling every ~15 min for 6 hours.
+                        rec["last_result"] = "reachable (TCP only) - ladder kept at %d" % pc_fail
+                        _ha_pc_log("%s answers TCP but has no strong liveness"
+                                   " (no telemetry/SSH) - escalation ladder kept at %d"
+                                   % (name, pc_fail))
                 _ha_save_state(st)
             continue
         if not rec.get("down_since"):
@@ -11757,7 +11808,12 @@ def _ha_powercycle_tick_body(conf):
         if now - int(rec.get("down_since") or 0) < HA_POWER_DOWN:
             continue
         gap = HA_PC_EXHAUSTED_GAP if int(rig.get("pc_fail") or 0) >= HA_PC_ESCALATE_AFTER else HA_POWER_GAP
-        if now - float(rec.get("last_cycle") or 0) < gap:
+        # Farm-wide pacing: the shared pc_last_cycle counts too, otherwise every
+        # panel's own (empty) last_cycle lets the next one take its turn and the
+        # plug gets cut every ~15 min by rotation (RIG3, 27 Nov: 27 cycles in 6 h).
+        last_cycle_ts = max(float(rec.get("last_cycle") or 0),
+                            float(rig.get("pc_last_cycle") or 0))
+        if now - last_cycle_ts < gap:
             rec["last_result"] = "waiting rate limit"
             _ha_save_state(st)
             continue
